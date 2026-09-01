@@ -1,0 +1,30 @@
+{
+  "name": "wiseman-v2-gateway",
+  "image": "registry.odin.home:5000/wiseman-v2-gateway",
+  "tag": "REPLACED_BY_RELEASE",
+  "port": 8080,
+  "host": "",
+  "exposure": "internal",
+  "deploy_host": "thor",
+  "mem_mi": 512,
+  "storage_mi": 512,
+  "storage_mount_path": "/var/lib/wiseman",
+  "run_as_user": 10000,
+  "run_as_group": 10000,
+  "fs_group": 10000,
+  "health": "/healthz",
+  "metrics_path": "/metrics",
+  "secrets": ["wiseman-v2-gateway"],
+  "env": {
+    "TEMPORAL_ADDRESS": "temporal.midgard-system.svc.cluster.local:7233",
+    "TEMPORAL_TASK_QUEUE": "wiseman-v2",
+    "PHOENIX_OTLP_ENDPOINT": "http://otel-gateway.midgard-monitor.svc.cluster.local:4318/v1/traces",
+    "PHOENIX_PROJECT": "wiseman-v2",
+    "PHOENIX_PROMPT_HUB_URL": "http://phoenix.midgard-apps.svc.cluster.local:6006",
+    "WISEMAN_RUNNER_URL": "http://wiseman-v2-sandbox.midgard-apps.svc.cluster.local:8090",
+    "WISEMAN_RELAY_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1",
+    "OPENROUTER_URL": "https://openrouter.ai",
+    "WISEMAN_DISCORD_ALLOWLIST": "1360157904996536391",
+    "WISEMAN_ALLOW_PROFILE_EDITS": "0"
+  }
+}
