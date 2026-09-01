@@ -6,7 +6,7 @@
   "host": "",
   "exposure": "internal",
   "deploy_host": "thor",
-  "mem_mi": 1024,
+  "mem_mi": 512,
   "storage_mi": 4096,
   "storage_mount_path": "/workspaces",
   "run_as_user": 0,
