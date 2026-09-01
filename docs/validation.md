@@ -22,3 +22,21 @@ out because the Docker daemon is unavailable. Therefore live Discord gateway,
 Phoenix OTLP export, Temporal worker execution, OpenRouter billing, and the
 real Codex container remain unexercised. No production completion claim is made
 until those dependencies are available.
+
+## Deployment attempt: 2026-09-02
+
+- Commit `bf1b8e6` is now the local root revision.
+- Gateway and sandbox images both built successfully on Thor with
+  `mg-cli dev thor run`; the gateway build includes the pinned Codex CLI
+  bundle.
+- The committed gateway accepted raw Discord-shaped `MESSAGE_CREATE` payloads
+  over HTTP. Startup returned turn 1 with `👀,✅`; follow-up returned turn 2
+  with `👀,✅`.
+- Phoenix inspection for that run recorded `turn`, `context`, `grammar`,
+  `prompt`, `codex`, `delivery`, and `reaction` nodes for both traces. Startup
+  selected `parent-old,raw-start`; follow-up selected only
+  `raw-start,parent-new,raw-follow`.
+- Deployment did not proceed. The new Gitea repository cannot be created with
+  the managed token because it lacks `write:user`; Docker Desktop is also
+  unavailable locally. The old `hermes-discord-gateway` and
+  `hermes-discord-runner` deployments remain healthy and were not stopped.
