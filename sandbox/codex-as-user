@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${WISEMAN_EXEC_USER:-}" ]; then
+  exec runuser --preserve-environment -u "$WISEMAN_EXEC_USER" -- "$@"
+fi
+exec "$@"

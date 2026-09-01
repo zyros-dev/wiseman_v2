@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wiseman.discord_context.v2",
+  "type": "object",
+  "required": ["schema", "trigger", "messages", "reply_ancestors", "surrounding", "selected_ids", "raw_count", "startup"],
+  "properties": {
+    "schema": {"const": "wiseman.discord_context.v2"},
+    "trigger": {"$ref": "#/$defs/message"},
+    "messages": {"type": "array", "maxItems": 113, "items": {"$ref": "#/$defs/message"}},
+    "reply_ancestors": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/message"}},
+    "surrounding": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/message"}},
+    "selected_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "raw_count": {"type": "integer", "minimum": 0, "maximum": 100},
+    "startup": {"type": "boolean"}
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["id", "author_id", "author_name", "bot", "content", "timestamp", "channel_id", "thread_id", "reply_to", "mentions", "attachments"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "author_id": {"type": "string", "minLength": 1},
+        "author_name": {"type": "string"},
+        "bot": {"type": "boolean"},
+        "content": {"type": "string"},
+        "timestamp": {"type": "string"},
+        "channel_id": {"type": "string", "minLength": 1},
+        "thread_id": {"type": ["string", "null"]},
+        "reply_to": {"type": ["string", "null"]},
+        "mentions": {"type": "array", "items": {"type": "string"}},
+        "attachments": {"type": "array", "items": {"type": "object"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

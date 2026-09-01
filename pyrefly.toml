@@ -1,0 +1,2 @@
+project-includes = ["src/**/*.py", "tests/**/*.py"]
+search-path = ["src", "sandbox/src"]
