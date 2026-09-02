@@ -399,7 +399,7 @@ async def _describe_images(messages: list[dict[str, Any]], question: str = "") -
                 images.append({"id": attachment_id, "url": url})
                 seen.add(attachment_id)
     if not images:
-        return {"text": "", "attachments": []}
+        return {"text": "", "attachments": [], "question": question or None}
     model = os.getenv("WISEMAN_VISION_MODEL", "z-ai/glm-5.3-flash")
     key = os.getenv("OPENROUTER_API_KEY", "")
     if not key:
@@ -407,6 +407,7 @@ async def _describe_images(messages: list[dict[str, Any]], question: str = "") -
             "text": "[Image description unavailable: vision provider is not configured.]",
             "model": model,
             "attachments": [item["id"] for item in images],
+            "question": question or None,
         }
     content: list[dict[str, Any]] = [
         {
@@ -441,12 +442,14 @@ async def _describe_images(messages: list[dict[str, Any]], question: str = "") -
             "usage": usage,
             "cost": usage.get("cost") if isinstance(usage, dict) else data.get("cost"),
             "attachments": [item["id"] for item in images],
+            "question": question or None,
         }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         return {
             "text": f"[Image description unavailable: {type(exc).__name__}].",
             "model": model,
             "attachments": [item["id"] for item in images],
+            "question": question or None,
         }
 
 
@@ -1033,7 +1036,7 @@ def create_app(  # noqa: C901, PLR0915
         url = str(payload.get("url") or "")
         if not url.startswith(("https://", "http://")):
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
-        attachment_id = str(payload.get("attachment_id") or url)
+        attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
         result = await _describe_images(
             [{"attachments": [{"id": attachment_id, "content_type": "image/*", "url": url}]}],
             str(payload.get("question") or "")[:2_000],

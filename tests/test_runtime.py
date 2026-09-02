@@ -161,6 +161,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     )
     assert result["text"] == "Three black office chairs."
     assert result["attachments"] == ["image-1"]
+    assert result["question"] == "How many chairs are visible?"
     assert requests[0]["json"]["model"] == "z-ai/glm-5.3-flash"
     assert "How many chairs" in requests[0]["json"]["messages"][0]["content"][0]["text"]
     assert (
@@ -177,6 +178,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
         ]
     )
     assert generic["text"] == result["text"]
+    assert generic["question"] is None
     assert (
         "Please describe this image generally"
         in requests[1]["json"]["messages"][0]["content"][0]["text"]
