@@ -45,7 +45,9 @@ processing reaction -> context -> grammar -> workspace progress -> Codex -> deli
 The live Discord adapter creates a thread for a parent-channel mention,
 collects bounded history, emits a startup banner, sends progress messages, and
 then sends the answer. It adds `👀` once and then `✅` or `❌`; it never removes
-`👀` and does not duplicate terminal reactions.
+`👀` and does not duplicate terminal reactions. The deployment allowlist is
+guild-based and is enforced for both parent channels and managed threads;
+messages from DMs or other guilds are ignored before context collection.
 
 ## Workspace
 

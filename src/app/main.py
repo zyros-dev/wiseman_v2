@@ -674,7 +674,8 @@ class Gateway(discord.Client):
         if message.author.bot or self.user not in message.mentions:
             return
         channel = message.channel
-        if not isinstance(channel, discord.Thread) and channel.id not in self.allowlist:
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        if self.allowlist and guild_id not in self.allowlist:
             return
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"

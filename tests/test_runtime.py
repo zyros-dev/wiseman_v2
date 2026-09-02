@@ -422,6 +422,10 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:  # noqa: C901
+    class Guild:
+        def __init__(self, gid: int) -> None:
+            self.id = gid
+
     class User:
         id, name, bot = 7, "Nick", False
 
@@ -429,6 +433,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
         id, parent_id = 1, None
 
         def __init__(self) -> None:
+            self.guild = Guild(1)
             self.sent: list[str] = []
             self.thread: Thread | None = None
 
@@ -443,7 +448,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
         parent_id = 1
 
         def __init__(self, parent: Channel) -> None:
-            self.id, self.parent = 2, parent
+            self.id, self.parent, self.guild = 2, parent, parent.guild
             self.sent: list[str] = []
 
         async def history(self, **kwargs: object):
@@ -493,6 +498,12 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     assert parent.sent
     assert parent.thread is not None
     assert parent.thread.sent
+
+    rejected = Channel()
+    rejected.guild = Guild(2)
+    ignored = Message("ignored", rejected, "hello")
+    await bot.on_message(ignored)
+    assert "ignored" not in engine.states
 
 
 def test_replay_accepts_discord_message_json() -> None:
