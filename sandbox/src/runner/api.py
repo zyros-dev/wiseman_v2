@@ -21,6 +21,11 @@ from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+CODEX_TEXT_ONLY_OVERRIDES = (
+    "features.view_image=false",
+    "features.image_generation=false",
+)
+
 
 class Turn(BaseModel):
     thread_id: str = Field(min_length=1)
@@ -195,6 +200,7 @@ class CodexRunner:
                 self.codex[key] = AsyncCodex(
                     CodexConfig(
                         codex_bin=os.getenv("WISEMAN_CODEX_BIN") or None,
+                        config_overrides=CODEX_TEXT_ONLY_OVERRIDES,
                         cwd=str(path),
                         env=env,
                     )

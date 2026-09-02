@@ -29,7 +29,7 @@ from app.main import (
     normalize_event,
 )
 from app.temporal_runtime import TemporalError, TemporalRuntime, ThreadWorkflow, run_turn
-from runner.api import ApprovalMode, Sandbox, Workspace
+from runner.api import CODEX_TEXT_ONLY_OVERRIDES, ApprovalMode, Sandbox, Workspace
 from runner.api import create_app as runner_app
 
 
@@ -746,6 +746,7 @@ async def test_prompt_hub_reads_phoenix_latest_version(monkeypatch) -> None:
 
 def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     calls: list[dict[str, object]] = []
+    configs: list[Any] = []
 
     class Result:
         usage = None
@@ -761,7 +762,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
 
     class Codex:
         def __init__(self, config: object) -> None:
-            del config
+            configs.append(config)
             self.starts = 0
             self.resumes = 0
 
@@ -797,6 +798,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert calls[0]["model"] == "provider/model"
     assert calls[0]["model_provider"] == "wiseman-relay"
     assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
+    assert configs[0].config_overrides == CODEX_TEXT_ONLY_OVERRIDES
     assert (
         'base_url = "http://relay/v1"'
         in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()

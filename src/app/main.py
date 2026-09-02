@@ -242,6 +242,7 @@ THREAD_IDLE_SECONDS = 7200
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
 UPSTREAM_SERVER_ERROR = 500
+HTTP_NOT_FOUND = 404
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
@@ -1043,6 +1044,9 @@ def create_app(  # noqa: C901, PLR0915
                             retryable = (
                                 response.status_code in UPSTREAM_RETRY_STATUSES
                                 or response.status_code >= UPSTREAM_SERVER_ERROR
+                            ) and not (
+                                response.status_code == HTTP_NOT_FOUND
+                                and "No endpoints found that support image input" in detail
                             )
                             if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
                                 await asyncio.sleep(0.5 * (attempt + 1))
