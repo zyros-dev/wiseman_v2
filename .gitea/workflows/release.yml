@@ -33,11 +33,9 @@ jobs:
       - name: Validate prompt sources
         run: |
           set -eu
-          apk add --no-cache jq
           for name in startup-context followup-context; do
-            test "$(jq -r .schema "contracts/$name.json")" = "wiseman.context.grammar.v2"
-            test "$(jq -r .template "contracts/$name.json")" != "null"
-            test -n "$(jq -r .template "contracts/$name.json")"
+            grep -Fq '"schema": "wiseman.context.grammar.v2"' "contracts/$name.json"
+            grep -Fq '{{ messages | tojson }}' "contracts/$name.json"
           done
       - name: Publish deployment inputs to Midgard
         env:
