@@ -913,6 +913,7 @@ def test_managed_account_name_is_stable_without_touching_host_accounts(
     workspace.thread("discord-user", "thread")
     assert commands[0][0].endswith("groupadd")
     assert commands[1][0].endswith("useradd")
+    assert commands[1][commands[1].index("--shell") + 1] == "/bin/bash"
 
 
 @pytest.mark.asyncio
@@ -994,6 +995,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert calls[0]["model"] == "provider/model"
     assert calls[0]["model_provider"] == "wiseman-relay"
     assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
+    assert "sudo -n apt-get" in str(calls[0]["developer_instructions"])
     assert configs[0].config_overrides == CODEX_TEXT_ONLY_OVERRIDES
     assert (
         'base_url = "http://relay/v1"'
