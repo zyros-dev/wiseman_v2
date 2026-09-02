@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import PlainTextResponse
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 
@@ -202,7 +204,12 @@ class CodexRunner:
                     approval_mode=ApprovalMode.deny_all,
                     sandbox=Sandbox.full_access,
                     cwd=str(path),
-                    developer_instructions="Use shared/AGENTS.md and shared/memories.md.",
+                    developer_instructions=(
+                        "Use shared/AGENTS.md and shared/memories.md. "
+                        "For current or external facts, use available network tools. "
+                        "Never claim to have searched unless a command returned usable results; "
+                        "if a web command fails, say so plainly."
+                    ),
                     model=model,
                     model_provider=provider,
                 )
@@ -247,6 +254,10 @@ def create_app() -> FastAPI:  # noqa: C901
     @app.get("/healthz")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics() -> PlainTextResponse:
+        return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.on_event("startup")
     async def start_cleanup() -> None:
