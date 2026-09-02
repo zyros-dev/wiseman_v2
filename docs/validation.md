@@ -74,3 +74,15 @@ until those dependencies are available.
 - The image contract test verifies Discord image URLs are sent to
   `z-ai/glm-5.3-flash` as multimodal content and the returned description is
   available to Codex for both generic and question-directed requests.
+
+## Thread naming and idle cleanup: 2026-09-03
+
+- Unit and gateway contract tests cover mention removal, whitespace
+  normalization, image-only fallback, Discord's 100-character name bound,
+  persisted activity state, restart restoration, and archive/lock expiry.
+- Unmanaged threads are not added to the cleanup registry. A managed thread's
+  human follow-up refreshes its timestamp, while bot messages do not.
+- `pytest` passed 35 tests; Ruff, format, Pyrefly, Vulture, `uv lock --check`,
+  and `docker compose config` passed with required values supplied.
+- Deployment and signed-in Discord acceptance are still pending for this
+  change; no completion claim is made from local tests alone.

@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -239,6 +240,7 @@ class PromptHub:
 
 MAX_ANCESTORS = 12
 THREAD_IDLE_SECONDS = 7200
+THREAD_NAME_LIMIT = 100
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
 UPSTREAM_SERVER_ERROR = 500
@@ -400,6 +402,17 @@ def _banner() -> str:
     return (
         "⚡ **Wiseman thread startup**\n" + line + ("\n" + " · ".join(details) if details else "")
     )
+
+
+def _thread_name(content: str, attachment_count: int = 0) -> str:
+    """Turn the triggering message into a valid, readable Discord thread name."""
+    name = re.sub(r"<@!?\d+>", "", content)
+    name = " ".join(name.split()).strip()
+    if not name:
+        name = "image" if attachment_count else "wiseman"
+    if len(name) > THREAD_NAME_LIMIT:
+        name = name[: THREAD_NAME_LIMIT - 1].rstrip() + "…"
+    return name
 
 
 def _startup_embed() -> discord.Embed:
@@ -745,13 +758,16 @@ def _state_data(state: State) -> dict[str, Any]:
 class Gateway(discord.Client):
     """Direct Discord gateway adapter; it delegates to the same admission used by raw replay."""
 
-    def __init__(self, engine: Engine, allowlist: set[int]) -> None:
+    def __init__(
+        self, engine: Engine, allowlist: set[int], activity_path: str | Path | None = None
+    ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.engine, self.allowlist = engine, allowlist
         self.temporal: TemporalRuntime | None = None
-        self.thread_activity: dict[str, float] = {}
+        self.activity_path = Path(activity_path) if activity_path else None
+        self.thread_activity = self._load_thread_activity()
         self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
         engine.lookup_channel = self.resolve_channel
@@ -770,6 +786,36 @@ class Gateway(discord.Client):
     async def on_resumed(self) -> None:
         DISCORD_CONNECTED.set(1)
         LOGGER.info("Discord gateway session resumed")
+
+    def _load_thread_activity(self) -> dict[str, float]:
+        if self.activity_path is None or not self.activity_path.exists():
+            return {}
+        try:
+            value = json.loads(self.activity_path.read_text(encoding="utf-8"))
+            return {str(key): float(timestamp) for key, timestamp in value.items()}
+        except (OSError, TypeError, ValueError, AttributeError):
+            LOGGER.warning("Ignoring invalid Wiseman thread activity state")
+            return {}
+
+    def _persist_thread_activity(self) -> None:
+        if self.activity_path is None:
+            return
+        try:
+            self.activity_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.activity_path.with_name(f".{self.activity_path.name}.tmp")
+            temporary.write_text(json.dumps(self.thread_activity, sort_keys=True), encoding="utf-8")
+            temporary.replace(self.activity_path)
+        except OSError:
+            LOGGER.exception("Could not persist Wiseman thread activity state")
+
+    def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
+        self.thread_activity[thread_id] = timestamp if timestamp is not None else time.time()
+        self._persist_thread_activity()
+
+    def _forget_thread(self, thread_id: str) -> None:
+        if thread_id in self.thread_activity:
+            self.thread_activity.pop(thread_id)
+            self._persist_thread_activity()
 
     async def run_forever(self, token: str) -> None:
         """Keep the gateway supervised when Discord returns a fatal session error."""
@@ -793,17 +839,22 @@ class Gateway(discord.Client):
     async def _expire_threads(self) -> None:
         while True:
             await asyncio.sleep(60)
-            cutoff = time.time() - THREAD_IDLE_SECONDS
-            for thread_id, last_activity in list(self.thread_activity.items()):
-                if last_activity >= cutoff:
-                    continue
-                try:
-                    channel = await self.fetch_channel(int(thread_id))
-                    if isinstance(channel, discord.Thread):
-                        await channel.edit(archived=True, locked=True)
-                except (discord.DiscordException, ValueError):
-                    continue
-                self.thread_activity.pop(thread_id, None)
+            await self._expire_once()
+
+    async def _expire_once(self, now: float | None = None) -> None:
+        cutoff = (time.time() if now is None else now) - THREAD_IDLE_SECONDS
+        for thread_id, last_activity in list(self.thread_activity.items()):
+            if last_activity > cutoff:
+                continue
+            try:
+                channel = await self.fetch_channel(int(thread_id))
+                if isinstance(channel, discord.Thread):
+                    await channel.edit(archived=True, locked=True)
+                self._forget_thread(thread_id)
+            except discord.NotFound:
+                self._forget_thread(thread_id)
+            except (discord.DiscordException, ValueError):
+                continue
 
     async def close(self) -> None:
         DISCORD_CONNECTED.set(0)
@@ -840,8 +891,12 @@ class Gateway(discord.Client):
             return None
 
     async def on_message(self, message: discord.Message) -> None:
-        if isinstance(message.channel, discord.Thread) and not message.author.bot:
-            self.thread_activity[str(message.channel.id)] = time.time()
+        if (
+            isinstance(message.channel, discord.Thread)
+            and not message.author.bot
+            and str(message.channel.id) in self.thread_activity
+        ):
+            self._touch_thread(str(message.channel.id))
         if message.author.bot or self.user not in message.mentions:
             return
         channel = message.channel
@@ -851,18 +906,22 @@ class Gateway(discord.Client):
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
             delivery_channel = channel
-            old = self.engine.states[thread_id]
-            if old.last_activity and time.time() - old.last_activity > THREAD_IDLE_SECONDS:
-                old.closed = True
+            last_activity = self.thread_activity.get(thread_id)
+            if last_activity is not None and time.time() - last_activity >= THREAD_IDLE_SECONDS:
                 await channel.edit(archived=True, locked=True)
+                self._forget_thread(thread_id)
                 return
+            self._touch_thread(thread_id)
+            old = self.engine.states[thread_id]
             thread_messages = await _history(channel, 100)
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
-            thread = await message.create_thread(name="wiseman")
+            thread = await message.create_thread(
+                name=_thread_name(message.content, len(message.attachments))
+            )
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
             delivery_channel = thread
-            self.thread_activity[thread_id] = time.time()
+            self._touch_thread(thread_id)
             old = self.engine.states[thread_id]
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
         trigger = Message(
@@ -965,7 +1024,7 @@ def create_app(  # noqa: C901, PLR0915
     allowlist = {
         int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value
     }
-    bot = Gateway(engine, allowlist)
+    bot = Gateway(engine, allowlist, os.getenv("WISEMAN_ACTIVITY_FILE"))
     temporal = (
         TemporalRuntime(os.environ["TEMPORAL_ADDRESS"], os.getenv("TEMPORAL_TASK_QUEUE", "wiseman"))
         if os.getenv("TEMPORAL_ADDRESS")

@@ -25,6 +25,7 @@
     "WISEMAN_RELAY_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1",
     "OPENROUTER_URL": "https://openrouter.ai",
     "WISEMAN_VISION_MODEL": "z-ai/glm-5.3-flash",
+    "WISEMAN_ACTIVITY_FILE": "/var/lib/wiseman/thread_activity.json",
     "WISEMAN_ROUTE_INFO": "{\"requested_model\":\"deepseek/deepseek-v4-flash\",\"provider\":\"openrouter\",\"modalities\":\"text -> text\",\"context_window\":\"1048576\",\"input_price\":\"$0.088606/M\",\"output_price\":\"$0.177212/M\",\"cached_price\":\"$0.0177212/M read\",\"vision_assist_model\":\"z-ai/glm-5.3-flash\"}",
     "WISEMAN_DISCORD_ALLOWLIST": "1360157904996536391",
     "WISEMAN_ALLOW_PROFILE_EDITS": "0"

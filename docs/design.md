@@ -60,6 +60,11 @@ guild-based and is enforced for both parent channels and managed threads;
 messages from DMs or other guilds are ignored before context collection. The
 trigger message remains the reaction target; all banner, progress, failure,
 and answer messages are delivered inside the managed thread.
+New threads use the triggering message as their Discord name, with mentions
+removed and the result bounded to Discord's title limit. The gateway persists
+last-human-activity timestamps on its mounted state volume and archives and
+locks managed threads after two hours of inactivity; cleanup failures remain
+retryable.
 
 ## Workspace
 

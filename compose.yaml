@@ -19,6 +19,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}
       WISEMAN_REPLAY_TOKEN: ${WISEMAN_REPLAY_TOKEN:?set WISEMAN_REPLAY_TOKEN}
       WISEMAN_ALLOW_PROFILE_EDITS: ${WISEMAN_ALLOW_PROFILE_EDITS:-0}
+      WISEMAN_ACTIVITY_FILE: /var/lib/wiseman/thread_activity.json
+    volumes:
+      - wiseman-state:/var/lib/wiseman
     ports:
       - "8080:8080"
     depends_on:
@@ -41,4 +44,5 @@ services:
     read_only: false
 
 volumes:
+  wiseman-state:
   wiseman-workspaces:

@@ -25,6 +25,7 @@ from app.main import (
     _describe_images,
     _history,
     _provider_values,
+    _thread_name,
     create_app,
     normalize_event,
 )
@@ -218,6 +219,14 @@ def test_reaction_state_is_idempotent() -> None:
     assert engine._react("message", "👀")  # noqa: SLF001
     assert not engine._react("message", "👀")  # noqa: SLF001
     assert engine.reactions["message"] == ["👀"]
+
+
+def test_thread_name_uses_message_without_mentions_and_stays_bounded() -> None:
+    assert _thread_name("<@123> investigate the queue") == "investigate the queue"
+    assert _thread_name("  <@!123>\ncheck   this  ") == "check this"
+    assert _thread_name("<@123>", 1) == "image"
+    assert _thread_name("<@123>") == "wiseman"
+    assert len(_thread_name("<@123> " + "x" * 150)) == 100
 
 
 def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
@@ -501,6 +510,43 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
     assert not bot.intents.presences
 
 
+@pytest.mark.asyncio
+async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
+    tmp_path, monkeypatch
+) -> None:
+    activity_file = tmp_path / "activity.json"
+    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
+    bot._touch_thread("123", timestamp=0)  # noqa: SLF001
+    restored = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
+    assert restored.thread_activity == {"123": 0.0}
+    restored.thread_activity["123"] = 7_200.0
+
+    class Thread:
+        def __init__(self) -> None:
+            self.edits: list[dict[str, bool]] = []
+
+        async def edit(self, **kwargs: bool) -> None:
+            self.edits.append(kwargs)
+
+    thread = Thread()
+    monkeypatch.setattr("app.main.discord.Thread", Thread)
+    restored.thread_activity["456"] = 1
+
+    async def fetch_channel(channel_id: int) -> Thread:
+        assert channel_id == 456
+        return thread
+
+    monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
+    await restored._expire_once(now=7_201)  # noqa: SLF001
+    assert thread.edits == [{"archived": True, "locked": True}]
+    assert restored.thread_activity == {"123": 7_200.0}
+
+
+def test_gateway_does_not_track_unmanaged_threads() -> None:
+    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    assert bot.thread_activity == {}
+
+
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     class Response:
         is_error = False
@@ -624,7 +670,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             self.reactions: list[str] = []
 
         async def create_thread(self, name: str) -> Thread:
-            assert name == "wiseman"
+            assert name == "hello"
             self.channel.thread = Thread(self.channel)
             return self.channel.thread
 
