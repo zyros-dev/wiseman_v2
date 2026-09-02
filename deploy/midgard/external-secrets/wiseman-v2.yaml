@@ -1,0 +1,59 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: wiseman-v2-gateway
+  namespace: midgard-apps
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: wiseman-v2-gateway
+  data:
+    - secretKey: DISCORD_BOT_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: discord_bot_token
+    - secretKey: PHOENIX_API_KEY
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: phoenix_api_key
+    - secretKey: WISEMAN_RUNNER_API_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: runner_api_token
+    - secretKey: WISEMAN_PROVIDER_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: provider_token
+    - secretKey: OPENROUTER_API_KEY
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: openrouter_api_key
+    - secretKey: WISEMAN_REPLAY_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: replay_token
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: wiseman-v2-sandbox
+  namespace: midgard-apps
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: wiseman-v2-sandbox
+  data:
+    - secretKey: WISEMAN_RUNNER_API_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: runner_api_token
+    - secretKey: WISEMAN_PROVIDER_TOKEN
+      remoteRef:
+        key: k8s/wiseman-v2/gateway
+        property: provider_token

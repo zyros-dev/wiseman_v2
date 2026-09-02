@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: hermes-image
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - name: Checkout from Gitea
+        run: |
+          set -eu
+          apk add --no-cache git
+          git -c http.extraheader="Authorization: Bearer ${{ github.token }}" \
+            clone --depth 1 "${{ github.server_url }}/${{ github.repository }}.git" .
+          git -c http.extraheader="Authorization: Bearer ${{ github.token }}" \
+            fetch --depth 1 origin "${{ github.sha }}"
+          git checkout -q "${{ github.sha }}"
+      - name: Build and push Thor images
+        run: |
+          set -eu
+          docker build --pull=false -t registry.odin.home:5000/wiseman-v2-gateway:${GITHUB_SHA} .
+          docker push registry.odin.home:5000/wiseman-v2-gateway:${GITHUB_SHA}
+          docker build --pull=false -f sandbox/Dockerfile \
+            -t registry.odin.home:5000/wiseman-v2-sandbox:${GITHUB_SHA} .
+          docker push registry.odin.home:5000/wiseman-v2-sandbox:${GITHUB_SHA}
+      - name: Validate prompt sources
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for name in ("startup-context", "followup-context"):
+              value = json.loads(Path(f"contracts/{name}.json").read_text())
+              assert value["schema"] == "wiseman.context.grammar.v2"
+              assert isinstance(value["template"], str) and value["template"]
+          PY
+      - name: Publish deployment inputs to Midgard
+        env:
+          MIDGARD_DEPLOY_REMOTE: ${{ secrets.MIDGARD_DEPLOY_REMOTE }}
+        run: |
+          set -eu
+          test -n "$MIDGARD_DEPLOY_REMOTE"
+          apk add --no-cache git jq
+          git clone "$MIDGARD_DEPLOY_REMOTE" /tmp/midgard
+          cd /tmp/midgard
+          git config user.name "Wiseman V2 release"
+          git config user.email "wiseman-v2@gitea.odin.home"
+          mkdir -p k8s/registry k8s/base/integrations/wiseman-v2
+          cp "$GITHUB_WORKSPACE"/deploy/midgard/registry-inputs/*.json k8s/registry/
+          for input in k8s/registry/wiseman-v2-*.json; do
+            jq --arg tag "$GITHUB_SHA" '.tag = $tag' "$input" > "$input.next"
+            mv "$input.next" "$input"
+          done
+          cp "$GITHUB_WORKSPACE"/deploy/midgard/external-secrets/wiseman-v2.yaml \
+            k8s/base/integrations/wiseman-v2/wiseman-v2-secrets.yaml
+          cp "$GITHUB_WORKSPACE"/deploy/midgard/network-policies/wiseman-v2.yaml \
+            k8s/base/integrations/wiseman-v2/wiseman-v2-network-policy.yaml
+          docker run --rm --user root -v "$PWD:/home/opam/workspace" \
+            -w /home/opam/workspace registry.odin.home:5000/midgard-dev:latest \
+            sh -lc 'dune exec src/app_registry/main.exe'
+          git add k8s/registry k8s/base/integrations/wiseman-v2 k8s/base/registered
+          git diff --staged --quiet || git commit -m "deploy: wiseman-v2 $GITHUB_SHA"
+          git push origin HEAD:main

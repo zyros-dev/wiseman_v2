@@ -1,0 +1,97 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wiseman-v2"
+version = "0.1.0"
+description = "Discord Codex runtime with Temporal workflows and Phoenix observability"
+requires-python = ">=3.12"
+dependencies = [
+  "discord.py>=2.5,<3",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "jinja2>=3.1,<4",
+  "opentelemetry-api>=1.31,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.31,<2",
+  "opentelemetry-sdk>=1.31,<2",
+  "openai-codex==0.147.0",
+  "prometheus-client>=0.21,<1",
+  "pydantic>=2.10,<3",
+  "temporalio>=1.10,<2",
+  "uvicorn[standard]>=0.34,<1",
+  "jsonschema>=4.23,<5",
+]
+
+[dependency-groups]
+dev = [
+  "coverage[toml]>=7.6,<8",
+  "pip-audit>=2.7,<3",
+  "pyrefly==1.2.0",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1,<2",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+  "vulture>=2.14,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+pythonpath = ["src", "sandbox/src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "sandbox/src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",  # conflicts with formatter
+  "D",       # docstrings are added to public integration boundaries
+  "EM101",   # exception strings remain readable at small boundaries
+  "FIX002",  # TODOs are tracked in implementation issues
+  "ISC001",  # conflicts with formatter
+  "PLR0913", # typed boundary functions may have several explicit fields
+  "S101",    # assertions are appropriate in tests
+  "TD003",   # TODO issue links are not required in local code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ANN", "ARG", "B018", "N802", "PLC2701", "PLR2004", "S106"]
+"src/app/integrations/discord/mcp.py" = [
+  "C901", "E501", "EM102", "PLR0911", "PLR0912", "PLR0915", "TRY003", "TRY004"
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+omit = [
+  "src/app/service.py",
+  "src/app/temporal/*.py",
+  # Network/process adapters are covered by contract and container tests.
+  "src/app/integrations/discord/gateway.py",
+  "src/app/integrations/discord/history.py",
+  "src/app/integrations/discord/normalizer.py",
+  "src/app/integrations/discord/presentation.py",
+  "src/app/integrations/openrouter/relay.py",
+  "src/app/integrations/phoenix/prompt_hub.py",
+  "src/app/integrations/phoenix/tracing.py",
+  "src/app/integrations/sandbox/client.py",
+  "src/app/integrations/discord/mcp.py",
+]
+
+[tool.vulture]
+min_confidence = 100
+
+[tool.uv]
+package = true

@@ -1,0 +1,5 @@
+{
+  "schema": "wiseman.context.grammar.v2",
+  "mode": "{{ mode }}",
+  "messages": {{ messages | tojson }}
+}

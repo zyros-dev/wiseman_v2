@@ -1,0 +1,26 @@
+{
+  "name": "wiseman-v2-sandbox",
+  "image": "registry.odin.home:5000/wiseman-v2-sandbox",
+  "tag": "REPLACED_BY_RELEASE",
+  "port": 8090,
+  "host": "",
+  "exposure": "internal",
+  "deploy_host": "thor",
+  "mem_mi": 512,
+  "storage_mi": 4096,
+  "storage_mount_path": "/workspaces",
+  "run_as_user": 0,
+  "run_as_group": 0,
+  "fs_group": 0,
+  "trusted": true,
+  "health": "/healthz",
+  "metrics_path": "/metrics",
+  "secrets": ["wiseman-v2-sandbox"],
+  "env": {
+    "WISEMAN_WORKSPACE_ROOT": "/workspaces",
+    "WISEMAN_MANAGE_ACCOUNTS": "1",
+    "WISEMAN_RELAY_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1",
+    "WISEMAN_MCP_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1/mcp",
+    "WISEMAN_CODEX_BIN": "/usr/local/bin/codex-as-user"
+  }
+}

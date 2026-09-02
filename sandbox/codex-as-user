@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${WISEMAN_EXEC_USER:-}" ]; then
+  exec runuser --preserve-environment -u "$WISEMAN_EXEC_USER" -- \
+    "${WISEMAN_CODEX_REAL_BIN:-/app/.venv/lib/python3.13/site-packages/codex_cli_bin/bin/codex}" "$@"
+fi
+exec "${WISEMAN_CODEX_REAL_BIN:-/app/.venv/lib/python3.13/site-packages/codex_cli_bin/bin/codex}" "$@"
