@@ -33,15 +33,12 @@ jobs:
       - name: Validate prompt sources
         run: |
           set -eu
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          for name in ("startup-context", "followup-context"):
-              value = json.loads(Path(f"contracts/{name}.json").read_text())
-              assert value["schema"] == "wiseman.context.grammar.v2"
-              assert isinstance(value["template"], str) and value["template"]
-          PY
+          apk add --no-cache jq
+          for name in startup-context followup-context; do
+            test "$(jq -r .schema "contracts/$name.json")" = "wiseman.context.grammar.v2"
+            test "$(jq -r .template "contracts/$name.json")" != "null"
+            test -n "$(jq -r .template "contracts/$name.json")"
+          done
       - name: Publish deployment inputs to Midgard
         env:
           MIDGARD_DEPLOY_REMOTE: ${{ secrets.MIDGARD_DEPLOY_REMOTE }}
