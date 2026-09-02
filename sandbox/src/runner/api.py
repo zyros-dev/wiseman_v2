@@ -145,6 +145,7 @@ class Workspace:
         (path / "AGENTS.md").chmod(0o600)
         if account:
             self._own_tree(base, account)
+            self._own_tree(path, account)
         return path
 
     def cleanup(self, idle_seconds: int = 259200) -> int:
