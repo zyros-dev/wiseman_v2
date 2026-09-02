@@ -29,12 +29,14 @@ Prompt Hub overrides them by versioned name when configured.
 Soul and runtime prompt components use the same Prompt Hub boundary, with local
 environment fallbacks; memories remain workspace data.
 
-The primary route is text-only DeepSeek V4 Flash. Image attachments are sent to
-the configured `WISEMAN_VISION_MODEL` (`z-ai/glm-5.3-flash`) through OpenRouter's
-multimodal Chat Completions endpoint. Its bounded factual description is added
-to the normal Codex input, and the `vision` event records the model, attachment
-IDs, usage, cost, and description. Vision failure is visible to Codex as an
-unavailable-image note rather than silently becoming an invented observation.
+The primary route is text-only DeepSeek V4 Flash. The sandbox provides a
+`wiseman-image` Codex command: the agent can pass an attachment URL to get a
+generic description, or add `--question` to ask about the image. The command
+calls the authenticated gateway tool endpoint, which sends the image to the
+configured `WISEMAN_VISION_MODEL` (`z-ai/glm-5.3-flash`) through OpenRouter's
+multimodal Chat Completions endpoint. The result is returned to Codex only when
+requested, and the `vision_tool` event records the model, attachment ID,
+question, usage, cost, and description.
 
 ## Turn semantics
 

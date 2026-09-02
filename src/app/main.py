@@ -185,7 +185,7 @@ class Phoenix:
                 span.set_attribute(
                     f"wiseman.{key}", _json(value) if not isinstance(value, str) else value
                 )
-        terminal = node in {"failure", "provider"} or (
+        terminal = node in {"failure", "provider", "vision_tool"} or (
             node == "reaction" and "✅" in _json(data.get("operations", []))
         )
         if terminal:
@@ -386,8 +386,8 @@ def _startup_embed() -> discord.Embed:
     )
 
 
-async def _describe_images(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Ask the configured vision model to describe bounded Discord image attachments."""
+async def _describe_images(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+    """Ask the configured vision model to answer about bounded Discord image attachments."""
     images: list[dict[str, str]] = []
     seen: set[str] = set()
     for message in messages:
@@ -411,9 +411,9 @@ async def _describe_images(messages: list[dict[str, Any]]) -> dict[str, Any]:
     content: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": "Describe each attached image factually for another assistant. "
-            "Read visible text and report relevant objects, quantities, prices, and layout. "
-            "Do not guess details that are not visible.",
+            "text": question
+            or "Describe each attached image factually. Read visible text and report relevant "
+            "objects, quantities, prices, and layout. Do not guess details that are not visible.",
         },
         *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
     ]
@@ -591,9 +591,6 @@ class Engine:
             normalized=current,
             selected_ids=current["selected_ids"],
         )
-        vision = await _describe_images(current["messages"])
-        if vision["attachments"]:
-            await self.phoenix.record(trace, "vision", **vision)
         grammar_name = "startup-context" if kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
         grammar = _grammar(
@@ -609,7 +606,6 @@ class Engine:
             "runtime": await self.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
             "context": grammar["rendered"],
-            "image_descriptions": vision["text"],
             "user": trigger.content,
         }
         prompt = _json(parts)
@@ -1024,6 +1020,29 @@ def create_app(  # noqa: C901, PLR0915
             )
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/v1/tools/describe-image")
+    async def describe_image(
+        payload: dict[str, Any],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, Any]:
+        expected = os.getenv("WISEMAN_PROVIDER_TOKEN", token)
+        if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(401, "invalid tool token")
+        url = str(payload.get("url") or "")
+        if not url.startswith(("https://", "http://")):
+            raise HTTPException(422, "image URL must use HTTP or HTTPS")
+        attachment_id = str(payload.get("attachment_id") or url)
+        result = await _describe_images(
+            [{"attachments": [{"id": attachment_id, "content_type": "image/*", "url": url}]}],
+            str(payload.get("question") or "")[:2_000],
+        )
+        trace = str(
+            payload.get("thread_id")
+            or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}"
+        )
+        await engine.phoenix.record(trace, "vision_tool", **result)
+        return result
 
     @app.post("/v1/replay/discord")
     async def replay(

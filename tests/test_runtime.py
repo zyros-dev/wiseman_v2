@@ -156,15 +156,33 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
                     {"id": "image-1", "content_type": "image/jpeg", "url": "https://cdn/image.jpg"}
                 ]
             }
-        ]
+        ],
+        "How many chairs are visible?",
     )
     assert result["text"] == "Three black office chairs."
     assert result["attachments"] == ["image-1"]
     assert requests[0]["json"]["model"] == "z-ai/glm-5.3-flash"
+    assert "How many chairs" in requests[0]["json"]["messages"][0]["content"][0]["text"]
     assert (
         requests[0]["json"]["messages"][0]["content"][1]["image_url"]["url"]
         == "https://cdn/image.jpg"
     )
+    generic = await _describe_images(
+        [
+            {
+                "attachments": [
+                    {"id": "image-1", "content_type": "image/jpeg", "url": "https://cdn/image.jpg"}
+                ]
+            }
+        ]
+    )
+    assert generic["text"] == result["text"]
+    assert (
+        "Describe each attached image" in requests[1]["json"]["messages"][0]["content"][0]["text"]
+    )
+    phoenix = Phoenix()
+    await phoenix.record("vision-tool", "vision_tool", **generic)
+    assert not phoenix.roots
 
 
 def test_reaction_state_is_idempotent() -> None:

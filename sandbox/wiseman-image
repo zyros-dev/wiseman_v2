@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Codex tool for asking the gateway's vision model about a Discord image."""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("url")
+    parser.add_argument("--question", default="")
+    args = parser.parse_args()
+    base = os.getenv("WISEMAN_RELAY_URL", "").rstrip("/")
+    token = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
+    if not base or not token:
+        print("wiseman-image is not configured", file=sys.stderr)
+        return 2
+    payload = json.dumps(
+        {"url": args.url, "question": args.question, "thread_id": os.getenv("WISEMAN_THREAD_ID", "")}
+    ).encode()
+    request = urllib.request.Request(
+        f"{base}/tools/describe-image",
+        data=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.load(response)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        print(f"wiseman-image failed: {exc}", file=sys.stderr)
+        return 1
+    print(result.get("text", ""))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

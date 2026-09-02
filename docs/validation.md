@@ -69,8 +69,8 @@ until those dependencies are available.
   `reaction`, `context`, `grammar`, `prompt`, three progress nodes, `codex`,
   `delivery`, and terminal `reaction`.
 
-## Vision assist
+## Vision tool
 
 - The image contract test verifies Discord image URLs are sent to
   `z-ai/glm-5.3-flash` as multimodal content and the returned description is
-  available to the primary Codex prompt.
+  available to Codex for both generic and question-directed requests.

@@ -15,9 +15,10 @@ normalized input, and rendered output. The `codex` event contains the final
 input and any provider model, usage, and cost returned by the runner. Values
 that are unavailable are omitted rather than reported as zero.
 
-Image-bearing turns also contain a `vision` event before grammar rendering. It
-records bounded attachment IDs, the configured vision model, description,
-usage, and cost; image bytes and provider credentials are never recorded.
+When Codex invokes `wiseman-image`, the gateway records a `vision_tool` event
+with bounded attachment IDs, the configured vision model, question,
+description, usage, and cost; image bytes and provider credentials are never
+recorded.
 
 `GET /v1/phoenix/events` is a local inspection endpoint. Setting
 `PHOENIX_OTLP_ENDPOINT` forwards each event to the configured Phoenix ingress;

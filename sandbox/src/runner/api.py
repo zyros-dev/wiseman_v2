@@ -181,7 +181,9 @@ class CodexRunner:
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
         async with lock:
-            key = account or turn.user_id
+            # A client owns its cwd and Codex session environment, so it is
+            # private to a Discord thread even when the user has many threads.
+            key = turn.thread_id
             if key not in self.codex:
                 env = dict(os.environ)
                 if relay := os.getenv("WISEMAN_RELAY_URL"):
@@ -189,6 +191,7 @@ class CodexRunner:
                 env["OPENAI_API_KEY"] = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
                 env["HOME"], env["CODEX_HOME"] = str(path), str(path / ".codex")
                 env["WISEMAN_EXEC_USER"] = account
+                env["WISEMAN_THREAD_ID"] = turn.thread_id
                 self.codex[key] = AsyncCodex(
                     CodexConfig(
                         codex_bin=os.getenv("WISEMAN_CODEX_BIN") or None,
@@ -207,6 +210,10 @@ class CodexRunner:
                     developer_instructions=(
                         "Use shared/AGENTS.md and shared/memories.md. "
                         "For current or external facts, use available network tools. "
+                        "When Discord context includes an image attachment, use "
+                        "wiseman-image with its attachment URL. Add --question for a "
+                        "specific question, or omit it for a generic description. "
+                        "Do not claim visual details until the command returns a result. "
                         "Never claim to have searched unless a command returned usable results; "
                         "if a web command fails, say so plainly."
                     ),
