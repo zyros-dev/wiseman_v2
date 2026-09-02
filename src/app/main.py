@@ -412,8 +412,9 @@ async def _describe_images(messages: list[dict[str, Any]], question: str = "") -
         {
             "type": "text",
             "text": question
-            or "Describe each attached image factually. Read visible text and report relevant "
-            "objects, quantities, prices, and layout. Do not guess details that are not visible.",
+            or "What is visible in each attached image? Give a concise factual description, "
+            "read visible text, and report relevant objects, quantities, prices, and layout. "
+            "Never answer only None and do not guess details that are not visible.",
         },
         *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
     ]

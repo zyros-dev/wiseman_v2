@@ -178,7 +178,8 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     )
     assert generic["text"] == result["text"]
     assert (
-        "Describe each attached image" in requests[1]["json"]["messages"][0]["content"][0]["text"]
+        "What is visible in each attached image"
+        in requests[1]["json"]["messages"][0]["content"][0]["text"]
     )
     phoenix = Phoenix()
     await phoenix.record("vision-tool", "vision_tool", **generic)
