@@ -239,6 +239,9 @@ class PromptHub:
 
 MAX_ANCESTORS = 12
 THREAD_IDLE_SECONDS = 7200
+UPSTREAM_RETRY_ATTEMPTS = 3
+UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
+UPSTREAM_SERVER_ERROR = 500
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
@@ -328,6 +331,29 @@ def context(event: Event) -> dict[str, Any]:
     )
     validate(result, schema)
     return result
+
+
+def _image_tool_instruction(messages: list[dict[str, Any]]) -> str:
+    """Make image handling explicit when the model cannot see Discord attachments natively."""
+    images: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        for attachment in message.get("attachments", []):
+            content_type = str(attachment.get("content_type") or "")
+            url = str(attachment.get("url") or attachment.get("proxy_url") or "")
+            if content_type.startswith("image/") and url and url not in seen:
+                images.append(url)
+                seen.add(url)
+    if not images:
+        return ""
+    urls = "\n".join(f"- {url}" for url in images[:4])
+    return (
+        "This turn includes Discord image attachment(s). Before answering, you MUST run "
+        "`/usr/local/bin/wiseman-image` once for each relevant image URL below. Use `--question` "
+        "when the user asks about a visual detail; otherwise request a generic description. "
+        "Do not claim to have seen an image until the command returns.\n"
+        f"Image URLs:\n{urls}"
+    )
 
 
 def _route_info() -> dict[str, Any]:
@@ -489,7 +515,10 @@ class HttpRunner:
                     "input": prompt,
                 },
             )
-        response.raise_for_status()
+        if response.is_error:
+            detail = response.text[:1_000]
+            error = f"runner returned HTTP {response.status_code}: {detail}"
+            raise RuntimeError(error)
         data = response.json()
         billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
@@ -610,7 +639,11 @@ class Engine:
             "runtime": await self.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
             "context": grammar["rendered"],
-            "user": trigger.content,
+            "user": "\n\n".join(
+                part
+                for part in (trigger.content, _image_tool_instruction(current["messages"]))
+                if part
+            ),
         }
         prompt = _json(parts)
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
@@ -975,7 +1008,7 @@ def create_app(  # noqa: C901, PLR0915
         return engine.phoenix.records
 
     @app.post("/v1/responses")
-    async def responses(
+    async def responses(  # noqa: C901
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:
@@ -994,25 +1027,40 @@ def create_app(  # noqa: C901, PLR0915
             served_model: object = None
             async with (
                 httpx.AsyncClient(timeout=300) as client,
-                client.stream(
-                    "POST",
-                    f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
-                    headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
-                    json=payload,
-                ) as response,
             ):
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("data:"):
-                        try:
-                            body = json.loads(line[5:].strip())
-                            if isinstance(body, dict):
-                                usage, cost, served_model = _provider_values(
-                                    body, usage, cost, served_model
-                                )
-                        except ValueError:
-                            pass
-                    yield f"{line}\n".encode()
+                for attempt in range(UPSTREAM_RETRY_ATTEMPTS):
+                    async with client.stream(
+                        "POST",
+                        f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
+                        headers={
+                            "authorization": f"Bearer {key}",
+                            "content-type": "application/json",
+                        },
+                        json=payload,
+                    ) as response:
+                        if response.is_error:
+                            detail = (await response.aread()).decode(errors="replace")[:1_000]
+                            retryable = (
+                                response.status_code in UPSTREAM_RETRY_STATUSES
+                                or response.status_code >= UPSTREAM_SERVER_ERROR
+                            )
+                            if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
+                                await asyncio.sleep(0.5 * (attempt + 1))
+                                continue
+                            error = f"OpenRouter returned HTTP {response.status_code}: {detail}"
+                            raise RuntimeError(error)
+                        async for line in response.aiter_lines():
+                            if line.startswith("data:"):
+                                try:
+                                    body = json.loads(line[5:].strip())
+                                    if isinstance(body, dict):
+                                        usage, cost, served_model = _provider_values(
+                                            body, usage, cost, served_model
+                                        )
+                                except ValueError:
+                                    pass
+                            yield f"{line}\n".encode()
+                        break
             await engine.phoenix.record(
                 trace,
                 "provider",

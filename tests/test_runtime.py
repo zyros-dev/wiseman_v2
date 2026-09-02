@@ -111,6 +111,31 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert len(engine.phoenix.records) >= 8
 
 
+@pytest.mark.asyncio
+async def test_image_turn_makes_agent_tool_call_explicit() -> None:
+    engine = Engine(Phoenix(), FakeRunner())
+    event = normalize_event(
+        {
+            "trigger": {
+                **discord_message("image-turn", "What is in this?", thread="t"),
+                "attachments": [
+                    {
+                        "id": "image-1",
+                        "filename": "photo.png",
+                        "url": "https://cdn.example/photo.png",
+                        "content_type": "image/png",
+                    }
+                ],
+            },
+            "kind": "startup",
+        }
+    )
+    await engine.handle(event)
+    codex = next(item for item in engine.phoenix.records if item["node"] == "codex")
+    assert "/usr/local/bin/wiseman-image" in str(codex["input"])
+    assert "https://cdn.example/photo.png" in str(codex["input"])
+
+
 def test_normalize_discord_gateway_message_create_envelope() -> None:
     payload = {"op": 0, "t": "MESSAGE_CREATE", "d": discord_message("gateway", "hello")}
     event = normalize_event(payload)
@@ -259,6 +284,8 @@ def test_banner_omits_unknowns_and_shows_configured_route(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> None:
     class Response:
+        is_error = False
+
         def raise_for_status(self) -> None: ...
 
         def json(self) -> dict[str, object]:
@@ -470,6 +497,9 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
 
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     class Response:
+        is_error = False
+        status_code = 200
+
         def raise_for_status(self) -> None: ...
 
         async def __aenter__(self) -> Self:
