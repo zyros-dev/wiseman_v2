@@ -46,6 +46,10 @@ profile edits are enabled. These commands call authenticated gateway tools.
 Uploads are limited to the current thread or its owner-shared directory and
 8 MiB; the gateway never accepts a host path or a Discord credential from the
 sandbox. Reaction configuration is persisted on the gateway state volume.
+The trusted sandbox intentionally does not bake in a compiler or project
+toolchain: managed accounts have passwordless sudo, a usable shell, outbound
+package access, and a writable root filesystem, so Codex can install the
+dependencies required by the current project itself.
 
 ## Turn semantics
 

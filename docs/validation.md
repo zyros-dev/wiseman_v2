@@ -96,3 +96,10 @@ until those dependencies are available.
 - The sandbox image includes `/usr/local/bin/wiseman-discord`; deployment
   enables profile edits and persists reaction configuration at
   `/var/lib/wiseman/profile.json`.
+
+## Trusted package installation: 2026-09-03
+
+- The sandbox image does not preinstall a compiler or kernel-specific
+  toolchain. Managed accounts receive `/bin/bash` and passwordless sudo;
+  Codex is instructed to install project-specific packages itself with
+  noninteractive `apt-get` commands.
