@@ -13,7 +13,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -373,6 +373,26 @@ def _banner() -> str:
     )
 
 
+def _startup_embed() -> discord.Embed:
+    """Render the old one-time green thread-start status as a Discord embed."""
+    banner = _banner()
+    title, _, description = banner.partition("\n")
+    return discord.Embed(
+        title=title.replace("**", ""),
+        description=description,
+        colour=0x57F287,
+    )
+
+
+async def _edit_delivery(message: object | None, content: str) -> bool:
+    """Edit a sent Discord message when the adapter exposes the native method."""
+    edit = getattr(message, "edit", None)
+    if not callable(edit):
+        return False
+    await cast("Any", edit)(content=content)
+    return True
+
+
 class Runner(Protocol):
     async def run(
         self, thread: str, prompt: str, user: str, workspace: str = ""
@@ -524,16 +544,20 @@ class Engine:
         }
         prompt = _json(parts)
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
+        progress_message: object | None = None
+        if delivery_channel is not None and kind == "startup":
+            await cast("Any", delivery_channel).send(embed=_startup_embed())
+        progress = (
+            "🛠️ Workspace provisioning...\n🤖 Codex starting..."
+            if kind == "startup"
+            else "⏳ Working..."
+        )
         self.progress[trigger.id].append("workspace provisioning")
         await self.phoenix.record(trace, "progress", phase="workspace provisioning")
-        if delivery_channel is not None and kind == "startup":
-            await delivery_channel.send(_banner())
         if delivery_channel is not None:
-            await delivery_channel.send("🛠️ Workspace provisioning...")
+            progress_message = await delivery_channel.send(progress)
         self.progress[trigger.id].append("codex started")
         await self.phoenix.record(trace, "progress", phase="codex started")
-        if delivery_channel is not None:
-            await delivery_channel.send("🤖 Codex starting...")
         try:
             state.codex_thread, output, billing = await self.runner.run(
                 state.codex_thread or "",
@@ -545,7 +569,9 @@ class Engine:
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))
             if self._react(trigger.id, "❌") and live is not None:
-                if delivery_channel is not None:
+                if delivery_channel is not None and not await _edit_delivery(
+                    progress_message, f"Codex failed: {exc}"
+                ):
                     await delivery_channel.send(f"Codex failed: {exc}")
                 await live.add_reaction("❌")
             return {
@@ -567,8 +593,7 @@ class Engine:
             **billing,
         )
         await self.phoenix.record(trace, "delivery", output=output)
-        if delivery_channel is not None:
-            await delivery_channel.send("✍️ Finishing the response...")
+        if delivery_channel is not None and not await _edit_delivery(progress_message, output):
             await delivery_channel.send(output)
         if self._react(trigger.id, "✅") and live is not None:
             await live.add_reaction("✅")
