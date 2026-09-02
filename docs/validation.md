@@ -39,7 +39,8 @@ until those dependencies are available.
 - Deployment did not proceed. The new Gitea repository cannot be created with
   the managed token because it lacks `write:user`; Docker Desktop is also
   unavailable locally. The old `hermes-discord-gateway` and
-  `hermes-discord-runner` deployments remain healthy and were not stopped.
+  The retired Hermes deployments are absent; only the Wiseman V2 gateway and
+  sandbox remain in the application namespace.
 
 ## Cutover preparation: 2026-09-02
 

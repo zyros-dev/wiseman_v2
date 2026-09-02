@@ -12,7 +12,7 @@
   "run_as_user": 10000,
   "run_as_group": 10000,
   "fs_group": 10000,
-  "health": "/healthz",
+  "health": "/readyz",
   "metrics_path": "/metrics",
   "secrets": ["wiseman-v2-gateway"],
   "env": {
