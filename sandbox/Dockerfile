@@ -11,8 +11,10 @@ COPY pyproject.toml uv.lock ./
 COPY sandbox/src ./sandbox/src
 COPY sandbox/codex-as-user /usr/local/bin/codex-as-user
 COPY sandbox/wiseman-image /usr/local/bin/wiseman-image
+COPY sandbox/wiseman-discord /usr/local/bin/wiseman-discord
 RUN chmod 0755 /usr/local/bin/codex-as-user
 RUN chmod 0755 /usr/local/bin/wiseman-image
+RUN chmod 0755 /usr/local/bin/wiseman-discord
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev --no-install-project
 ENV PYTHONPATH=/app/sandbox/src WISEMAN_CODEX_BIN=/usr/local/bin/codex-as-user

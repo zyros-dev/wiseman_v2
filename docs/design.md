@@ -38,6 +38,15 @@ multimodal Chat Completions endpoint. The result is returned to Codex only when
 requested, and the `vision_tool` event records the model, attachment ID,
 question, usage, cost, and description.
 
+The sandbox also provides `wiseman-discord`. `send-file` uploads a file or
+image from the current thread workspace into the managed Discord thread;
+`set-reactions` changes the processing, success, and failure symbols for
+future turns; and `set-profile` changes the bot username and/or avatar when
+profile edits are enabled. These commands call authenticated gateway tools.
+Uploads are limited to the current thread or its owner-shared directory and
+8 MiB; the gateway never accepts a host path or a Discord credential from the
+sandbox. Reaction configuration is persisted on the gateway state volume.
+
 ## Turn semantics
 
 The first event for a thread is `startup`: it selects at most 100 parent

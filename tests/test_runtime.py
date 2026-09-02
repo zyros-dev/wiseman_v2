@@ -221,6 +221,98 @@ def test_reaction_state_is_idempotent() -> None:
     assert engine.reactions["message"] == ["👀"]
 
 
+def test_reaction_configuration_changes_future_turns() -> None:
+    engine = Engine(Phoenix(), FakeRunner())
+    assert engine.set_reaction_emojis({"processing": "🔵", "success": "🟩", "failure": "🟥"}) == {
+        "processing": "🔵",
+        "success": "🟩",
+        "failure": "🟥",
+    }
+    assert engine.reaction_emojis["processing"] == "🔵"
+
+
+def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> None:
+    class User:
+        name = "Wiseman"
+
+        def __init__(self) -> None:
+            self.edits: list[dict[str, object]] = []
+
+        async def edit(self, **kwargs: object) -> None:
+            self.edits.append(kwargs)
+
+    class Sent:
+        id = 42
+        jump_url = "https://discord.test/messages/42"
+
+    class Thread:
+        async def send(self, **kwargs: object) -> Sent:
+            self.payload = kwargs
+            return Sent()
+
+    monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
+    monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
+    monkeypatch.setattr("app.main.discord.Thread", Thread)
+    engine = Engine(Phoenix(), FakeRunner())
+    app = create_app(engine, token="secret")
+    app.state.gateway._connection.user = User()  # noqa: SLF001
+
+    with TestClient(app) as client:
+        headers = {"authorization": "Bearer secret"}
+        reactions = client.post(
+            "/v1/tools/set-reactions",
+            headers=headers,
+            json={"processing": "🔵", "success": "🟩", "failure": "🟥"},
+        )
+        assert reactions.json()["reaction_emojis"] == {
+            "processing": "🔵",
+            "success": "🟩",
+            "failure": "🟥",
+        }
+        replay = client.post(
+            "/v1/replay/discord",
+            headers={"x-replay-token": "secret"},
+            json={
+                "trigger": discord_message("configured", "hello", thread="t"),
+                "kind": "startup",
+            },
+        )
+        assert replay.json()["reactions"] == ["🟩"]
+        profile = client.post(
+            "/v1/tools/set-profile",
+            headers=headers,
+            json={"username": "New Wiseman", "avatar_base64": "aGVsbG8="},
+        )
+        assert profile.status_code == 200
+        assert app.state.gateway.user.edits == [{"username": "New Wiseman", "avatar": b"hello"}]
+
+        monkeypatch.setattr(
+            app.state.gateway,
+            "fetch_channel",
+            lambda _channel_id: __import__("asyncio").sleep(0, result=Thread()),
+        )
+        uploaded = client.post(
+            "/v1/tools/send-file",
+            headers=headers,
+            json={
+                "thread_id": "123",
+                "filename": "report.png",
+                "caption": "Here it is",
+                "data_base64": "aGVsbG8=",
+            },
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json()["message_id"] == "42"
+
+    assert app.state.gateway.profile_path is None
+
+
+def test_discord_tools_require_authentication() -> None:
+    client = TestClient(create_app(Engine(Phoenix(), FakeRunner()), token="secret"))
+    assert client.post("/v1/tools/set-reactions", json={"success": "🎉"}).status_code == 401
+    assert client.post("/v1/tools/send-file", json={}).status_code == 401
+
+
 def test_thread_name_uses_message_without_mentions_and_stays_bounded() -> None:
     assert _thread_name("<@123> investigate the queue") == "investigate the queue"
     assert _thread_name("  <@!123>\ncheck   this  ") == "check this"
@@ -340,6 +432,58 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     assert result["error"] == "runner down"
     assert result["reactions"] == ["❌"]
     assert any(item["node"] == "failure" for item in engine.phoenix.records)
+
+
+@pytest.mark.asyncio
+async def test_same_thread_turns_are_serialized() -> None:
+    active = maximum = 0
+
+    class Runner:
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            nonlocal active, maximum
+            del prompt, user, workspace
+            active += 1
+            maximum = max(maximum, active)
+            await __import__("asyncio").sleep(0)
+            active -= 1
+            return thread or "codex", "answer", {}
+
+    engine = Engine(Phoenix(), Runner())
+    events = [
+        normalize_event(discord_message(str(index), "hello", thread="same")) for index in (1, 2)
+    ]
+    results = await __import__("asyncio").gather(*(engine.handle(event) for event in events))
+    assert maximum == 1
+    assert [result["state"]["turn"] for result in results] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_new_turn_recovers_after_previous_failure() -> None:
+    attempts = 0
+
+    class Runner:
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            nonlocal attempts
+            del prompt, user, workspace
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary runner failure")  # noqa: TRY003
+            return thread or "codex", "recovered", {}
+
+    engine = Engine(Phoenix(), Runner())
+    first = await engine.handle(
+        normalize_event(discord_message("failed", "hello", thread="recover"))
+    )
+    second = await engine.handle(
+        normalize_event(discord_message("recovered", "retry", thread="recover"))
+    )
+    assert first["reactions"] == ["❌"]
+    assert second["reactions"] == ["✅"]
+    assert second["output"] == "recovered"
 
 
 @pytest.mark.asyncio

@@ -221,6 +221,11 @@ class CodexRunner:
                         "wiseman-image with its attachment URL. Add --question for a "
                         "specific question, or omit it for a generic description. "
                         "Do not claim visual details until the command returns a result. "
+                        "To send a file or image from this thread workspace into the Discord "
+                        "thread, "
+                        "run wiseman-discord send-file PATH --caption 'optional caption'. "
+                        "When the user explicitly requests it, use wiseman-discord set-profile "
+                        "or set-reactions to update the bot presentation. "
                         "Never claim to have searched unless a command returned usable results; "
                         "if a web command fails, say so plainly."
                     ),

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -36,6 +38,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.temporal_runtime import TemporalRuntime
 
 LOGGER = logging.getLogger("wiseman")
+
+DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
+MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_REACTION_LENGTH = 32
+MIN_DISCORD_USERNAME_LENGTH = 2
+MAX_DISCORD_USERNAME_LENGTH = 32
 
 
 class Message(BaseModel):
@@ -562,6 +570,8 @@ class Engine:
         self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
         self.reaction_user: object | None = None
+        self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
+        self.working_reactions: dict[str, str] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -625,10 +635,12 @@ class Engine:
             route=_route_info(),
             input=event.raw_payload or _event_data(event),
         )
-        added = self._react(trigger.id, "👀")
+        processing_emoji = self.reaction_emojis["processing"]
+        self.working_reactions[trigger.id] = processing_emoji
+        added = self._react(trigger.id, processing_emoji)
         if live is not None and added:
-            await live.add_reaction("👀")
-        await self.phoenix.record(trace, "reaction", operations=["add:👀"])
+            await live.add_reaction(processing_emoji)
+        await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
         current = context(event)
         state.seen.update(current["selected_ids"])
         await self.phoenix.record(
@@ -686,15 +698,20 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - visible turn failure, thread survives
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))
-            if self._react(trigger.id, "❌"):
+            failure_emoji = self.reaction_emojis["failure"]
+            if self._react(trigger.id, failure_emoji):
                 if live is not None:
-                    await live.add_reaction("❌")
+                    await live.add_reaction(failure_emoji)
                 if delivery_channel is not None and not await _edit_delivery(
                     progress_message, f"Codex failed: {exc}"
                 ):
                     await delivery_channel.send(f"Codex failed: {exc}")
                 await self._remove_working_reaction(trigger.id, live)
-            await self.phoenix.record(trace, "reaction", operations=["add:❌", "remove:👀"])
+            await self.phoenix.record(
+                trace,
+                "reaction",
+                operations=[f"add:{failure_emoji}", f"remove:{processing_emoji}"],
+            )
             return {
                 "trace": trace,
                 "kind": kind,
@@ -716,11 +733,16 @@ class Engine:
         await self.phoenix.record(trace, "delivery", output=output)
         if delivery_channel is not None and not await _edit_delivery(progress_message, output):
             await delivery_channel.send(output)
-        if self._react(trigger.id, "✅"):
+        success_emoji = self.reaction_emojis["success"]
+        if self._react(trigger.id, success_emoji):
             if live is not None:
-                await live.add_reaction("✅")
+                await live.add_reaction(success_emoji)
             await self._remove_working_reaction(trigger.id, live)
-        await self.phoenix.record(trace, "reaction", operations=["add:✅", "remove:👀"])
+        await self.phoenix.record(
+            trace,
+            "reaction",
+            operations=[f"add:{success_emoji}", f"remove:{processing_emoji}"],
+        )
         return {
             "trace": trace,
             "kind": kind,
@@ -737,13 +759,27 @@ class Engine:
             return True
         return False
 
+    def set_reaction_emojis(self, values: dict[str, str]) -> dict[str, str]:
+        """Set future lifecycle reactions; in-flight turns retain their original emoji."""
+        updated = dict(self.reaction_emojis)
+        for phase in DEFAULT_REACTION_EMOJIS:
+            value = values.get(phase)
+            if value is not None:
+                if not value.strip() or len(value) > MAX_REACTION_LENGTH:
+                    reason = f"invalid {phase} reaction"
+                    raise ValueError(reason)
+                updated[phase] = value
+        self.reaction_emojis = updated
+        return dict(updated)
+
     async def _remove_working_reaction(self, message_id: str, live: discord.Message | None) -> None:
-        if "👀" not in self.reactions[message_id]:
+        emoji = self.working_reactions.pop(message_id, self.reaction_emojis["processing"])
+        if emoji not in self.reactions[message_id]:
             return
-        self.reactions[message_id].remove("👀")
+        self.reactions[message_id].remove(emoji)
         remove = getattr(live, "remove_reaction", None)
         if callable(remove) and self.reaction_user is not None:
-            await cast("Any", remove)("👀", self.reaction_user)
+            await cast("Any", remove)(emoji, self.reaction_user)
 
 
 def _state_data(state: State) -> dict[str, Any]:
@@ -759,7 +795,11 @@ class Gateway(discord.Client):
     """Direct Discord gateway adapter; it delegates to the same admission used by raw replay."""
 
     def __init__(
-        self, engine: Engine, allowlist: set[int], activity_path: str | Path | None = None
+        self,
+        engine: Engine,
+        allowlist: set[int],
+        activity_path: str | Path | None = None,
+        profile_path: str | Path | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -767,7 +807,9 @@ class Gateway(discord.Client):
         self.engine, self.allowlist = engine, allowlist
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
+        self.profile_path = Path(profile_path) if profile_path else None
         self.thread_activity = self._load_thread_activity()
+        self._load_profile()
         self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
         engine.lookup_channel = self.resolve_channel
@@ -816,6 +858,33 @@ class Gateway(discord.Client):
         if thread_id in self.thread_activity:
             self.thread_activity.pop(thread_id)
             self._persist_thread_activity()
+
+    def _load_profile(self) -> None:
+        if self.profile_path is None or not self.profile_path.exists():
+            return
+        try:
+            value = json.loads(self.profile_path.read_text(encoding="utf-8"))
+            reactions = value.get("reaction_emojis", {})
+            if isinstance(reactions, dict):
+                self.engine.set_reaction_emojis(
+                    {str(key): str(item) for key, item in reactions.items()}
+                )
+        except (OSError, TypeError, ValueError, AttributeError):
+            LOGGER.warning("Ignoring invalid Wiseman profile state")
+
+    def persist_profile(self) -> None:
+        if self.profile_path is None:
+            return
+        try:
+            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.profile_path.with_name(f".{self.profile_path.name}.tmp")
+            temporary.write_text(
+                json.dumps({"reaction_emojis": self.engine.reaction_emojis}, sort_keys=True),
+                encoding="utf-8",
+            )
+            temporary.replace(self.profile_path)
+        except OSError:
+            LOGGER.exception("Could not persist Wiseman profile state")
 
     async def run_forever(self, token: str) -> None:
         """Keep the gateway supervised when Discord returns a fatal session error."""
@@ -1024,7 +1093,12 @@ def create_app(  # noqa: C901, PLR0915
     allowlist = {
         int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value
     }
-    bot = Gateway(engine, allowlist, os.getenv("WISEMAN_ACTIVITY_FILE"))
+    activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
+    profile_file = os.getenv("WISEMAN_PROFILE_FILE")
+    if profile_file is None and activity_file:
+        profile_file = str(Path(activity_file).with_name("profile.json"))
+    bot = Gateway(engine, allowlist, activity_file, profile_file)
+    app.state.gateway = bot
     temporal = (
         TemporalRuntime(os.environ["TEMPORAL_ADDRESS"], os.getenv("TEMPORAL_TASK_QUEUE", "wiseman"))
         if os.getenv("TEMPORAL_ADDRESS")
@@ -1158,6 +1232,88 @@ def create_app(  # noqa: C901, PLR0915
         )
         await engine.phoenix.record(trace, "vision_tool", **result)
         return result
+
+    def tool_authorized(authorization: str | None) -> None:
+        expected = os.getenv("WISEMAN_MCP_TOKEN", os.getenv("WISEMAN_PROVIDER_TOKEN", token))
+        if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(401, "invalid tool token")
+
+    @app.post("/v1/tools/set-reactions")
+    async def set_reactions(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        try:
+            values = {
+                phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload
+            }
+            configured = engine.set_reaction_emojis(values)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        bot.persist_profile()
+        return {"reaction_emojis": configured}
+
+    @app.post("/v1/tools/set-profile")
+    async def set_profile(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
+            raise HTTPException(403, "profile edits are disabled")
+        username = payload.get("username")
+        if username is not None and (
+            not isinstance(username, str)
+            or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH
+        ):
+            raise HTTPException(422, "username must be 2-32 characters")
+        kwargs: dict[str, Any] = {}
+        if username is not None:
+            kwargs["username"] = username
+        avatar = payload.get("avatar_base64")
+        if avatar is not None:
+            if not isinstance(avatar, str):
+                raise HTTPException(422, "avatar_base64 must be a string")
+            try:
+                data = base64.b64decode(avatar, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(422, "avatar_base64 is invalid") from exc
+            if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
+                raise HTTPException(422, "avatar exceeds the 8 MiB limit")
+            kwargs["avatar"] = data
+        if not kwargs:
+            raise HTTPException(422, "provide username or avatar")
+        if bot.user is None:
+            raise HTTPException(503, "Discord gateway is not ready")
+        await bot.user.edit(**kwargs)
+        return {"status": "updated", "username": getattr(bot.user, "name", None)}
+
+    @app.post("/v1/tools/send-file")
+    async def send_file(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        thread_id = str(payload.get("thread_id") or "")
+        filename = Path(str(payload.get("filename") or "")).name
+        encoded = payload.get("data_base64")
+        if not thread_id or not filename or filename in {".", ".."} or not isinstance(encoded, str):
+            raise HTTPException(422, "thread_id, filename, and data_base64 are required")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, "data_base64 is invalid") from exc
+        if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
+            raise HTTPException(422, "file must be non-empty and no larger than 8 MiB")
+        try:
+            channel = await bot.fetch_channel(int(thread_id))
+        except (ValueError, discord.DiscordException) as exc:
+            raise HTTPException(404, "Discord thread was not found") from exc
+        if not isinstance(channel, discord.Thread):
+            raise HTTPException(422, "file delivery requires a Discord thread")
+        content = str(payload.get("caption") or "")[:2_000]
+        message = await channel.send(
+            content=content, file=discord.File(io.BytesIO(data), filename=filename)
+        )
+        return {"status": "sent", "message_id": str(message.id), "url": str(message.jump_url)}
 
     @app.post("/v1/replay/discord")
     async def replay(
