@@ -103,3 +103,6 @@ until those dependencies are available.
   toolchain. Managed accounts receive `/bin/bash` and passwordless sudo;
   Codex is instructed to install project-specific packages itself with
   noninteractive `apt-get` commands.
+- A live disposable managed-style account initially exposed the bad wildcard
+  sudo rule (`sudo: a password is required`). The rule now uses the dedicated
+  `wsm_sudo` group and is queued for redeploy and repeat verification.

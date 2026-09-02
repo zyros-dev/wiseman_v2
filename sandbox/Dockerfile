@@ -5,7 +5,8 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
       ca-certificates curl sudo util-linux passwd wget \
-    && printf '%s\n' 'wsm_* ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wiseman \
+    && groupadd --system wsm_sudo \
+    && printf '%s\n' '%wsm_sudo ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wiseman \
     && chmod 0440 /etc/sudoers.d/wiseman \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock ./

@@ -50,6 +50,10 @@ The trusted sandbox intentionally does not bake in a compiler or project
 toolchain: managed accounts have passwordless sudo, a usable shell, outbound
 package access, and a writable root filesystem, so Codex can install the
 dependencies required by the current project itself.
+Each managed account keeps its private primary group for workspace ownership
+and is also placed in the container-local `wsm_sudo` group; that group is the
+only sudo policy entry, and it is intentionally unrestricted because this is a
+trusted shared runner rather than a hostile-user boundary.
 
 ## Turn semantics
 

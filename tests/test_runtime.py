@@ -914,6 +914,7 @@ def test_managed_account_name_is_stable_without_touching_host_accounts(
     assert commands[0][0].endswith("groupadd")
     assert commands[1][0].endswith("useradd")
     assert commands[1][commands[1].index("--shell") + 1] == "/bin/bash"
+    assert commands[1][commands[1].index("--groups") + 1] == "wsm_sudo"
 
 
 @pytest.mark.asyncio

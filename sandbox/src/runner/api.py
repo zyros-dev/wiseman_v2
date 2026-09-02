@@ -69,6 +69,8 @@ class Workspace:
                     "--system",
                     "--gid",
                     name,
+                    "--groups",
+                    "wsm_sudo",
                     "--home-dir",
                     str(self.root / "users" / user),
                     "--shell",
