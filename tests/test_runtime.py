@@ -758,6 +758,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
     assert activities == [provision_workspace, start_codex, run_turn]
@@ -783,6 +784,7 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 4}}
     assert activities == [provision_workspace, start_codex, run_turn, run_turn]
@@ -814,6 +816,28 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
         "codex_thread": "codex-thread",
     }
     assert calls == [("acquire", ("u", "t")), ("start", ("", "u", "t"))]
+
+
+@pytest.mark.asyncio
+async def test_temporal_old_workflow_history_keeps_one_activity(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        return {"state": {"turn": 1}}
+
+    async def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _id: False)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    result = await workflow.run({"event": {"id": "old"}})
+    assert result == {"state": {"turn": 1}}
+    assert activities == [run_turn]
 
 
 @pytest.mark.asyncio

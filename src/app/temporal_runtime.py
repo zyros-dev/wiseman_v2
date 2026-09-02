@@ -72,9 +72,10 @@ class ThreadWorkflow:
     @workflow.run
     async def run(self, first: dict[str, Any]) -> dict[str, Any]:
         self.pending.append(first["event"])
+        split_startup = workflow.patched("split-startup-activities")
         while True:
             event = self.pending.pop(0)
-            if not self.started:
+            if split_startup and not self.started:
                 await workflow.execute_activity(
                     provision_workspace,
                     {"event": event, "state": self.state},
