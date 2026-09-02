@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from collections import defaultdict
@@ -28,10 +29,12 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import set_span_in_context
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.temporal_runtime import TemporalRuntime
+
+LOGGER = logging.getLogger("wiseman")
 
 
 class Message(BaseModel):
@@ -232,6 +235,7 @@ MAX_ANCESTORS = 12
 THREAD_IDLE_SECONDS = 7200
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
+DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
 
 
 def _json(value: object) -> str:
@@ -594,6 +598,37 @@ class Gateway(discord.Client):
     async def setup_hook(self) -> None:
         self.expiry_task = asyncio.create_task(self._expire_threads())
 
+    async def on_ready(self) -> None:
+        DISCORD_CONNECTED.set(1)
+        LOGGER.info("Discord gateway ready as %s", self.user)
+
+    async def on_disconnect(self) -> None:
+        DISCORD_CONNECTED.set(0)
+        LOGGER.warning("Discord gateway disconnected; discord.py will reconnect")
+
+    async def on_resumed(self) -> None:
+        DISCORD_CONNECTED.set(1)
+        LOGGER.info("Discord gateway session resumed")
+
+    async def run_forever(self, token: str) -> None:
+        """Keep the gateway supervised when Discord returns a fatal session error."""
+        delay = 1.0
+        while not self.is_closed():
+            try:
+                await self.start(token, reconnect=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                DISCORD_CONNECTED.set(0)
+                LOGGER.exception("Discord gateway session failed; retrying")
+            else:
+                if not self.is_closed():
+                    LOGGER.warning("Discord gateway stopped unexpectedly; retrying")
+            if self.is_closed():
+                return
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
     async def _expire_threads(self) -> None:
         while True:
             await asyncio.sleep(60)
@@ -610,6 +645,7 @@ class Gateway(discord.Client):
                 self.thread_activity.pop(thread_id, None)
 
     async def close(self) -> None:
+        DISCORD_CONNECTED.set(0)
         if self.expiry_task is not None:
             self.expiry_task.cancel()
             await asyncio.gather(self.expiry_task, return_exceptions=True)
@@ -767,7 +803,7 @@ def create_app(  # noqa: C901, PLR0915
         if temporal is not None:
             await temporal.start()
         if discord_token:
-            task = asyncio.create_task(bot.start(discord_token))
+            task = asyncio.create_task(bot.run_forever(discord_token))
 
     @app.on_event("shutdown")
     async def stop_discord() -> None:
@@ -783,6 +819,8 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.get("/readyz")
     async def ready() -> dict[str, str]:
+        if discord_token and not bot.is_ready():
+            raise HTTPException(503, "Discord gateway is not ready")
         return {"status": "ready"}
 
     @app.get("/metrics")

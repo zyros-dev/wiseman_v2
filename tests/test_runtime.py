@@ -322,15 +322,38 @@ def test_app_health_and_replay_authentication() -> None:
 def test_app_starts_discord_with_discord_token_not_replay_token(monkeypatch) -> None:
     received: list[str] = []
 
-    async def fake_start(_bot: Gateway, token: str) -> None:
+    async def fake_run(_bot: Gateway, token: str) -> None:
         received.append(token)
 
-    monkeypatch.setattr(Gateway, "start", fake_start)
+    monkeypatch.setattr(Gateway, "run_forever", fake_run)
     with TestClient(
         create_app(Engine(Phoenix(), FakeRunner()), token="replay", discord_token="discord")
     ):
         pass
     assert received == ["discord"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
+    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    calls = 0
+
+    async def fake_start(_token: str, **kwargs: object) -> None:
+        nonlocal calls
+        assert kwargs["reconnect"] is True
+        calls += 1
+        if calls > 1:
+            await bot.close()
+            return
+        raise RuntimeError
+
+    async def fake_sleep(_delay: float) -> None:
+        del _delay
+
+    monkeypatch.setattr(bot, "start", fake_start)
+    monkeypatch.setattr("app.main.asyncio.sleep", fake_sleep)
+    await bot.run_forever("discord")
+    assert calls == 2
 
 
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
