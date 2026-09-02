@@ -186,7 +186,79 @@ class CodexRunner:
 
     def __init__(self) -> None:
         self.codex: dict[str, AsyncCodex] = {}
+        self.threads: dict[str, object] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+
+    async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
+        lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
+        async with lock:
+            return await self._start_locked(turn, path, account)
+
+    async def _start_locked(self, turn: Turn, path: Path, account: str) -> dict[str, object]:
+        existing = self.threads.get(turn.thread_id)
+        if not turn.codex_thread_id and existing is not None:
+            return {"thread_id": getattr(existing, "id", "")}
+        client = self._client(turn, path, account)
+        if turn.codex_thread_id:
+            thread = await client.thread_resume(
+                turn.codex_thread_id,
+                approval_mode=ApprovalMode.deny_all,
+                sandbox=Sandbox.full_access,
+                cwd=str(path),
+                model=os.getenv("WISEMAN_MODEL") or None,
+                model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
+            )
+        else:
+            thread = await client.thread_start(
+                approval_mode=ApprovalMode.deny_all,
+                sandbox=Sandbox.full_access,
+                cwd=str(path),
+                developer_instructions=self._developer_instructions(),
+                model=os.getenv("WISEMAN_MODEL") or None,
+                model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
+            )
+        self.threads[turn.thread_id] = thread
+        return {"thread_id": thread.id}
+
+    def _client(self, turn: Turn, path: Path, account: str) -> AsyncCodex:
+        key = turn.thread_id
+        if key not in self.codex:
+            env = dict(os.environ)
+            if relay := os.getenv("WISEMAN_RELAY_URL"):
+                env["OPENAI_BASE_URL"] = relay
+            env["OPENAI_API_KEY"] = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
+            env["HOME"], env["CODEX_HOME"] = str(path), str(path / ".codex")
+            env["WISEMAN_EXEC_USER"] = account
+            env["WISEMAN_THREAD_ID"] = turn.thread_id
+            self.codex[key] = AsyncCodex(
+                CodexConfig(
+                    codex_bin=os.getenv("WISEMAN_CODEX_BIN") or None,
+                    config_overrides=CODEX_TEXT_ONLY_OVERRIDES,
+                    cwd=str(path),
+                    env=env,
+                )
+            )
+        return self.codex[key]
+
+    @staticmethod
+    def _developer_instructions() -> str:
+        return (
+            "Use shared/AGENTS.md and shared/memories.md. "
+            "For current or external facts, use available network tools. "
+            "When Discord context includes an image attachment, use "
+            "wiseman-image with its attachment URL. Add --question for a "
+            "specific question, or omit it for a generic description. "
+            "Do not claim visual details until the command returns a result. "
+            "To send a file or image from this thread workspace into the Discord "
+            "thread, run wiseman-discord send-file PATH --caption 'optional caption'. "
+            "When the user explicitly requests it, use wiseman-discord set-profile "
+            "or set-reactions to update the bot presentation. "
+            "This trusted runner permits package installation: use sudo -n apt-get "
+            "update and sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install. "
+            "For large builds, use the available disk and keep parallelism modest. "
+            "Never claim to have searched unless a command returned usable results; "
+            "if a web command fails, say so plainly."
+        )
 
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
@@ -194,60 +266,28 @@ class CodexRunner:
             # A client owns its cwd and Codex session environment, so it is
             # private to a Discord thread even when the user has many threads.
             key = turn.thread_id
-            if key not in self.codex:
-                env = dict(os.environ)
-                if relay := os.getenv("WISEMAN_RELAY_URL"):
-                    env["OPENAI_BASE_URL"] = relay
-                env["OPENAI_API_KEY"] = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
-                env["HOME"], env["CODEX_HOME"] = str(path), str(path / ".codex")
-                env["WISEMAN_EXEC_USER"] = account
-                env["WISEMAN_THREAD_ID"] = turn.thread_id
-                self.codex[key] = AsyncCodex(
-                    CodexConfig(
-                        codex_bin=os.getenv("WISEMAN_CODEX_BIN") or None,
-                        config_overrides=CODEX_TEXT_ONLY_OVERRIDES,
-                        cwd=str(path),
-                        env=env,
-                    )
-                )
-            client = self.codex[key]
+            client = self._client(turn, path, account)
             provider = "wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None
             model = os.getenv("WISEMAN_MODEL") or None
-            if not turn.codex_thread_id:
-                thread = await client.thread_start(
-                    approval_mode=ApprovalMode.deny_all,
-                    sandbox=Sandbox.full_access,
-                    cwd=str(path),
-                    developer_instructions=(
-                        "Use shared/AGENTS.md and shared/memories.md. "
-                        "For current or external facts, use available network tools. "
-                        "When Discord context includes an image attachment, use "
-                        "wiseman-image with its attachment URL. Add --question for a "
-                        "specific question, or omit it for a generic description. "
-                        "Do not claim visual details until the command returns a result. "
-                        "To send a file or image from this thread workspace into the Discord "
-                        "thread, "
-                        "run wiseman-discord send-file PATH --caption 'optional caption'. "
-                        "When the user explicitly requests it, use wiseman-discord set-profile "
-                        "or set-reactions to update the bot presentation. "
-                        "This trusted runner permits package installation: use sudo -n apt-get "
-                        "update and sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install. "
-                        "For large builds, use the available disk and keep parallelism modest. "
-                        "Never claim to have searched unless a command returned usable results; "
-                        "if a web command fails, say so plainly."
-                    ),
-                    model=model,
-                    model_provider=provider,
-                )
-            else:
-                thread = await client.thread_resume(
-                    turn.codex_thread_id,
-                    approval_mode=ApprovalMode.deny_all,
-                    sandbox=Sandbox.full_access,
-                    cwd=str(path),
-                    model=model,
-                    model_provider=provider,
-                )
+            thread = self.threads.get(key)
+            if thread is None or (
+                turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id
+            ):
+                if not turn.codex_thread_id:
+                    started = await self._start_locked(turn, path, account)
+                    thread = self.threads[key]
+                    assert started["thread_id"] == thread.id
+                else:
+                    thread = await client.thread_resume(
+                        turn.codex_thread_id,
+                        approval_mode=ApprovalMode.deny_all,
+                        sandbox=Sandbox.full_access,
+                        cwd=str(path),
+                        model=model,
+                        model_provider=provider,
+                    )
+                    self.threads[key] = thread
+            assert thread is not None
             result = await thread.run(
                 turn.input,
                 approval_mode=ApprovalMode.deny_all,
@@ -307,6 +347,17 @@ def create_app() -> FastAPI:  # noqa: C901
         _auth(authorization, secret)
         path = workspaces.thread(turn.user_id, turn.thread_id)
         return {"thread_id": turn.thread_id, "path": str(path), "shared": str(path / "shared")}
+
+    @app.post("/start")
+    async def start(
+        turn: Turn, authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, object]:
+        _auth(authorization, secret)
+        path = workspaces.thread(turn.user_id, turn.thread_id)
+        try:
+            return await codex.start(turn, path, workspaces.username(turn.user_id))
+        except Exception as exc:
+            raise HTTPException(503, f"codex startup unavailable: {exc}") from exc
 
     @app.post("/turn")
     async def run(

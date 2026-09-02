@@ -516,38 +516,80 @@ class Runner(Protocol):
     ) -> tuple[str, str, dict[str, object]]: ...
 
 
+class LifecycleRunner(Runner, Protocol):
+    async def acquire(self, user: str, workspace: str) -> None: ...
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str: ...
+
+
+class RunnerError(RuntimeError):
+    """Raised when the runner returns an invalid or failed response."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"runner returned HTTP {status}: {detail}")
+
+
 class HttpRunner:
     """Thin authenticated client for the warm Codex runner."""
 
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 
+    async def _post(
+        self, path: str, payload: dict[str, object], request_timeout: float = 30
+    ) -> dict[str, Any]:
+        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(f"{self.url}{path}", headers=headers, json=payload)
+        if response.is_error:
+            detail = response.text[:1_000]
+            raise RunnerError(response.status_code, detail)
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        return value
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        await self._post("/acquire", {"thread_id": workspace, "user_id": user, "input": ""})
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        data = await self._post(
+            "/start",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": "",
+            },
+        )
+        return str(data.get("thread_id", thread))
+
     async def run(
         self, thread: str, prompt: str, user: str, workspace: str = ""
     ) -> tuple[str, str, dict[str, object]]:
-        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(
-                f"{self.url}/turn",
-                headers=headers,
-                json={
-                    "thread_id": workspace or thread or f"thread-{user}",
-                    "codex_thread_id": thread or None,
-                    "user_id": user,
-                    "input": prompt,
-                },
-            )
-        if response.is_error:
-            detail = response.text[:1_000]
-            error = f"runner returned HTTP {response.status_code}: {detail}"
-            raise RuntimeError(error)
-        data = response.json()
+        data = await self._post(
+            "/turn",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": prompt,
+            },
+            request_timeout=300,
+        )
         billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
 
 
 class FakeRunner:
     """Deterministic local runner used only when no sandbox URL is configured."""
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        del user, workspace
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        del workspace
+        return thread or f"codex-{user}"
 
     async def run(
         self, thread: str, prompt: str, user: str, workspace: str = ""

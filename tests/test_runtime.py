@@ -29,7 +29,14 @@ from app.main import (
     create_app,
     normalize_event,
 )
-from app.temporal_runtime import TemporalError, TemporalRuntime, ThreadWorkflow, run_turn
+from app.temporal_runtime import (
+    TemporalError,
+    TemporalRuntime,
+    ThreadWorkflow,
+    provision_workspace,
+    run_turn,
+    start_codex,
+)
 from runner.api import CODEX_TEXT_ONLY_OVERRIDES, ApprovalMode, Sandbox, Workspace
 from runner.api import create_app as runner_app
 
@@ -736,9 +743,13 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
 async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     await workflow.submit({"id": "queued"})
+    activities: list[object] = []
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
-        del args, kwargs
+        del kwargs
+        activities.append(args[0])
+        if args[0] is start_codex:
+            return {"state": {"codex_thread": "codex-thread"}}
         return {"state": {"turn": 1}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
@@ -749,6 +760,60 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
+    assert activities == [provision_workspace, start_codex, run_turn]
+
+
+@pytest.mark.asyncio
+async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        if args[0] is start_codex:
+            return {"state": {"codex_thread": "codex-thread"}}
+        return {"state": {"turn": len(activities)}}
+
+    async def wait_for_signal(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        workflow.pending.append({"id": "followup"})
+        if len(activities) > 3:
+            raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
+    result = await workflow.run({"event": {"id": "first"}})
+    assert result == {"state": {"turn": 4}}
+    assert activities == [provision_workspace, start_codex, run_turn, run_turn]
+
+
+@pytest.mark.asyncio
+async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Runner:
+        async def acquire(self, user: str, workspace: str) -> None:
+            calls.append(("acquire", (user, workspace)))
+
+        async def start(self, thread: str, user: str, workspace: str) -> str:
+            calls.append(("start", (thread, user, workspace)))
+            return "codex-thread"
+
+    class Engine:
+        runner = Runner()
+
+    monkeypatch.setattr("app.main.engine", Engine())
+    payload = {
+        "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
+    }
+    assert await provision_workspace(payload) == {"workspace": "t"}
+    assert await start_codex({**payload, "state": {"turn": 0}}) == {
+        "state": {"turn": 0, "codex_thread": "codex-thread"},
+        "workspace": "t",
+        "codex_thread": "codex-thread",
+    }
+    assert calls == [("acquire", ("u", "t")), ("start", ("", "u", "t"))]
 
 
 @pytest.mark.asyncio
@@ -982,8 +1047,23 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     client = TestClient(runner_app())
     headers = {"authorization": "Bearer secret"}
+    started = client.post(
+        "/start", headers=headers, json={"thread_id": "t", "user_id": "u", "input": ""}
+    )
+    assert started.json()["thread_id"] == "codex-thread"
+    retried_start = client.post(
+        "/start", headers=headers, json={"thread_id": "t", "user_id": "u", "input": ""}
+    )
+    assert retried_start.json()["thread_id"] == "codex-thread"
     first = client.post(
-        "/turn", headers=headers, json={"thread_id": "t", "user_id": "u", "input": "one"}
+        "/turn",
+        headers=headers,
+        json={
+            "thread_id": "t",
+            "codex_thread_id": "codex-thread",
+            "user_id": "u",
+            "input": "one",
+        },
     )
     second = client.post(
         "/turn",
@@ -995,6 +1075,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert calls[0]["sandbox"] is Sandbox.full_access
     assert calls[0]["model"] == "provider/model"
     assert calls[0]["model_provider"] == "wiseman-relay"
+    assert len(calls) == 1
     assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
     assert "sudo -n apt-get" in str(calls[0]["developer_instructions"])
     assert configs[0].config_overrides == CODEX_TEXT_ONLY_OVERRIDES

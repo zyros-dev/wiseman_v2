@@ -36,3 +36,10 @@ Telegraf-to-TimescaleDB path. Wiseman does not maintain a second metrics
 database or put message IDs, prompt content, raw requests, or secrets in
 metrics labels. `GET /metrics` exposes turn and failure counters for Telegraf;
 Phoenix remains the source for the detailed semantic lifecycle.
+
+Temporal exposes the durable startup boundaries separately: `wiseman.workspace`
+materializes the user/thread workspace, `wiseman.codex_start` creates or
+resumes the SDK thread, and `wiseman.turn` performs context construction, the
+model turn, delivery, and terminal reaction. Follow-up turns skip the first
+two Activities and execute only `wiseman.turn`. Activity schedule, start, and
+completion timestamps provide the startup-versus-model latency breakdown.
