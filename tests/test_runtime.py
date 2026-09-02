@@ -739,6 +739,48 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     assert provider["request"] == {"model": "requested"}
 
 
+def test_provider_relay_retries_disconnect_before_response(monkeypatch) -> None:
+    class Response:
+        is_error = False
+        status_code = 200
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def aiter_lines(self):
+            yield 'data: {"response":{"model":"served"}}'
+            yield "data: [DONE]"
+
+    class Client:
+        attempts = 0
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        def stream(self, method: str, url: str, **kwargs: object) -> Response:
+            del method, url, kwargs
+            self.attempts += 1
+            if self.attempts == 1:
+                raise httpx.RemoteProtocolError("disconnected")
+            return Response()
+
+    client = Client()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: client)
+    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+        "/v1/responses", json={"model": "requested"}
+    )
+    assert response.status_code == 200
+    assert client.attempts == 2
+    assert "[DONE]" in response.text
+
+
 @pytest.mark.asyncio
 async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) -> None:
     workflow = ThreadWorkflow()

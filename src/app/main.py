@@ -1204,42 +1204,49 @@ def create_app(  # noqa: C901, PLR0915
             async with (
                 httpx.AsyncClient(timeout=300) as client,
             ):
+                stream_started = False
                 for attempt in range(UPSTREAM_RETRY_ATTEMPTS):
-                    async with client.stream(
-                        "POST",
-                        f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
-                        headers={
-                            "authorization": f"Bearer {key}",
-                            "content-type": "application/json",
-                        },
-                        json=payload,
-                    ) as response:
-                        if response.is_error:
-                            detail = (await response.aread()).decode(errors="replace")[:1_000]
-                            retryable = (
-                                response.status_code in UPSTREAM_RETRY_STATUSES
-                                or response.status_code >= UPSTREAM_SERVER_ERROR
-                            ) and not (
-                                response.status_code == HTTP_NOT_FOUND
-                                and "No endpoints found that support image input" in detail
-                            )
-                            if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
-                                await asyncio.sleep(0.5 * (attempt + 1))
-                                continue
-                            error = f"OpenRouter returned HTTP {response.status_code}: {detail}"
-                            raise RuntimeError(error)
-                        async for line in response.aiter_lines():
-                            if line.startswith("data:"):
-                                try:
-                                    body = json.loads(line[5:].strip())
-                                    if isinstance(body, dict):
-                                        usage, cost, served_model = _provider_values(
-                                            body, usage, cost, served_model
-                                        )
-                                except ValueError:
-                                    pass
-                            yield f"{line}\n".encode()
-                        break
+                    try:
+                        async with client.stream(
+                            "POST",
+                            f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
+                            headers={
+                                "authorization": f"Bearer {key}",
+                                "content-type": "application/json",
+                            },
+                            json=payload,
+                        ) as response:
+                            if response.is_error:
+                                detail = (await response.aread()).decode(errors="replace")[:1_000]
+                                retryable = (
+                                    response.status_code in UPSTREAM_RETRY_STATUSES
+                                    or response.status_code >= UPSTREAM_SERVER_ERROR
+                                ) and not (
+                                    response.status_code == HTTP_NOT_FOUND
+                                    and "No endpoints found that support image input" in detail
+                                )
+                                if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
+                                    await asyncio.sleep(0.5 * (attempt + 1))
+                                    continue
+                                error = f"OpenRouter returned HTTP {response.status_code}: {detail}"
+                                raise RuntimeError(error)
+                            async for line in response.aiter_lines():
+                                stream_started = True
+                                if line.startswith("data:"):
+                                    try:
+                                        body = json.loads(line[5:].strip())
+                                        if isinstance(body, dict):
+                                            usage, cost, served_model = _provider_values(
+                                                body, usage, cost, served_model
+                                            )
+                                    except ValueError:
+                                        pass
+                                yield f"{line}\n".encode()
+                            break
+                    except httpx.HTTPError:
+                        if stream_started or attempt + 1 >= UPSTREAM_RETRY_ATTEMPTS:
+                            raise
+                        await asyncio.sleep(0.5 * (attempt + 1))
             await engine.phoenix.record(
                 trace,
                 "provider",
