@@ -14,4 +14,5 @@ RUN chmod 0755 /usr/local/bin/codex-as-user
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev --no-install-project
 ENV PYTHONPATH=/app/sandbox/src WISEMAN_CODEX_BIN=/usr/local/bin/codex-as-user
-CMD ["uv", "run", "uvicorn", "runner.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090"]
+ENV PATH="/app/.venv/bin:$PATH"
+CMD ["uvicorn", "runner.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090"]
