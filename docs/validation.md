@@ -68,3 +68,9 @@ until those dependencies are available.
 - Phoenix inspection for that process showed, for each trace, `turn`,
   `reaction`, `context`, `grammar`, `prompt`, three progress nodes, `codex`,
   `delivery`, and terminal `reaction`.
+
+## Vision assist
+
+- The image contract test verifies Discord image URLs are sent to
+  `z-ai/glm-5.3-flash` as multimodal content and the returned description is
+  available to the primary Codex prompt.

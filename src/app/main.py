@@ -346,6 +346,7 @@ def _route_info() -> dict[str, Any]:
         "input_price": os.getenv("WISEMAN_INPUT_PRICE"),
         "output_price": os.getenv("WISEMAN_OUTPUT_PRICE"),
         "cached_price": os.getenv("WISEMAN_CACHED_PRICE"),
+        "vision_assist_model": os.getenv("WISEMAN_VISION_MODEL"),
     }
     return {
         key: info.get(key, value) for key, value in defaults.items() if info.get(key, value)
@@ -365,6 +366,7 @@ def _banner() -> str:
         ("Input", "input_price"),
         ("Output", "output_price"),
         ("Cached", "cached_price"),
+        ("Vision assist", "vision_assist_model"),
     ):
         if key in info:
             details.append(f"{label}: `{info[key]}`")
@@ -382,6 +384,69 @@ def _startup_embed() -> discord.Embed:
         description=description,
         colour=0x57F287,
     )
+
+
+async def _describe_images(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Ask the configured vision model to describe bounded Discord image attachments."""
+    images: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for message in messages:
+        for attachment in message.get("attachments", []):
+            content_type = str(attachment.get("content_type") or "")
+            url = str(attachment.get("url") or attachment.get("proxy_url") or "")
+            attachment_id = str(attachment.get("id") or url)
+            if content_type.startswith("image/") and url and attachment_id not in seen:
+                images.append({"id": attachment_id, "url": url})
+                seen.add(attachment_id)
+    if not images:
+        return {"text": "", "attachments": []}
+    model = os.getenv("WISEMAN_VISION_MODEL", "z-ai/glm-5.3-flash")
+    key = os.getenv("OPENROUTER_API_KEY", "")
+    if not key:
+        return {
+            "text": "[Image description unavailable: vision provider is not configured.]",
+            "model": model,
+            "attachments": [item["id"] for item in images],
+        }
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "Describe each attached image factually for another assistant. "
+            "Read visible text and report relevant objects, quantities, prices, and layout. "
+            "Do not guess details that are not visible.",
+        },
+        *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/chat/completions",
+                headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                    "max_tokens": 500,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(answer, list):
+            answer = "".join(str(item.get("text", "")) for item in answer if isinstance(item, dict))
+        usage = data.get("usage")
+        return {
+            "text": str(answer),
+            "model": data.get("model", model),
+            "usage": usage,
+            "cost": usage.get("cost") if isinstance(usage, dict) else data.get("cost"),
+            "attachments": [item["id"] for item in images],
+        }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        return {
+            "text": f"[Image description unavailable: {type(exc).__name__}].",
+            "model": model,
+            "attachments": [item["id"] for item in images],
+        }
 
 
 async def _edit_delivery(message: object | None, content: str) -> bool:
@@ -526,6 +591,9 @@ class Engine:
             normalized=current,
             selected_ids=current["selected_ids"],
         )
+        vision = await _describe_images(current["messages"])
+        if vision["attachments"]:
+            await self.phoenix.record(trace, "vision", **vision)
         grammar_name = "startup-context" if kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
         grammar = _grammar(
@@ -541,6 +609,7 @@ class Engine:
             "runtime": await self.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
             "context": grammar["rendered"],
+            "image_descriptions": vision["text"],
             "user": trigger.content,
         }
         prompt = _json(parts)

@@ -22,6 +22,7 @@ from app.main import (
     PromptHub,
     State,
     _banner,
+    _describe_images,
     _history,
     _provider_values,
     create_app,
@@ -115,6 +116,55 @@ def test_normalize_discord_gateway_message_create_envelope() -> None:
     event = normalize_event(payload)
     assert event.trigger.id == "gateway"
     assert event.raw_payload == payload
+
+
+@pytest.mark.asyncio
+async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
+    requests: list[dict[str, Any]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "model": "z-ai/glm-5.3-flash",
+                "choices": [{"message": {"content": "Three black office chairs."}}],
+                "usage": {"cost": 0.01},
+            }
+
+    class Client:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def post(self, url: str, **kwargs: object) -> Response:
+            requests.append({"url": url, **kwargs})
+            return Response()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setattr("app.main.httpx.AsyncClient", Client)
+    result = await _describe_images(
+        [
+            {
+                "attachments": [
+                    {"id": "image-1", "content_type": "image/jpeg", "url": "https://cdn/image.jpg"}
+                ]
+            }
+        ]
+    )
+    assert result["text"] == "Three black office chairs."
+    assert result["attachments"] == ["image-1"]
+    assert requests[0]["json"]["model"] == "z-ai/glm-5.3-flash"
+    assert (
+        requests[0]["json"]["messages"][0]["content"][1]["image_url"]["url"]
+        == "https://cdn/image.jpg"
+    )
 
 
 def test_reaction_state_is_idempotent() -> None:

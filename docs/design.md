@@ -29,6 +29,13 @@ Prompt Hub overrides them by versioned name when configured.
 Soul and runtime prompt components use the same Prompt Hub boundary, with local
 environment fallbacks; memories remain workspace data.
 
+The primary route is text-only DeepSeek V4 Flash. Image attachments are sent to
+the configured `WISEMAN_VISION_MODEL` (`z-ai/glm-5.3-flash`) through OpenRouter's
+multimodal Chat Completions endpoint. Its bounded factual description is added
+to the normal Codex input, and the `vision` event records the model, attachment
+IDs, usage, cost, and description. Vision failure is visible to Codex as an
+unavailable-image note rather than silently becoming an invented observation.
+
 ## Turn semantics
 
 The first event for a thread is `startup`: it selects at most 100 parent
