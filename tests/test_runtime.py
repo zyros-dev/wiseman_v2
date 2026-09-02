@@ -5,7 +5,7 @@
 import json
 import os
 from datetime import UTC, datetime
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import httpx
 import pytest
@@ -249,9 +249,19 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
     class Channel:
         def __init__(self) -> None:
             self.sent: list[str] = []
+            self.embeds: list[object] = []
 
-        async def send(self, content: str) -> None:
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            index = len(self.sent)
             self.sent.append(content)
+            self.embeds.append(kwargs.get("embed"))
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    channel.sent[index] = content
+
+            channel = self
+            return Delivery()
 
     class Live:
         def __init__(self) -> None:
@@ -267,13 +277,10 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
     )
     assert result["reactions"] == ["👀", "✅"]
     assert live.reactions == ["👀", "✅"]
-    assert "model" in live.channel.sent[0]
-    assert live.channel.sent[1:] == [
-        "🛠️ Workspace provisioning...",
-        "🤖 Codex starting...",
-        "✍️ Finishing the response...",
-        live.channel.sent[-1],
-    ]
+    assert live.channel.sent[0] == ""
+    assert live.channel.sent[1].startswith("Codex received: ")
+    assert live.channel.embeds[0] is not None
+    assert live.channel.embeds[0].title == "⚡ Wiseman thread startup"
 
 
 @pytest.mark.asyncio
@@ -435,14 +442,17 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
         def __init__(self) -> None:
             self.guild = Guild(1)
             self.sent: list[str] = []
+            self.embeds: list[object] = []
             self.thread: Thread | None = None
 
         async def history(self, **kwargs: object):
             del kwargs
             yield raw_message("parent-history", self)
 
-        async def send(self, content: str) -> None:
+        async def send(self, content: str = "", **kwargs: object) -> object:
             self.sent.append(content)
+            self.embeds.append(kwargs.get("embed"))
+            return object()
 
     class Thread:
         parent_id = 1
@@ -450,13 +460,23 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
         def __init__(self, parent: Channel) -> None:
             self.id, self.parent, self.guild = 2, parent, parent.guild
             self.sent: list[str] = []
+            self.embeds: list[object] = []
 
         async def history(self, **kwargs: object):
             del kwargs
             yield raw_message("thread-history", self)
 
-        async def send(self, content: str) -> None:
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            index = len(self.sent)
             self.sent.append(content)
+            self.embeds.append(kwargs.get("embed"))
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    thread.sent[index] = content
+
+            thread = self
+            return Delivery()
 
         async def edit(self, **kwargs: object) -> None:
             del kwargs
@@ -496,9 +516,14 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     assert startup.reactions == ["👀", "✅"]
     assert followup.reactions == ["👀", "✅"]
     assert parent.thread is not None
-    assert parent.thread.sent
+    assert len(parent.thread.sent) == 3
+    assert parent.thread.sent[0] == ""
+    assert parent.thread.sent[1].startswith("Codex received: ")
+    assert parent.thread.sent[2].startswith("Codex received: ")
     assert not parent.sent
-    assert parent.thread.sent[0].startswith("⚡ **Wiseman thread startup**")
+    assert parent.thread.embeds[0] is not None
+    assert cast("Any", parent.thread.embeds[0]).title == "⚡ Wiseman thread startup"
+    assert parent.thread.sent[-1].startswith("Codex received: ")
 
     rejected = Channel()
     rejected.guild = Guild(2)
