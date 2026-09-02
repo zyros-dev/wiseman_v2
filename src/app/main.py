@@ -449,6 +449,7 @@ class Engine:
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
+        self.reaction_user: object | None = None
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -470,7 +471,7 @@ class Engine:
                     delivery_channel = live.channel
             return await self._handle(event, live, delivery_channel, state_data)
 
-    async def _handle(  # noqa: C901, PLR0915
+    async def _handle(  # noqa: C901, PLR0912, PLR0915
         self,
         event: Event,
         live: discord.Message | None = None,
@@ -569,12 +570,15 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - visible turn failure, thread survives
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))
-            if self._react(trigger.id, "❌") and live is not None:
+            if self._react(trigger.id, "❌"):
+                if live is not None:
+                    await live.add_reaction("❌")
                 if delivery_channel is not None and not await _edit_delivery(
                     progress_message, f"Codex failed: {exc}"
                 ):
                     await delivery_channel.send(f"Codex failed: {exc}")
-                await live.add_reaction("❌")
+                await self._remove_working_reaction(trigger.id, live)
+            await self.phoenix.record(trace, "reaction", operations=["add:❌", "remove:👀"])
             return {
                 "trace": trace,
                 "kind": kind,
@@ -596,9 +600,11 @@ class Engine:
         await self.phoenix.record(trace, "delivery", output=output)
         if delivery_channel is not None and not await _edit_delivery(progress_message, output):
             await delivery_channel.send(output)
-        if self._react(trigger.id, "✅") and live is not None:
-            await live.add_reaction("✅")
-        await self.phoenix.record(trace, "reaction", operations=["add:✅"])
+        if self._react(trigger.id, "✅"):
+            if live is not None:
+                await live.add_reaction("✅")
+            await self._remove_working_reaction(trigger.id, live)
+        await self.phoenix.record(trace, "reaction", operations=["add:✅", "remove:👀"])
         return {
             "trace": trace,
             "kind": kind,
@@ -614,6 +620,14 @@ class Engine:
             self.reactions[message_id].append(emoji)
             return True
         return False
+
+    async def _remove_working_reaction(self, message_id: str, live: discord.Message | None) -> None:
+        if "👀" not in self.reactions[message_id]:
+            return
+        self.reactions[message_id].remove("👀")
+        remove = getattr(live, "remove_reaction", None)
+        if callable(remove) and self.reaction_user is not None:
+            await cast("Any", remove)("👀", self.reaction_user)
 
 
 def _state_data(state: State) -> dict[str, Any]:
@@ -705,6 +719,7 @@ class Gateway(discord.Client):
         try:
             channel = await self.fetch_channel(int(channel_id))
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                self.engine.reaction_user = self.user
                 return await channel.fetch_message(int(event.trigger.id))
             return None  # noqa: TRY300
         except (discord.DiscordException, ValueError):
@@ -784,6 +799,7 @@ class Gateway(discord.Client):
         if self.temporal is not None:
             await self.temporal.submit(event.model_dump(mode="json"))
         else:
+            self.engine.reaction_user = self.user
             await self.engine.handle(event, message, delivery_channel=delivery_channel)
 
 

@@ -46,7 +46,7 @@ The live Discord adapter creates a thread for a parent-channel mention,
 collects bounded history, emits one green startup embed, and edits one compact
 working message into the answer for each turn. Startup-only provisioning and
 Codex-start status is never repeated on follow-ups. It adds `👀` once and then
-`✅` or `❌`; it never removes `👀` and does not duplicate terminal reactions. The deployment allowlist is
+`✅` or `❌`; it removes the processing `👀` after adding the terminal reaction and does not duplicate terminal reactions. The deployment allowlist is
 guild-based and is enforced for both parent channels and managed threads;
 messages from DMs or other guilds are ignored before context collection. The
 trigger message remains the reaction target; all banner, progress, failure,

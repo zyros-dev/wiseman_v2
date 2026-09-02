@@ -92,7 +92,7 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     context = [item for item in engine.phoenix.records if item["node"] == "context"][-1]
     assert context["normalized"]["reply_ancestors"][0]["id"] == "1"
     assert "1" not in {item["id"] for item in context["normalized"]["surrounding"]}
-    assert engine.reactions["1"] == ["👀", "✅"]
+    assert engine.reactions["1"] == ["✅"]
     duplicate = client.post("/v1/discord/events", headers=headers, json=startup)
     assert duplicate.json()["status"] == "duplicate"
     assert duplicate.json()["state"]["turn"] == 2
@@ -225,7 +225,7 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     engine = Engine(Phoenix(), FailingRunner())
     result = await engine.handle(normalize_event(discord_message("failure", "hello", thread="t")))
     assert result["error"] == "runner down"
-    assert result["reactions"] == ["👀", "❌"]
+    assert result["reactions"] == ["❌"]
     assert any(item["node"] == "failure" for item in engine.phoenix.records)
 
 
@@ -292,12 +292,18 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
         async def add_reaction(self, emoji: str) -> None:
             self.reactions.append(emoji)
 
+        async def remove_reaction(self, emoji: str, member: object) -> None:
+            del member
+            self.reactions.remove(emoji)
+
     live: Any = Live()
-    result = await Engine(Phoenix(), FakeRunner()).handle(
+    engine = Engine(Phoenix(), FakeRunner())
+    engine.reaction_user = object()
+    result = await engine.handle(
         normalize_event(discord_message("live", "hello", thread="t")), live
     )
-    assert result["reactions"] == ["👀", "✅"]
-    assert live.reactions == ["👀", "✅"]
+    assert result["reactions"] == ["✅"]
+    assert live.reactions == ["✅"]
     assert live.channel.sent[0] == ""
     assert live.channel.sent[1].startswith("Codex received: ")
     assert live.channel.embeds[0] is not None
@@ -518,6 +524,10 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
         async def add_reaction(self, emoji: str) -> None:
             self.reactions.append(emoji)
 
+        async def remove_reaction(self, emoji: str, member: object) -> None:
+            del member
+            self.reactions.remove(emoji)
+
     def raw_message(mid: str, channel: Any) -> Any:
         item = Message(mid, channel, "context")
         item.mentions = []
@@ -534,8 +544,8 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     followup = Message("follow", parent.thread, "next")
     await bot.on_message(followup)
     assert engine.states["2"].turn == 2
-    assert startup.reactions == ["👀", "✅"]
-    assert followup.reactions == ["👀", "✅"]
+    assert startup.reactions == ["✅"]
+    assert followup.reactions == ["✅"]
     assert parent.thread is not None
     assert len(parent.thread.sent) == 3
     assert parent.thread.sent[0] == ""

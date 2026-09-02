@@ -10,7 +10,7 @@
 - A live Uvicorn process accepted raw Discord-shaped HTTP startup and follow-up
   payloads. Startup selected `old2,start2` and returned turn 1; follow-up
   selected only reply ancestor `start2` plus `newp2,newt2,follow2` and returned
-  turn 2. Both returned `👀,✅`.
+  turn 2. Both completed with exactly `✅`.
 - The Phoenix inspection endpoint showed the ordered trace nodes for both
   requests, including context, grammar, prompt, Codex, delivery, and reactions.
 
@@ -30,8 +30,8 @@ until those dependencies are available.
   `mg-cli dev thor run`; the gateway build includes the pinned Codex CLI
   bundle.
 - The committed gateway accepted raw Discord-shaped `MESSAGE_CREATE` payloads
-  over HTTP. Startup returned turn 1 with `👀,✅`; follow-up returned turn 2
-  with `👀,✅`.
+  over HTTP. Startup returned turn 1 with `✅`; follow-up returned turn 2 with
+  `✅` after removing the processing reaction.
 - Phoenix inspection for that run recorded `turn`, `context`, `grammar`,
   `prompt`, `codex`, `delivery`, and `reaction` nodes for both traces. Startup
   selected `parent-old,raw-start`; follow-up selected only
@@ -64,7 +64,7 @@ until those dependencies are available.
   parent messages plus the trigger; follow-up selected only the reply
   ancestor, two new messages, and the follow-up trigger. The follow-up did not
   replay the older parent window. Both returned turn 1/2 and exactly
-  `👀,✅`.
+  `✅`.
 - Phoenix inspection for that process showed, for each trace, `turn`,
   `reaction`, `context`, `grammar`, `prompt`, three progress nodes, `codex`,
   `delivery`, and terminal `reaction`.
