@@ -58,9 +58,14 @@ jobs:
             k8s/base/integrations/wiseman-v2/wiseman-v2-secrets.yaml
           cp "$GITHUB_WORKSPACE"/deploy/midgard/network-policies/wiseman-v2.yaml \
             k8s/base/integrations/wiseman-v2/wiseman-v2-network-policy.yaml
-          docker run --rm --user root -v "$PWD:/home/opam/workspace" \
+          registry_container="$(docker create --user root \
             -w /home/opam/workspace registry.odin.home:5000/midgard-dev:latest \
-            sh -lc 'dune exec src/app_registry/main.exe'
+            sh -lc 'dune exec src/app_registry/main.exe')"
+          trap 'docker rm -f "$registry_container" >/dev/null 2>&1 || true' EXIT
+          docker cp /tmp/midgard/. "$registry_container:/home/opam/workspace/"
+          docker start --attach "$registry_container"
+          docker cp "$registry_container:/home/opam/workspace/k8s/base/registered/." \
+            /tmp/midgard/k8s/base/registered/
           git add k8s/registry k8s/base/integrations/wiseman-v2 k8s/base/registered
           git diff --staged --quiet || git commit -m "deploy: wiseman-v2 $GITHUB_SHA"
           git push origin HEAD:main
