@@ -5,7 +5,7 @@ Phoenix root span with child node spans. Phoenix events are appended during
 execution, not only at the end:
 
 ```text
-turn -> reaction(👀) -> context -> grammar -> progress -> codex -> delivery -> reaction(✅|❌)
+turn -> reaction(add:👀) -> context -> grammar -> progress -> codex -> delivery -> reaction(add:✅|❌, remove:👀)
 ```
 
 The `context` event contains raw Discord JSON, normalized messages, selected
