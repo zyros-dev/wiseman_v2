@@ -71,9 +71,27 @@ class Workspace:
 
     @staticmethod
     def _own_tree(path: Path, user: str) -> None:
-        for child in (path, *path.rglob("*")):
-            if not child.is_symlink():
-                shutil.chown(child, user=user, group=user)
+        # Codex owns its live descendants. Walking them here races with plugin
+        # clones and cleanup, so only repair the stable workspace surface.
+        stable = (
+            path,
+            path / "AGENTS.md",
+            path / ".codex",
+            path / "files",
+            path / "shared",
+            path / "shared" / "AGENTS.md",
+            path / "shared" / "memories.md",
+            path / "shared" / "skills",
+            path / "threads",
+        )
+        for child in stable:
+            if child.is_symlink() or not os.path.lexists(child):
+                continue
+            try:
+                shutil.chown(child, user=user, group=user, follow_symlinks=False)
+            except FileNotFoundError:
+                # A top-level entry may still be removed concurrently.
+                continue
 
     def thread(self, user: str, thread: str) -> Path:
         users = (self.root / "users").resolve()

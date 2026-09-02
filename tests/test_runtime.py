@@ -5,6 +5,7 @@
 import json
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Self, cast
 
 import httpx
@@ -136,6 +137,26 @@ def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
     (path / "shared").symlink_to(tmp_path / "outside", target_is_directory=True)
     with pytest.raises(ValueError, match="invalid shared link"):
         workspace.thread("user", "thread")
+
+
+def test_workspace_ownership_does_not_walk_live_codex_tree(tmp_path, monkeypatch) -> None:
+    thread = tmp_path / "thread"
+    (thread / ".codex" / ".tmp" / "plugin").mkdir(parents=True)
+    volatile = thread / ".codex" / ".tmp" / "plugin" / "removed.md"
+    volatile.write_text("plugin", encoding="utf-8")
+    (thread / "AGENTS.md").write_text("instructions", encoding="utf-8")
+    calls: list[Path] = []
+
+    def chown(path: str | os.PathLike[str], **kwargs: object) -> None:
+        del kwargs
+        calls.append(Path(path))
+
+    monkeypatch.setattr("runner.api.shutil.chown", chown)
+    Workspace._own_tree(thread, "wsm_user")  # noqa: SLF001
+
+    assert thread in calls
+    assert thread / ".codex" in calls
+    assert volatile not in calls
 
 
 def test_nested_provider_event_preserves_model_usage_and_cost() -> None:
