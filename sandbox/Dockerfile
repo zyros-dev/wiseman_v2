@@ -3,7 +3,7 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y sudo util-linux passwd \
+    && apt-get install --no-install-recommends -y ca-certificates curl sudo util-linux passwd wget \
     && printf '%s\n' 'wsm_* ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wiseman \
     && chmod 0440 /etc/sudoers.d/wiseman \
     && rm -rf /var/lib/apt/lists/*

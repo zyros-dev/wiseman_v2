@@ -685,6 +685,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert calls[0]["sandbox"] is Sandbox.full_access
     assert calls[0]["model"] == "provider/model"
     assert calls[0]["model_provider"] == "wiseman-relay"
+    assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
     assert (
         'base_url = "http://relay/v1"'
         in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()
@@ -736,6 +737,14 @@ async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monk
     assert "two" in second[1]
     assert (tmp_path / "users/u/shared/AGENTS.md").exists()
     assert (tmp_path / "users/u/threads/t/.codex").is_dir()
+
+
+def test_runner_exposes_metrics(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    client = TestClient(runner_app())
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "python_info" in response.text
 
 
 @pytest.mark.asyncio

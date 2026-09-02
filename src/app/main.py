@@ -547,17 +547,18 @@ class Engine:
         progress_message: object | None = None
         if delivery_channel is not None and kind == "startup":
             await cast("Any", delivery_channel).send(embed=_startup_embed())
+        startup = kind == "startup"
         progress = (
-            "🛠️ Workspace provisioning...\n🤖 Codex starting..."
-            if kind == "startup"
-            else "⏳ Working..."
+            "🛠️ Workspace provisioning...\n🤖 Codex starting..." if startup else "⏳ Working..."
         )
-        self.progress[trigger.id].append("workspace provisioning")
-        await self.phoenix.record(trace, "progress", phase="workspace provisioning")
+        phase = "workspace provisioning" if startup else "working"
+        self.progress[trigger.id].append(phase)
+        await self.phoenix.record(trace, "progress", phase=phase)
         if delivery_channel is not None:
             progress_message = await delivery_channel.send(progress)
-        self.progress[trigger.id].append("codex started")
-        await self.phoenix.record(trace, "progress", phase="codex started")
+        if startup:
+            self.progress[trigger.id].append("codex started")
+            await self.phoenix.record(trace, "progress", phase="codex started")
         try:
             state.codex_thread, output, billing = await self.runner.run(
                 state.codex_thread or "",
