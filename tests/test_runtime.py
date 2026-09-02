@@ -235,12 +235,17 @@ def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
         workspace.thread("user", "thread")
 
 
-def test_workspace_ownership_does_not_walk_live_codex_tree(tmp_path, monkeypatch) -> None:
+def test_workspace_ownership_repairs_nested_codex_state_without_following_links(
+    tmp_path, monkeypatch
+) -> None:
     thread = tmp_path / "thread"
     (thread / ".codex" / ".tmp" / "plugin").mkdir(parents=True)
     volatile = thread / ".codex" / ".tmp" / "plugin" / "removed.md"
     volatile.write_text("plugin", encoding="utf-8")
     (thread / "AGENTS.md").write_text("instructions", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.write_text("outside", encoding="utf-8")
+    (thread / "outside-link").symlink_to(outside)
     calls: list[Path] = []
 
     def chown(path: str | os.PathLike[str], **kwargs: object) -> None:
@@ -252,7 +257,8 @@ def test_workspace_ownership_does_not_walk_live_codex_tree(tmp_path, monkeypatch
 
     assert thread in calls
     assert thread / ".codex" in calls
-    assert volatile not in calls
+    assert volatile in calls
+    assert outside not in calls
 
 
 def test_nested_provider_event_preserves_model_usage_and_cost() -> None:

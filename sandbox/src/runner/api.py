@@ -78,27 +78,24 @@ class Workspace:
 
     @staticmethod
     def _own_tree(path: Path, user: str) -> None:
-        # Codex owns its live descendants. Walking them here races with plugin
-        # clones and cleanup, so only repair the stable workspace surface.
-        stable = (
-            path,
-            path / "AGENTS.md",
-            path / ".codex",
-            path / "files",
-            path / "shared",
-            path / "shared" / "AGENTS.md",
-            path / "shared" / "memories.md",
-            path / "shared" / "skills",
-            path / "threads",
-        )
-        for child in stable:
-            if child.is_symlink() or not os.path.lexists(child):
-                continue
-            try:
-                shutil.chown(child, user=user, group=user, follow_symlinks=False)
-            except FileNotFoundError:
-                # A top-level entry may still be removed concurrently.
-                continue
+        # Existing Codex SQLite files may have been created by a stale account
+        # after an interrupted provisioning race. Repair the complete local
+        # tree, but never follow symlinks into another workspace.
+        if not os.path.lexists(path):
+            return
+        try:
+            shutil.chown(path, user=user, group=user, follow_symlinks=False)
+            for root, directories, files in os.walk(path, followlinks=False):
+                children = [Path(root) / name for name in (*directories, *files)]
+                for child in children:
+                    try:
+                        shutil.chown(child, user=user, group=user, follow_symlinks=False)
+                    except FileNotFoundError:
+                        # Codex cleanup can remove a file between walk and chown.
+                        continue
+        except FileNotFoundError:
+            # A top-level entry may still be removed concurrently.
+            return
 
     def thread(self, user: str, thread: str) -> Path:
         users = (self.root / "users").resolve()
@@ -151,7 +148,11 @@ class Workspace:
         )
         (path / "AGENTS.md").chmod(0o600)
         if account:
-            self._own_tree(base, account)
+            try:
+                shutil.chown(base, user=account, group=account, follow_symlinks=False)
+            except FileNotFoundError:
+                return path
+            self._own_tree(shared, account)
             self._own_tree(path, account)
         return path
 
