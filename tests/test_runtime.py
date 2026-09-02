@@ -579,6 +579,8 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("WISEMAN_RUNNER_API_TOKEN", "secret")
+    monkeypatch.setenv("WISEMAN_RELAY_URL", "http://relay/v1")
+    monkeypatch.setenv("WISEMAN_MODEL", "provider/model")
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     client = TestClient(runner_app())
     headers = {"authorization": "Bearer secret"}
@@ -593,6 +595,12 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert first.json()["thread_id"] == second.json()["thread_id"] == "codex-thread"
     assert calls[0]["approval_mode"] is ApprovalMode.deny_all
     assert calls[0]["sandbox"] is Sandbox.full_access
+    assert calls[0]["model"] == "provider/model"
+    assert calls[0]["model_provider"] == "wiseman-relay"
+    assert (
+        'base_url = "http://relay/v1"'
+        in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()
+    )
 
 
 @pytest.mark.asyncio

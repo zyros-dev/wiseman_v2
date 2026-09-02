@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import pwd
 import shutil
@@ -108,6 +109,17 @@ class Workspace:
         (path / ".codex").mkdir(exist_ok=True)
         path.chmod(0o700)
         (path / ".codex").chmod(0o700)
+        relay = os.getenv("WISEMAN_RELAY_URL", "")
+        if relay:
+            (path / ".codex" / "config.toml").write_text(
+                'model_provider = "wiseman-relay"\n'
+                "[model_providers.wiseman-relay]\n"
+                'name = "Wiseman relay"\n'
+                f"base_url = {json.dumps(relay)}\n"
+                'env_key = "OPENAI_API_KEY"\n'
+                'wire_api = "responses"\n',
+                encoding="utf-8",
+            )
         (path / "AGENTS.md").write_text(
             "Read shared/AGENTS.md and shared/memories.md before acting.\n",
             encoding="utf-8",
@@ -164,12 +176,16 @@ class CodexRunner:
                     )
                 )
             client = self.codex[key]
+            provider = "wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None
+            model = os.getenv("WISEMAN_MODEL") or None
             if not turn.codex_thread_id:
                 thread = await client.thread_start(
                     approval_mode=ApprovalMode.deny_all,
                     sandbox=Sandbox.full_access,
                     cwd=str(path),
                     developer_instructions="Use shared/AGENTS.md and shared/memories.md.",
+                    model=model,
+                    model_provider=provider,
                 )
             else:
                 thread = await client.thread_resume(
@@ -177,6 +193,8 @@ class CodexRunner:
                     approval_mode=ApprovalMode.deny_all,
                     sandbox=Sandbox.full_access,
                     cwd=str(path),
+                    model=model,
+                    model_provider=provider,
                 )
             result = await thread.run(
                 turn.input,
