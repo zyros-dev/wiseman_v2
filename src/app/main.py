@@ -733,7 +733,9 @@ async def _history(
     ]
 
 
-def create_app(engine: Engine | None = None, token: str = "") -> FastAPI:  # noqa: C901, PLR0915
+def create_app(  # noqa: C901, PLR0915
+    engine: Engine | None = None, token: str = "", discord_token: str = ""
+) -> FastAPI:
     """Create health, raw Discord replay, and Phoenix inspection endpoints."""
     engine = engine or Engine(
         Phoenix(
@@ -764,8 +766,8 @@ def create_app(engine: Engine | None = None, token: str = "") -> FastAPI:  # noq
         nonlocal task
         if temporal is not None:
             await temporal.start()
-        if token:
-            task = asyncio.create_task(bot.start(token))
+        if discord_token:
+            task = asyncio.create_task(bot.start(discord_token))
 
     @app.on_event("shutdown")
     async def stop_discord() -> None:
@@ -874,7 +876,11 @@ runner: Runner = (
     else FakeRunner()
 )
 engine = Engine(phoenix, runner)
-app = create_app(engine, os.getenv("WISEMAN_REPLAY_TOKEN", ""))
+app = create_app(
+    engine,
+    os.getenv("WISEMAN_REPLAY_TOKEN", ""),
+    os.getenv("DISCORD_BOT_TOKEN", ""),
+)
 
 
 if __name__ == "__main__":

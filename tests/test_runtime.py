@@ -15,6 +15,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from app.main import (
     Engine,
     FakeRunner,
+    Gateway,
     HttpRunner,
     Phoenix,
     PromptHub,
@@ -316,6 +317,20 @@ def test_app_health_and_replay_authentication() -> None:
         client.post("/v1/replay/discord", headers={"x-replay-token": "secret"}, json={}).status_code
         == 422
     )
+
+
+def test_app_starts_discord_with_discord_token_not_replay_token(monkeypatch) -> None:
+    received: list[str] = []
+
+    async def fake_start(_bot: Gateway, token: str) -> None:
+        received.append(token)
+
+    monkeypatch.setattr(Gateway, "start", fake_start)
+    with TestClient(
+        create_app(Engine(Phoenix(), FakeRunner()), token="replay", discord_token="discord")
+    ):
+        pass
+    assert received == ["discord"]
 
 
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
