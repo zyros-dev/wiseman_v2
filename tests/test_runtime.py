@@ -356,6 +356,13 @@ async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
     assert calls == 2
 
 
+def test_gateway_requests_only_enabled_discord_intents() -> None:
+    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    assert bot.intents.message_content
+    assert not bot.intents.members
+    assert not bot.intents.presences
+
+
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     class Response:
         def raise_for_status(self) -> None: ...

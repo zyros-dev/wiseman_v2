@@ -588,7 +588,9 @@ class Gateway(discord.Client):
     """Direct Discord gateway adapter; it delegates to the same admission used by raw replay."""
 
     def __init__(self, engine: Engine, allowlist: set[int]) -> None:
-        super().__init__(intents=discord.Intents.all())
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
         self.engine, self.allowlist = engine, allowlist
         self.temporal: TemporalRuntime | None = None
         self.thread_activity: dict[str, float] = {}
