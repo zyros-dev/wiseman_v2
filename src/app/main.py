@@ -67,6 +67,12 @@ class Event(BaseModel):
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class Messageable(Protocol):
+    """Minimal Discord channel surface needed for turn delivery."""
+
+    async def send(self, content: str) -> object: ...
+
+
 def _message(value: dict[str, Any], thread_id: str | None = None) -> Message:
     """Normalize either a canonical message or Discord REST JSON."""
     if "author_id" in value:
@@ -424,23 +430,31 @@ class Engine:
         self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
+        self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
     async def handle(
         self,
         event: Event,
         live: discord.Message | None = None,
+        delivery_channel: Messageable | None = None,
         state_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         key = event.trigger.thread_id or event.trigger.channel_id
         async with self.locks.setdefault(key, asyncio.Lock()):
             if live is None and self.lookup is not None:
                 live = await self.lookup(event)
-            return await self._handle(event, live, state_data)
+            if delivery_channel is None:
+                if self.lookup_channel is not None:
+                    delivery_channel = await self.lookup_channel(event)
+                elif live is not None:
+                    delivery_channel = live.channel
+            return await self._handle(event, live, delivery_channel, state_data)
 
     async def _handle(  # noqa: C901, PLR0915
         self,
         event: Event,
         live: discord.Message | None = None,
+        delivery_channel: Messageable | None = None,
         state_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         trigger = event.trigger
@@ -512,14 +526,14 @@ class Engine:
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
         self.progress[trigger.id].append("workspace provisioning")
         await self.phoenix.record(trace, "progress", phase="workspace provisioning")
-        if live is not None and kind == "startup":
-            await live.channel.send(_banner())
-        if live is not None:
-            await live.channel.send("🛠️ Workspace provisioning...")
+        if delivery_channel is not None and kind == "startup":
+            await delivery_channel.send(_banner())
+        if delivery_channel is not None:
+            await delivery_channel.send("🛠️ Workspace provisioning...")
         self.progress[trigger.id].append("codex started")
         await self.phoenix.record(trace, "progress", phase="codex started")
-        if live is not None:
-            await live.channel.send("🤖 Codex starting...")
+        if delivery_channel is not None:
+            await delivery_channel.send("🤖 Codex starting...")
         try:
             state.codex_thread, output, billing = await self.runner.run(
                 state.codex_thread or "",
@@ -531,7 +545,8 @@ class Engine:
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))
             if self._react(trigger.id, "❌") and live is not None:
-                await live.channel.send(f"Codex failed: {exc}")
+                if delivery_channel is not None:
+                    await delivery_channel.send(f"Codex failed: {exc}")
                 await live.add_reaction("❌")
             return {
                 "trace": trace,
@@ -552,9 +567,9 @@ class Engine:
             **billing,
         )
         await self.phoenix.record(trace, "delivery", output=output)
-        if live is not None:
-            await live.channel.send("✍️ Finishing the response...")
-            await live.channel.send(output)
+        if delivery_channel is not None:
+            await delivery_channel.send("✍️ Finishing the response...")
+            await delivery_channel.send(output)
         if self._react(trigger.id, "✅") and live is not None:
             await live.add_reaction("✅")
         await self.phoenix.record(trace, "reaction", operations=["add:✅"])
@@ -596,6 +611,7 @@ class Gateway(discord.Client):
         self.thread_activity: dict[str, float] = {}
         self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
+        engine.lookup_channel = self.resolve_channel
 
     async def setup_hook(self) -> None:
         self.expiry_task = asyncio.create_task(self._expire_threads())
@@ -668,6 +684,17 @@ class Gateway(discord.Client):
         except (discord.DiscordException, ValueError):
             return None
 
+    async def resolve_channel(self, event: Event) -> Messageable | None:
+        """Resolve the managed thread used for progress and answer delivery."""
+        channel_id = event.trigger.thread_id or event.trigger.channel_id
+        try:
+            channel = await self.fetch_channel(int(channel_id))
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                return channel
+            return None  # noqa: TRY300
+        except (discord.DiscordException, ValueError):
+            return None
+
     async def on_message(self, message: discord.Message) -> None:
         if isinstance(message.channel, discord.Thread) and not message.author.bot:
             self.thread_activity[str(message.channel.id)] = time.time()
@@ -679,6 +706,7 @@ class Gateway(discord.Client):
             return
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
+            delivery_channel = channel
             old = self.engine.states[thread_id]
             if old.last_activity and time.time() - old.last_activity > THREAD_IDLE_SECONDS:
                 old.closed = True
@@ -689,6 +717,7 @@ class Gateway(discord.Client):
         else:
             thread = await message.create_thread(name="wiseman")
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
+            delivery_channel = thread
             self.thread_activity[thread_id] = time.time()
             old = self.engine.states[thread_id]
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
@@ -729,7 +758,7 @@ class Gateway(discord.Client):
         if self.temporal is not None:
             await self.temporal.submit(event.model_dump(mode="json"))
         else:
-            await self.engine.handle(event, message)
+            await self.engine.handle(event, message, delivery_channel=delivery_channel)
 
 
 async def _history(

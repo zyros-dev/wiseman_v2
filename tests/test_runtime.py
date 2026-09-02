@@ -495,9 +495,10 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     assert engine.states["2"].turn == 2
     assert startup.reactions == ["👀", "✅"]
     assert followup.reactions == ["👀", "✅"]
-    assert parent.sent
     assert parent.thread is not None
     assert parent.thread.sent
+    assert not parent.sent
+    assert parent.thread.sent[0].startswith("⚡ **Wiseman thread startup**")
 
     rejected = Channel()
     rejected.guild = Guild(2)

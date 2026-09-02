@@ -12,9 +12,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "0.8.x"
+        run: |
+          set -eu
+          node --input-type=module -e '
+            const response = await fetch("https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz");
+            if (!response.ok) throw new Error(`uv download failed: ${response.status}`);
+            process.stdout.write(Buffer.from(await response.arrayBuffer()));
+          ' > /tmp/uv.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/uv.tar.gz -C /tmp
+          install /tmp/uv-x86_64-unknown-linux-gnu/uv "$HOME/.local/bin/uv"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/uv" --version
       - name: Install dependencies
         run: uv sync --frozen --group dev
       - name: Ruff

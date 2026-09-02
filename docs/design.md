@@ -47,7 +47,9 @@ collects bounded history, emits a startup banner, sends progress messages, and
 then sends the answer. It adds `👀` once and then `✅` or `❌`; it never removes
 `👀` and does not duplicate terminal reactions. The deployment allowlist is
 guild-based and is enforced for both parent channels and managed threads;
-messages from DMs or other guilds are ignored before context collection.
+messages from DMs or other guilds are ignored before context collection. The
+trigger message remains the reaction target; all banner, progress, failure,
+and answer messages are delivered inside the managed thread.
 
 ## Workspace
 
