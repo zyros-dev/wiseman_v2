@@ -198,6 +198,8 @@ class CodexRunner:
         self.threads: dict[str, object] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress: dict[str, str] = {}
+        limit = max(1, int(os.getenv("WISEMAN_MAX_CONCURRENT_TURNS", "1")))
+        self.capacity = asyncio.Semaphore(limit)
 
     async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
@@ -272,7 +274,7 @@ class CodexRunner:
 
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
-        async with lock:
+        async with self.capacity, lock:
             thread = await self._thread(turn, path, account)
             self.progress[turn.thread_id] = "🤖 Codex turn started..."
             return await self._run_thread(thread, turn, path)
