@@ -292,9 +292,7 @@ class CodexRunner:
         assert thread is not None
         return thread
 
-    async def _run_thread(  # noqa: PLR0912
-        self, thread: object, turn: Turn, path: Path
-    ) -> dict[str, object]:
+    async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
         if not hasattr(thread, "turn"):
             result = await thread.run(
                 turn.input,

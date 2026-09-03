@@ -6,11 +6,13 @@ from __future__ import annotations
 import os
 import re
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 import discord
 import httpx
+from jinja2 import Environment, StrictUndefined
 
 from app.phoenix import route_info
 
@@ -24,6 +26,7 @@ MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
 MAX_DISCORD_USERNAME_LENGTH = 32
 THREAD_AUTO_ARCHIVE_MINUTES = 60
+THREAD_CLOSE_AFTER_SECONDS = 2 * 60 * 60
 THREAD_NAME_LIMIT = 100
 
 
@@ -86,13 +89,7 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "question": question or None,
         }
     content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": question
-            or "Please describe this image generally in one concise factual paragraph. Read "
-            "visible text and report relevant objects, quantities, prices, and layout. Do not "
-            "answer only None or guess details that are not visible.",
-        },
+        {"type": "text", "text": _vision_question(question)},
         *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
     ]
     try:
@@ -127,6 +124,17 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "attachments": [item["id"] for item in images],
             "question": question or None,
         }
+
+
+def _contract(name: str) -> str:
+    return (Path(__file__).parents[2] / "contracts" / name).read_text(encoding="utf-8")
+
+
+def _vision_question(question: str) -> str:
+    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(
+        _contract("vision-question.j2")
+    )
+    return template.render(question=question)
 
 
 async def edit_delivery(message: object | None, content: str) -> bool:

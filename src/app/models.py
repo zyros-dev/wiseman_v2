@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.types import JsonObject  # noqa: TC001 - Pydantic resolves recursive aliases at runtime
 
 
 class Message(BaseModel):
@@ -23,7 +25,7 @@ class Message(BaseModel):
     thread_id: str | None = None
     reply_to: str | None = None
     mentions: list[str] = Field(default_factory=list)
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[JsonObject] = Field(default_factory=list)
 
 
 class Event(BaseModel):
@@ -36,7 +38,7 @@ class Event(BaseModel):
     thread_messages: list[Message] = Field(default_factory=list)
     seen_ids: list[str] = Field(default_factory=list)
     anchor_id: str | None = None
-    raw_payload: dict[str, Any] = Field(default_factory=dict)
+    raw_payload: JsonObject = Field(default_factory=dict)
 
 
 class Messageable(Protocol):
