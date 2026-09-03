@@ -1362,6 +1362,41 @@ def test_admission_audit_is_exact_and_replayable() -> None:
     )
 
 
+def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
+    payload = {
+        "t": "MESSAGE_CREATE",
+        "d": {
+            **discord_message("persisted-audit-1", "replay this", thread="persisted-t"),
+            "author": {"id": "u", "username": "Nick", "bot": False},
+        },
+        "kind": "startup",
+        "parent_messages": [],
+    }
+    first = Phoenix(audit_dir=tmp_path)
+    first_client = TestClient(create_app(Engine(first, FakeRunner()), token="secret"))
+    assert (
+        first_client.post(
+            "/v1/replay/discord", headers={"x-replay-token": "secret"}, json=payload
+        ).status_code
+        == 200
+    )
+
+    restarted = Phoenix(audit_dir=tmp_path)
+    client = TestClient(create_app(Engine(restarted, FakeRunner()), token="secret"))
+    audit = client.get(
+        "/v1/phoenix/audits/discord-persisted-audit-1",
+        headers={"x-replay-token": "secret"},
+    )
+    assert audit.status_code == 200
+    assert audit.json()["raw_request"] == payload
+    replay = client.post(
+        "/v1/replay/phoenix/discord-persisted-audit-1",
+        headers={"x-replay-token": "secret"},
+    )
+    assert replay.status_code == 200
+    assert '"user": "replay this"' in replay.json()["output"]
+
+
 def test_runner_requires_bearer_and_materializes_shared_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("WISEMAN_RUNNER_API_TOKEN", "secret")
