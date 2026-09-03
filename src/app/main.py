@@ -172,10 +172,17 @@ class ActiveTurn:
 class Phoenix:
     """Record every semantic layer immediately and optionally forward it to Phoenix."""
 
-    def __init__(self, endpoint: str = "", key: str = "", project: str = "") -> None:
+    def __init__(
+        self,
+        endpoint: str = "",
+        key: str = "",
+        project: str = "",
+        audit_dir: str | Path | None = None,
+    ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.records: list[dict[str, Any]] = []
         self.audits: dict[str, dict[str, Any]] = {}
+        self.audit_dir = Path(audit_dir) if audit_dir else None
         self.roots: dict[str, Any] = {}
         self.contexts: dict[str, Any] = {}
         self.provider = TracerProvider(
@@ -196,7 +203,16 @@ class Phoenix:
         item = {"trace": trace, "node": node, **{k: v for k, v in data.items() if v is not None}}
         self.records.append(item)
         if node == "admission" and isinstance(data.get("audit_id"), str):
-            self.audits[data["audit_id"]] = dict(item)
+            audit_id = data["audit_id"]
+            artifact = {
+                "schema": "wiseman.admission.audit.v1",
+                "audit_id": audit_id,
+                "trace": trace,
+                "captured_at": time.time(),
+                **item,
+            }
+            self.audits[audit_id] = artifact
+            self._persist_audit(audit_id, artifact)
         if trace not in self.roots:
             root = self.tracer.start_span("wiseman.turn")
             self.roots[trace] = root
@@ -215,9 +231,33 @@ class Phoenix:
             self.contexts.pop(trace)
 
     def audit(self, audit_id: str) -> dict[str, Any] | None:
-        """Return an in-process replay artifact captured at the admission boundary."""
+        """Return the admission artifact, including one recovered after a restart."""
         value = self.audits.get(audit_id)
+        if value is None and self.audit_dir is not None:
+            try:
+                loaded = json.loads(self._audit_path(audit_id).read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError):
+                loaded = None
+            if isinstance(loaded, dict) and loaded.get("audit_id") == audit_id:
+                value = loaded
+                self.audits[audit_id] = loaded
         return dict(value) if value is not None else None
+
+    def _audit_path(self, audit_id: str) -> Path:
+        digest = hashlib.sha256(audit_id.encode()).hexdigest()
+        return (self.audit_dir or Path()) / f"{digest}.json"
+
+    def _persist_audit(self, audit_id: str, artifact: dict[str, Any]) -> None:
+        if self.audit_dir is None:
+            return
+        try:
+            self.audit_dir.mkdir(parents=True, exist_ok=True)
+            target = self._audit_path(audit_id)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(_json(artifact), encoding="utf-8")
+            temporary.replace(target)
+        except OSError:
+            LOGGER.exception("Could not persist Phoenix audit %s", audit_id)
 
 
 class PromptHub:
@@ -1342,6 +1382,7 @@ def create_app(  # noqa: C901, PLR0915
             os.getenv("PHOENIX_OTLP_ENDPOINT", ""),
             os.getenv("PHOENIX_API_KEY", ""),
             os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
+            os.getenv("WISEMAN_AUDIT_DIR"),
         ),
         HttpRunner(os.getenv("WISEMAN_RUNNER_URL", ""), token)
         if os.getenv("WISEMAN_RUNNER_URL")
