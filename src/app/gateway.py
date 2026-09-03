@@ -33,6 +33,7 @@ class Gateway(discord.Client):
         allowlist: set[int],
         activity_path: str | Path | None = None,
         profile_path: str | Path | None = None,
+        sequence_path: str | Path | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -41,6 +42,8 @@ class Gateway(discord.Client):
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
+        self.sequence_path = Path(sequence_path) if sequence_path else self._default_sequence_path()
+        self.thread_sequence = self._load_thread_sequence()
         self.thread_activity = self._load_thread_activity()
         self._load_profile()
         self.expiry_task: asyncio.Task[None] | None = None
@@ -82,6 +85,30 @@ class Gateway(discord.Client):
             temporary.replace(self.activity_path)
         except OSError:
             LOGGER.exception("Could not persist Wiseman thread activity state")
+
+    def _default_sequence_path(self) -> Path | None:
+        if self.activity_path is None:
+            return None
+        return self.activity_path.with_name("thread-sequence.json")
+
+    def _load_thread_sequence(self) -> int:
+        if self.sequence_path is None or not self.sequence_path.exists():
+            return 0
+        try:
+            value = json.loads(self.sequence_path.read_text(encoding="utf-8"))
+            return max(0, int(value))
+        except (OSError, TypeError, ValueError):
+            LOGGER.warning("Ignoring invalid Wiseman thread sequence state")
+            return 0
+
+    def _next_thread_name(self) -> str:
+        self.thread_sequence += 1
+        if self.sequence_path is not None:
+            self.sequence_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.sequence_path.with_name(f".{self.sequence_path.name}.tmp")
+            temporary.write_text(str(self.thread_sequence), encoding="utf-8")
+            temporary.replace(self.sequence_path)
+        return _thread_name(self.thread_sequence)
 
     def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
         self.thread_activity[thread_id] = timestamp if timestamp is not None else time.time()
@@ -215,7 +242,7 @@ class Gateway(discord.Client):
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
             thread = await message.create_thread(
-                name=_thread_name(message.content, len(message.attachments)),
+                name=self._next_thread_name(),
                 auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
             )
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
