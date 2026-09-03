@@ -64,9 +64,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN", "ARG", "B018", "N802", "PLC2701", "PLR2004", "S106"]
-"src/app/integrations/discord/mcp.py" = [
-  "C901", "E501", "EM102", "PLR0911", "PLR0912", "PLR0915", "TRY003", "TRY004"
-]
 
 [tool.coverage.run]
 branch = true
@@ -76,18 +73,8 @@ source = ["app"]
 fail_under = 80
 show_missing = true
 omit = [
-  "src/app/service.py",
-  "src/app/temporal/*.py",
   # Network/process adapters are covered by contract and container tests.
-  "src/app/integrations/discord/gateway.py",
-  "src/app/integrations/discord/history.py",
-  "src/app/integrations/discord/normalizer.py",
-  "src/app/integrations/discord/presentation.py",
-  "src/app/integrations/openrouter/relay.py",
-  "src/app/integrations/phoenix/prompt_hub.py",
-  "src/app/integrations/phoenix/tracing.py",
-  "src/app/integrations/sandbox/client.py",
-  "src/app/integrations/discord/mcp.py",
+  "src/app/temporal_runtime.py",
 ]
 
 [tool.vulture]

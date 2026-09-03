@@ -1,0 +1,189 @@
+# Copyright (c) 2026 Nick van der Merwe
+"""Discord-facing formatting, image assistance, and message delivery."""
+
+from __future__ import annotations
+
+import os
+import re
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlsplit
+
+import discord
+import httpx
+
+from app.phoenix import route_info
+
+if TYPE_CHECKING:
+    from app.models import Messageable
+
+DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
+MAX_DISCORD_CONTENT_LENGTH = 2_000
+MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_REACTION_LENGTH = 32
+MIN_DISCORD_USERNAME_LENGTH = 2
+MAX_DISCORD_USERNAME_LENGTH = 32
+THREAD_AUTO_ARCHIVE_MINUTES = 60
+THREAD_NAME_LIMIT = 100
+
+
+def banner() -> str:
+    info = route_info()
+    model = info.get("requested_model") or "configured route"
+    provider = info.get("provider")
+    line = f"⚡ Route: `{model}`" + (f" via {provider}." if provider else ".")
+    details = []
+    for label, key in (
+        ("Fallbacks", "fallback_models"),
+        ("Modalities", "modalities"),
+        ("Context", "context_window"),
+        ("Input", "input_price"),
+        ("Output", "output_price"),
+        ("Cached", "cached_price"),
+        ("Vision assist", "vision_assist_model"),
+    ):
+        if key in info:
+            details.append(f"{label}: `{info[key]}`")
+    return (
+        "⚡ **Wiseman thread startup**\n" + line + ("\n" + " · ".join(details) if details else "")
+    )
+
+
+def thread_name(content: str, attachment_count: int = 0) -> str:
+    """Turn the triggering message into a valid, readable Discord thread name."""
+    name = re.sub(r"<@!?\d+>", "", content)
+    name = " ".join(name.split()).strip()
+    if not name:
+        name = "image" if attachment_count else "wiseman"
+    if len(name) > THREAD_NAME_LIMIT:
+        name = name[: THREAD_NAME_LIMIT - 1].rstrip() + "…"
+    return name
+
+
+def startup_embed() -> discord.Embed:
+    """Render the one-time green thread-start status as a Discord embed."""
+    title, _, description = banner().partition("\n")
+    return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
+
+
+async def describe_images(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+    """Ask the configured vision model to answer about bounded Discord image attachments."""
+    images: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for message in messages:
+        for attachment in message.get("attachments", []):
+            content_type = str(attachment.get("content_type") or "")
+            url = str(attachment.get("url") or attachment.get("proxy_url") or "")
+            attachment_id = str(attachment.get("id") or url)
+            if content_type.startswith("image/") and url and attachment_id not in seen:
+                images.append({"id": attachment_id, "url": url})
+                seen.add(attachment_id)
+    if not images:
+        return {"text": "", "attachments": [], "question": question or None}
+    model = os.getenv("WISEMAN_VISION_MODEL", "z-ai/glm-5.3-flash")
+    key = os.getenv("OPENROUTER_API_KEY", "")
+    if not key:
+        return {
+            "text": "[Image description unavailable: vision provider is not configured.]",
+            "model": model,
+            "attachments": [item["id"] for item in images],
+            "question": question or None,
+        }
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": question
+            or "Please describe this image generally in one concise factual paragraph. Read "
+            "visible text and report relevant objects, quantities, prices, and layout. Do not "
+            "answer only None or guess details that are not visible.",
+        },
+        *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/chat/completions",
+                headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                    "max_tokens": 500,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(answer, list):
+            answer = "".join(str(item.get("text", "")) for item in answer if isinstance(item, dict))
+        usage = data.get("usage")
+        return {
+            "text": str(answer),
+            "model": data.get("model", model),
+            "usage": usage,
+            "cost": usage.get("cost") if isinstance(usage, dict) else data.get("cost"),
+            "attachments": [item["id"] for item in images],
+            "question": question or None,
+        }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        return {
+            "text": f"[Image description unavailable: {type(exc).__name__}].",
+            "model": model,
+            "attachments": [item["id"] for item in images],
+            "question": question or None,
+        }
+
+
+async def edit_delivery(message: object | None, content: str) -> bool:
+    edit = getattr(message, "edit", None)
+    if not callable(edit):
+        return False
+    await cast("Any", edit)(content=content)
+    return True
+
+
+def normalize_image_url(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().strip("<>\"'")
+    parsed = urlsplit(candidate)
+    return candidate if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
+def split_discord_content(content: str) -> list[str]:
+    if len(content) <= MAX_DISCORD_CONTENT_LENGTH:
+        return [content]
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= MAX_DISCORD_CONTENT_LENGTH:
+            chunks.append(remaining)
+            break
+        boundary = remaining.rfind("\n", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary < MAX_DISCORD_CONTENT_LENGTH // 2:
+            boundary = remaining.rfind(" ", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary <= 0:
+            boundary = MAX_DISCORD_CONTENT_LENGTH
+        chunks.append(remaining[:boundary].rstrip())
+        remaining = remaining[boundary:].lstrip()
+    return chunks
+
+
+def render_progress(steps: list[str]) -> str:
+    turns = [int(match) for step in steps for match in re.findall(r"\bGurt (\d+)\b", step)]
+    count = max(turns, default=0)
+    visible = steps[-8:]
+    header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
+    return "\n".join([header, *visible])
+
+
+async def deliver_content(message: object | None, channel: Messageable, content: str) -> None:
+    """Edit the progress message and send overflow chunks as normal messages."""
+    chunks = split_discord_content(content)
+    edited = False
+    if message is not None:
+        with suppress(discord.DiscordException):
+            edited = await edit_delivery(message, chunks[0])
+    if not edited:
+        await channel.send(chunks[0])
+    for chunk in chunks[1:]:
+        await channel.send(chunk)
