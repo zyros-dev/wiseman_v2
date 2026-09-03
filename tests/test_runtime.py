@@ -542,11 +542,15 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
 
 
 def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
-    steps = [f"⚙️ Turn {index}: command output" for index in range(1, 12)]
-    rendered = _render_progress(steps)
-    assert rendered.startswith("⏳ Working · 11 turns\n")
-    assert "Turn 3" not in rendered
-    assert "Turn 11" in rendered
+    rendered = _render_progress(["🤖 Turn 1: Codex turn started...", "⚙️ Running command..."])
+    assert rendered.startswith("⏳ Working · 1 turn\n")
+    assert rendered.count("Turn 1") == 1
+
+    bounded = _render_progress(
+        ["🤖 Turn 1: Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)]
+    )
+    assert bounded.startswith("⏳ Working · 1 turn\n")
+    assert bounded.count("\n") == 8
 
 
 @pytest.mark.asyncio
@@ -1474,7 +1478,7 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
     await runner.start(turn, Workspace(str(tmp_path)).thread("u", "t"))
     result = await runner.run(turn, Workspace(str(tmp_path)).thread("u", "t"))
     assert result["output"] == "answer"
-    assert runner.progress["t"] == '✍️ Turn 1: Writing response... "answer"'
+    assert runner.progress["t"] == '✍️ Writing response... "answer"'
 
 
 @pytest.mark.asyncio
