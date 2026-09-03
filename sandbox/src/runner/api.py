@@ -380,18 +380,18 @@ def _final_response(items: list[object]) -> str:
 
 def _progress_message(event: Notification, turn_number: int = 0) -> str | None:  # noqa: PLR0911
     """Map SDK lifecycle notifications to compact user-visible phases."""
-    prefix = f"Turn {turn_number}: " if turn_number else ""
     if event.method == "turn/started":
+        prefix = f"Gurt {turn_number}: " if turn_number else ""
         return f"🤖 {prefix}Codex turn started..."
     preview = " ".join(str(getattr(event.payload, "delta", "")).split())[:120]
     if event.method == "item/agentMessage/delta":
-        return f"✍️ {prefix}Writing response..." + (f' "{preview}"' if preview else "")
+        return "✍️ Writing response..." + (f' "{preview}"' if preview else "")
     if event.method == "item/commandExecution/outputDelta":
-        return f"⚙️ {prefix}Running command..." + (f' "{preview}"' if preview else "")
+        return "⚙️ Running command..." + (f' "{preview}"' if preview else "")
     if event.method == "item/fileChange/outputDelta":
-        return f"📝 {prefix}Editing files..." + (f' "{preview}"' if preview else "")
+        return "📝 Editing files..." + (f' "{preview}"' if preview else "")
     if event.method == "item/mcpToolCall/progress":
-        return f"🔌 {prefix}Using a tool..." + (f' "{preview}"' if preview else "")
+        return "🔌 Using a tool..." + (f' "{preview}"' if preview else "")
     if event.method == "item/started":
         item = getattr(event.payload, "item", None)
         name = type(getattr(item, "root", item)).__name__
@@ -401,7 +401,7 @@ def _progress_message(event: Notification, turn_number: int = 0) -> str | None: 
             "McpToolCallThreadItem": "🔌 Using a tool...",
             "AgentMessageThreadItem": "✍️ Writing response...",
             "ReasoningThreadItem": "🧠 Reasoning...",
-        }.get(name, f"🤖 {prefix}Codex working...")
+        }.get(name, "🤖 Codex working...")
     return None
 
 
