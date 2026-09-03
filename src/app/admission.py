@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -150,8 +151,29 @@ def context(event: Event) -> dict[str, Any]:
     return result
 
 
-def image_tool_instruction(messages: list[dict[str, Any]]) -> str:
-    """Make image handling explicit when the model cannot see Discord attachments natively."""
+IMAGE_REFERENCE_WORDS = re.compile(
+    r"\b(image|photo|picture|screenshot|attachment|chart|graph|diagram|visual)\b",
+    re.IGNORECASE,
+)
+
+
+def image_tool_instruction(
+    trigger: dict[str, Any], reply_ancestors: list[dict[str, Any]] | None = None
+) -> str:
+    """Select only the current or explicitly referenced Discord image."""
+    messages = [trigger]
+    if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(
+        str(trigger.get("content") or "")
+    ):
+        messages.extend(
+            message
+            for message in reversed(reply_ancestors or [])
+            if any(
+                str(attachment.get("content_type") or "").startswith("image/")
+                for attachment in message.get("attachments", [])
+            )
+        )
+        messages = messages[:2]
     images: list[str] = []
     seen: set[str] = set()
     for message in messages:

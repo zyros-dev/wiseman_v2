@@ -33,17 +33,11 @@ from app.presentation import (
     MAX_DISCORD_UPLOAD_BYTES,
     MAX_DISCORD_USERNAME_LENGTH,
     MIN_DISCORD_USERNAME_LENGTH,
+    describe_images,
 )
-from app.presentation import (
-    describe_images as _describe_images,
-)
-from app.presentation import (
-    normalize_image_url as _normalize_image_url,
-)
+from app.presentation import normalize_image_url as _normalize_image_url
 from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import TemporalRuntime
-
-describe_images = _describe_images
 
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})

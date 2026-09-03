@@ -6,15 +6,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import timedelta
-from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
-from app.engine import EngineResult  # noqa: TC001 - Temporal resolves the TypedDict annotation
 from app.models import Event
+
+if TYPE_CHECKING:
+    from app.runner import LifecycleRunner
+
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -43,7 +45,7 @@ def _retryable_turn_result(result: Mapping[str, object]) -> bool:
 
 
 @activity.defn(name="wiseman.turn")
-async def run_turn(payload: Mapping[str, object]) -> EngineResult:
+async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
     from app.main import engine  # noqa: PLC0415 - entrypoint dependency
 
     event = Event.model_validate(payload["event"])
