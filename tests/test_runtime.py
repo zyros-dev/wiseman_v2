@@ -140,14 +140,19 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert second.json()["kind"] == "followup"
     assert "1" in second.json()["selected_ids"]
     assert {"123", "124", "2"}.issubset(second.json()["selected_ids"])
-    context = [item for item in engine.phoenix.records if item["node"] == "context"][-1]
+    context = cast(
+        "dict[str, Any]",
+        [item for item in engine.phoenix.records if item["node"] == "context"][-1],
+    )
     assert context["normalized"]["reply_ancestors"][0]["id"] == "1"
     assert "1" not in {item["id"] for item in context["normalized"]["surrounding"]}
     assert engine.reactions["1"] == ["✅"]
     duplicate = client.post("/v1/discord/events", headers=headers, json=startup)
     assert duplicate.json()["status"] == "duplicate"
     assert duplicate.json()["state"]["turn"] == 2
-    grammar = next(item for item in engine.phoenix.records if item["node"] == "grammar")
+    grammar = cast(
+        "dict[str, Any]", next(item for item in engine.phoenix.records if item["node"] == "grammar")
+    )
     assert {"source", "raw", "normalized", "rendered", "version"} <= grammar.keys()
     assert grammar["parsed"]["schema"] == "wiseman.context.grammar.v2"
     codex = [item for item in engine.phoenix.records if item["node"] == "codex"]
