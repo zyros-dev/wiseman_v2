@@ -1778,6 +1778,12 @@ def test_runner_exposes_metrics(tmp_path, monkeypatch) -> None:
     assert "python_info" in response.text
 
 
+def test_sandbox_release_budget_supports_codex_workloads() -> None:
+    path = Path(__file__).parents[1] / ("deploy/midgard/registry-inputs/wiseman-v2-sandbox.json")
+    config = json.loads(path.read_text())
+    assert config["mem_mi"] >= 4096
+
+
 @pytest.mark.asyncio
 async def test_temporal_routes_followup_to_existing_thread() -> None:
     class Handle:
