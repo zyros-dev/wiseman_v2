@@ -1405,6 +1405,51 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_codex_runner_limits_cross_thread_turns(tmp_path, monkeypatch) -> None:
+    active = maximum = 0
+
+    class Handle:
+        async def stream(self):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            yield Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="t", turn=CodexTurn(id="turn", items=[], status=TurnStatus.completed)
+                ),
+            )
+
+    class Thread:
+        def __init__(self, identifier: str) -> None:
+            self.id = identifier
+
+        async def turn(self, prompt: str, **kwargs: object) -> Handle:
+            del prompt, kwargs
+            return Handle()
+
+    class Codex:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def thread_start(self, **kwargs: object) -> Thread:
+            return Thread(str(kwargs.get("cwd", "")).rsplit("/", 1)[-1])
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("WISEMAN_MAX_CONCURRENT_TURNS", "1")
+    monkeypatch.setattr("runner.api.AsyncCodex", Codex)
+    runner = CodexRunner()
+    workspace = Workspace(str(tmp_path))
+    turns = [Turn(thread_id=name, user_id="u", input=name) for name in ("one", "two")]
+    await asyncio.gather(
+        *(runner.run(turn, workspace.thread("u", turn.thread_id)) for turn in turns)
+    )
+    assert maximum == 1
+
+
+@pytest.mark.asyncio
 async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monkeypatch) -> None:
     class Result:
         usage = None
