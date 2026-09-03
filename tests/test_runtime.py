@@ -33,7 +33,7 @@ from app.admission import normalize_event
 from app.engine import Engine
 from app.gateway import Gateway, _history
 from app.http_api import create_app
-from app.models import State
+from app.models import Event, State
 from app.phoenix import Phoenix, PromptHub
 from app.phoenix import provider_values as _provider_values
 from app.presentation import (
@@ -878,13 +878,9 @@ async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypat
 
     class Engine:
         async def handle(
-            self,
-            event: Event,
-            state_data: dict[str, object] | None = None,
-            *,
-            retry_transport: bool = False,
+            self, event: Event, state_data: dict[str, object] | None = None
         ) -> dict[str, object]:
-            del state_data, retry_transport
+            del state_data
             seen.append(event.trigger.content)
             return {"state": {"turn": 1}}
 

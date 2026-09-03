@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from temporalio import activity, workflow
@@ -13,6 +14,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import Event
+
+TRANSPORT_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=2,
+)
 
 if TYPE_CHECKING:
     from app.runner import LifecycleRunner
@@ -51,13 +59,9 @@ async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
     event = Event.model_validate(payload["event"])
     if _activity_attempt() > 1:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
-    state = _json_object(payload.get("state"))
-    event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
-    result = await engine.handle(
-        event,
-        state_data=state,
-        retry_transport=_activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1),
-    )
+    state = payload.get("state", {})
+    event.seen_ids = list(state.get("seen", event.seen_ids))
+    result = await engine.handle(event, state_data=state)
     if _retryable_turn_result(result):
         raise ApplicationError(str(result["error"]), type="runner_transport")
     return result
@@ -206,15 +210,3 @@ def _retry_prompt() -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
-
-
-def _json_object(value: object) -> JsonObject:
-    return cast("JsonObject", value) if isinstance(value, dict) else {}
-
-
-def _object_map(value: object) -> dict[str, object]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _sequence(value: object) -> list[object]:
-    return list(value) if isinstance(value, list) else []
