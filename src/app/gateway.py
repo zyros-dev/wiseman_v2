@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
 from app.models import Event, Message, Messageable
-from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES
+from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS
 from app.presentation import thread_name as _thread_name
 
 LOGGER = logging.getLogger("wiseman")
@@ -171,10 +171,24 @@ class Gateway(discord.Client):
             await self._expire_once()
 
     async def _expire_once(self, now: float | None = None) -> None:
-        """Forget local tracking after Discord's native archive window expires."""
-        cutoff = (time.time() if now is None else now) - (THREAD_AUTO_ARCHIVE_MINUTES * 60)
+        """Archive and lock managed threads after two hours without human activity."""
+        cutoff = (time.time() if now is None else now) - THREAD_CLOSE_AFTER_SECONDS
         for thread_id, last_activity in list(self.thread_activity.items()):
             if last_activity > cutoff:
+                continue
+            try:
+                channel = await self.fetch_channel(int(thread_id))
+                if isinstance(channel, discord.Thread):
+                    await channel.edit(archived=True, locked=True)
+                else:
+                    LOGGER.warning(
+                        "Managed thread %s was not returned as a Discord thread", thread_id
+                    )
+                    continue
+            except (discord.ClientException, discord.DiscordException, ValueError):
+                LOGGER.warning(
+                    "Could not close managed thread %s; retaining it for retry", thread_id
+                )
                 continue
             self._forget_thread(thread_id)
 

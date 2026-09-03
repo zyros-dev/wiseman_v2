@@ -1,0 +1,1 @@
+Continue the current task from the existing workspace after the model stream disconnected. Do not repeat completed commands; inspect the current state and finish the user's request.

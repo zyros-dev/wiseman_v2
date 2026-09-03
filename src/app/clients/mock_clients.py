@@ -4,19 +4,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.clients.client_interfaces import (
     ClientContainer,
     ClientMode,
     DiscordClient,
-    JsonObject,
-    JsonValue,
     PhoenixClient,
     ProviderClient,
     RunnerClient,
     RunnerResult,
     TemporalClient,
 )
+
+if TYPE_CHECKING:
+    from app.types import JsonObject, JsonValue
 
 type Failure = str
 

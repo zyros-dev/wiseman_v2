@@ -1025,7 +1025,9 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tmp_path) -> None:
+async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
+    tmp_path, monkeypatch
+) -> None:
     activity_file = tmp_path / "activity.json"
     bot = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
     bot._touch_thread("123", timestamp=0)  # noqa: SLF001
@@ -1035,6 +1037,16 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tm
 
     restored.thread_activity["456"] = 1
 
+    class Thread:
+        async def edit(self, **kwargs: object) -> None:
+            assert kwargs == {"archived": True, "locked": True}
+
+    async def fetch_channel(thread_id: int) -> Thread:
+        assert thread_id == 456
+        return Thread()
+
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
+    monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
     await restored._expire_once(now=7_201)  # noqa: SLF001
     assert restored.thread_activity == {"123": 7_200.0}
 
@@ -1687,7 +1699,9 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_codex_runner_recovers_from_midstream_disconnect(tmp_path, monkeypatch) -> None:
+async def test_codex_runner_propagates_midstream_disconnect_to_temporal(
+    tmp_path, monkeypatch
+) -> None:
     prompts: list[str] = []
 
     class Handle:
@@ -1727,16 +1741,9 @@ async def test_codex_runner_recovers_from_midstream_disconnect(tmp_path, monkeyp
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     runner = CodexRunner()
     path = Workspace(str(tmp_path)).thread("u", "t")
-    result = await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
-    assert result["thread_id"] == "codex-thread"
-    assert prompts == [
-        "hello",
-        (
-            "Continue the current task from the existing workspace after the model stream "
-            "disconnected. Do not repeat completed commands; inspect the current state and "
-            "finish the user's request."
-        ),
-    ]
+    with pytest.raises(RuntimeError, match="disconnect"):
+        await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
+    assert prompts == ["hello"]
 
 
 @pytest.mark.asyncio

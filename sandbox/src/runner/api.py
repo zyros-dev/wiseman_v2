@@ -34,7 +34,7 @@ CODEX_TEXT_ONLY_OVERRIDES = (
     "features.view_image=false",
     "features.image_generation=false",
 )
-CODEX_STREAM_RETRY_ATTEMPTS = 4
+PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", "/app/contracts"))
 
 
 class Turn(BaseModel):
@@ -257,23 +257,7 @@ class CodexRunner:
 
     @staticmethod
     def _developer_instructions() -> str:
-        return (
-            "Use shared/AGENTS.md and shared/memories.md. "
-            "For current or external facts, use available network tools. "
-            "When Discord context includes an image attachment, use "
-            "wiseman-image with its attachment URL. Add --question for a "
-            "specific question, or omit it for a generic description. "
-            "Do not claim visual details until the command returns a result. "
-            "To send a file or image from this thread workspace into the Discord "
-            "thread, run wiseman-discord send-file PATH --caption 'optional caption'. "
-            "When the user explicitly requests it, use wiseman-discord set-profile "
-            "or set-reactions to update the bot presentation. "
-            "This trusted runner permits package installation: use sudo -n apt-get "
-            "update and sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install. "
-            "For large builds, use the available disk and keep parallelism modest. "
-            "Never claim to have searched unless a command returned usable results; "
-            "if a web command fails, say so plainly."
-        )
+        return _prompt("sandbox-developer-instructions.txt")
 
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
@@ -308,9 +292,7 @@ class CodexRunner:
         assert thread is not None
         return thread
 
-    async def _run_thread(  # noqa: PLR0912
-        self, thread: object, turn: Turn, path: Path
-    ) -> dict[str, object]:
+    async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
         if not hasattr(thread, "turn"):
             result = await thread.run(
                 turn.input,
@@ -329,40 +311,27 @@ class CodexRunner:
         items: list[object] = []
         usage: object = None
         completed: TurnCompletedNotification | None = None
-        for attempt in range(CODEX_STREAM_RETRY_ATTEMPTS):
-            self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
-            prompt = turn.input
-            if attempt:
-                prompt = (
-                    "Continue the current task from the existing workspace after the model "
-                    "stream disconnected. Do not repeat completed commands; inspect the "
-                    "current state and finish the user's request."
-                )
-                self.progress[turn.thread_id] = "🔁 Reconnecting to Codex..."
-            active_turn = await thread.turn(
-                prompt,
-                approval_mode=ApprovalMode.deny_all,
-                sandbox=Sandbox.full_access,
-                cwd=str(path),
-            )
-            self.active_turns[turn.thread_id] = active_turn
-            try:
-                async for event in active_turn.stream():
-                    if message := _progress_message(event, turn_number):
-                        self.progress[turn.thread_id] = message
-                    payload = event.payload
-                    if isinstance(payload, ItemCompletedNotification):
-                        items.append(payload.item)
-                    elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
-                        usage = payload.token_usage
-                    elif isinstance(payload, TurnCompletedNotification):
-                        completed = payload
-                break
-            except Exception as exc:  # SDK transport types vary by release
-                if attempt + 1 >= CODEX_STREAM_RETRY_ATTEMPTS or not _stream_is_retryable(exc):
-                    raise
-            finally:
-                self.active_turns.pop(turn.thread_id, None)
+        self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
+        active_turn = await thread.turn(
+            turn.input,
+            approval_mode=ApprovalMode.deny_all,
+            sandbox=Sandbox.full_access,
+            cwd=str(path),
+        )
+        self.active_turns[turn.thread_id] = active_turn
+        try:
+            async for event in active_turn.stream():
+                if message := _progress_message(event, turn_number):
+                    self.progress[turn.thread_id] = message
+                payload = event.payload
+                if isinstance(payload, ItemCompletedNotification):
+                    items.append(payload.item)
+                elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+                    usage = payload.token_usage
+                elif isinstance(payload, TurnCompletedNotification):
+                    completed = payload
+        finally:
+            self.active_turns.pop(turn.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")  # noqa: TRY003
         if completed.turn.error is not None:
@@ -385,20 +354,13 @@ class CodexRunner:
         return True
 
 
-def _stream_is_retryable(error: BaseException) -> bool:
-    """Recognize provider transport loss without retrying a completed Codex error."""
-    message = str(error).lower()
-    return any(
-        phrase in message
-        for phrase in (
-            "disconnect",
-            "transport error",
-            "network error",
-            "connection reset",
-            "connection refused",
-            "temporarily unavailable",
-        )
-    )
+def _prompt(name: str) -> str:
+    for root in (PROMPT_ROOT, Path(__file__).parents[3] / "contracts"):
+        try:
+            return (root / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return os.getenv("WISEMAN_DEVELOPER_INSTRUCTIONS", "")
 
 
 def _final_response(items: list[object]) -> str:

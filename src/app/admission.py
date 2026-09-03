@@ -185,11 +185,8 @@ def image_tool_instruction(
                 seen.add(url)
     if not images:
         return ""
-    urls = "\n".join(f"- {url}" for url in images[:4])
-    return (
-        "This turn includes Discord image attachment(s). Before answering, you MUST run "
-        "`/usr/local/bin/wiseman-image` once for each relevant image URL below. Use `--question` "
-        "when the user asks about a visual detail; otherwise request a generic description. "
-        "Do not claim to have seen an image until the command returns.\n"
-        f"Image URLs:\n{urls}"
+    source = (Path(__file__).parents[2] / "contracts" / "image-tool-instruction.j2").read_text(
+        encoding="utf-8"
     )
+    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(source)
+    return template.render(urls=images[:4]).strip()

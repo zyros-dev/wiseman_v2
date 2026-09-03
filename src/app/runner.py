@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from app.types import JsonObject
 
 
 class Runner(Protocol):
@@ -48,16 +50,16 @@ class HttpRunner:
 
     async def _post(
         self, path: str, payload: dict[str, object], request_timeout: float = 30
-    ) -> dict[str, Any]:
+    ) -> JsonObject:
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.post(f"{self.url}{path}", headers=headers, json=payload)
         if response.is_error:
             raise RunnerError(response.status_code, response.text[:1_000])
-        value = response.json()
+        value: object = response.json()
         if not isinstance(value, dict):
             raise RunnerError(response.status_code, "runner returned a non-object response")
-        return value
+        return cast("JsonObject", value)
 
     async def acquire(self, user: str, workspace: str) -> None:
         await self._post("/acquire", {"thread_id": workspace, "user_id": user, "input": ""})
@@ -112,7 +114,9 @@ class HttpRunner:
             },
             request_timeout=300,
         )
-        billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
+        billing: dict[str, object] = {
+            key: data[key] for key in ("model", "cost", "usage") if key in data
+        }
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
 
     async def _run_with_progress(
@@ -158,7 +162,9 @@ class HttpRunner:
         value = response.json()
         if not isinstance(value, dict):
             raise RunnerError(response.status_code, "runner returned a non-object response")
-        billing = {key: value[key] for key in ("model", "cost", "usage") if key in value}
+        billing: dict[str, object] = {
+            key: value[key] for key in ("model", "cost", "usage") if key in value
+        }
         return str(value.get("thread_id", thread)), str(value.get("output", "")), billing
 
 
