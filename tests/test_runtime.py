@@ -37,9 +37,12 @@ from app.main import (
     PromptHub,
     State,
     _banner,
+    _deliver_content,
     _describe_images,
     _history,
+    _normalize_image_url,
     _provider_values,
+    _split_discord_content,
     _thread_name,
     create_app,
     normalize_event,
@@ -248,6 +251,63 @@ def test_reaction_state_is_idempotent() -> None:
     assert engine._react("message", "👀")  # noqa: SLF001
     assert not engine._react("message", "👀")  # noqa: SLF001
     assert engine.reactions["message"] == ["👀"]
+
+
+def test_discord_content_splits_long_answers_at_readable_boundaries() -> None:
+    content = "first paragraph\n\n" + ("word " * 600)
+    chunks = _split_discord_content(content)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 2_000 for chunk in chunks)
+    assert "".join(chunks).replace(" ", "") == content.replace(" ", "")
+
+
+def test_image_url_normalization_accepts_model_wrappers() -> None:
+    assert _normalize_image_url(" <https://cdn.example/image.png> ") == (
+        "https://cdn.example/image.png"
+    )
+    assert _normalize_image_url("attachment://image.png") == ""
+
+
+@pytest.mark.asyncio
+async def test_long_delivery_edits_first_chunk_and_sends_overflow() -> None:
+    class Channel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, content: str = "") -> object:
+            index = len(self.sent)
+            self.sent.append(content)
+            channel = self
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    channel.sent[index] = content
+
+            return Delivery()
+
+    channel = Channel()
+    progress = await channel.send("working")
+    content = "paragraph\n\n" + ("word " * 600)
+    await _deliver_content(progress, channel, content)
+    assert len(channel.sent) >= 2
+    assert all(len(chunk) <= 2_000 for chunk in channel.sent)
+    assert "".join(channel.sent).replace(" ", "") == content.replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> None:
+    seen: list[str] = []
+
+    async def describe(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+        seen.append(str(messages[0]["attachments"][0]["url"]))
+        return {"text": "description", "attachments": ["image"], "question": question or None}
+
+    monkeypatch.setattr("app.main._describe_images", describe)
+    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+        "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
+    )
+    assert response.status_code == 200
+    assert seen == ["https://cdn.example/image.png"]
 
 
 def test_reaction_configuration_changes_future_turns() -> None:

@@ -17,6 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -40,6 +41,7 @@ from app.temporal_runtime import TemporalRuntime
 LOGGER = logging.getLogger("wiseman")
 
 DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
+MAX_DISCORD_CONTENT_LENGTH = 2_000
 MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
@@ -510,6 +512,52 @@ async def _edit_delivery(message: object | None, content: str) -> bool:
     return True
 
 
+def _normalize_image_url(value: object) -> str:
+    """Accept plain URLs and the angle-bracket form used in model output."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().strip("<>\"'")
+    parsed = urlsplit(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+    return ""
+
+
+def _split_discord_content(content: str) -> list[str]:
+    """Split an answer at readable boundaries within Discord's content limit."""
+    if len(content) <= MAX_DISCORD_CONTENT_LENGTH:
+        return [content]
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= MAX_DISCORD_CONTENT_LENGTH:
+            chunks.append(remaining)
+            break
+        boundary = remaining.rfind("\n", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary < MAX_DISCORD_CONTENT_LENGTH // 2:
+            boundary = remaining.rfind(" ", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary <= 0:
+            boundary = MAX_DISCORD_CONTENT_LENGTH
+        chunks.append(remaining[:boundary].rstrip())
+        remaining = remaining[boundary:].lstrip()
+    return chunks
+
+
+async def _deliver_content(message: object | None, channel: Messageable, content: str) -> None:
+    """Edit the progress message and send overflow chunks as normal messages."""
+    chunks = _split_discord_content(content)
+    edited = False
+    if message is not None:
+        try:
+            edited = await _edit_delivery(message, chunks[0])
+        except discord.DiscordException:
+            LOGGER.warning("Could not edit Discord delivery message")
+    if not edited:
+        await channel.send(chunks[0])
+    for chunk in chunks[1:]:
+        await channel.send(chunk)
+
+
 class Runner(Protocol):
     async def run(
         self,
@@ -827,10 +875,10 @@ class Engine:
             if self._react(trigger.id, failure_emoji):
                 if live is not None:
                     await live.add_reaction(failure_emoji)
-                if delivery_channel is not None and not await _edit_delivery(
-                    progress_message, f"Codex failed: {exc}"
-                ):
-                    await delivery_channel.send(f"Codex failed: {exc}")
+                if delivery_channel is not None:
+                    await _deliver_content(
+                        progress_message, delivery_channel, f"Codex failed: {exc}"
+                    )
                 await self._remove_working_reaction(trigger.id, live)
             await self.phoenix.record(
                 trace,
@@ -856,8 +904,8 @@ class Engine:
             **billing,
         )
         await self.phoenix.record(trace, "delivery", output=output)
-        if delivery_channel is not None and not await _edit_delivery(progress_message, output):
-            await delivery_channel.send(output)
+        if delivery_channel is not None:
+            await _deliver_content(progress_message, delivery_channel, output)
         success_emoji = self.reaction_emojis["success"]
         if self._react(trigger.id, success_emoji):
             if live is not None:
@@ -1350,8 +1398,8 @@ def create_app(  # noqa: C901, PLR0915
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid tool token")
-        url = str(payload.get("url") or "")
-        if not url.startswith(("https://", "http://")):
+        url = _normalize_image_url(payload.get("url"))
+        if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
         attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
         result = await _describe_images(
