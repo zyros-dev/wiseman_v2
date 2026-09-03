@@ -860,7 +860,12 @@ class Engine:
             "context": grammar["rendered"],
             "user": "\n\n".join(
                 part
-                for part in (trigger.content, _image_tool_instruction(current["messages"]))
+                for part in (
+                    trigger.content,
+                    _image_tool_instruction(
+                        [trigger.model_dump(mode="json"), *current["reply_ancestors"]]
+                    ),
+                )
                 if part
             ),
         }

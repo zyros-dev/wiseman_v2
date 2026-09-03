@@ -162,13 +162,29 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
                     }
                 ],
             },
+            "parent_messages": [
+                {
+                    **discord_message("historical-image", "Old image", thread="t"),
+                    "attachments": [
+                        {
+                            "id": "old-image",
+                            "filename": "old.png",
+                            "url": "https://cdn.example/old.png",
+                            "content_type": "image/png",
+                        }
+                    ],
+                }
+            ],
             "kind": "startup",
         }
     )
     await engine.handle(event)
     codex = next(item for item in engine.phoenix.records if item["node"] == "codex")
+    prompt = json.loads(str(codex["input"]))
     assert "/usr/local/bin/wiseman-image" in str(codex["input"])
     assert "https://cdn.example/photo.png" in str(codex["input"])
+    assert "https://cdn.example/old.png" in prompt["context"]
+    assert "https://cdn.example/old.png" not in prompt["user"]
 
 
 def test_normalize_discord_gateway_message_create_envelope() -> None:
