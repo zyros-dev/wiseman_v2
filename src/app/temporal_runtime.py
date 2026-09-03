@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from temporalio import activity, workflow
@@ -12,6 +13,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import Event
+
+TRANSPORT_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=2,
+)
 
 if TYPE_CHECKING:
     from app.runner import LifecycleRunner
@@ -31,6 +39,8 @@ async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
     from app.main import engine  # noqa: PLC0415 - entrypoint dependency
 
     event = Event.model_validate(payload["event"])
+    if _activity_attempt() > 1:
+        event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
     state = payload.get("state", {})
     event.seen_ids = list(state.get("seen", event.seen_ids))
     result = await engine.handle(event, state_data=state)
@@ -90,11 +100,13 @@ class ThreadWorkflow:
                     provision_workspace,
                     {"event": event, "state": self.state},
                     start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=TRANSPORT_RETRY_POLICY,
                 )
                 started = await workflow.execute_activity(
                     start_codex,
                     {"event": event, "state": self.state},
                     start_to_close_timeout=timedelta(seconds=90),
+                    retry_policy=TRANSPORT_RETRY_POLICY,
                 )
                 self.state = started.get("state", self.state)
                 self.started = True
@@ -102,12 +114,7 @@ class ThreadWorkflow:
                 run_turn,
                 {"event": event, "state": self.state},
                 start_to_close_timeout=timedelta(minutes=10),
-                retry_policy=RetryPolicy(
-                    initial_interval=timedelta(seconds=5),
-                    backoff_coefficient=2,
-                    maximum_interval=timedelta(seconds=30),
-                    maximum_attempts=2,
-                ),
+                retry_policy=TRANSPORT_RETRY_POLICY,
             )
             self.state = self.result.get("state", self.state)
             try:
@@ -169,3 +176,18 @@ class TemporalRuntime:
         if self.worker_task is not None:
             self.worker_task.cancel()
             await asyncio.gather(self.worker_task, return_exceptions=True)
+
+
+def _activity_attempt() -> int:
+    try:
+        return activity.info().attempt
+    except RuntimeError:
+        return 1
+
+
+def _retry_prompt() -> str:
+    path = Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.txt"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""

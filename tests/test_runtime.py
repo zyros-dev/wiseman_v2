@@ -5,7 +5,7 @@
 import asyncio
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -33,7 +33,7 @@ from app.admission import normalize_event
 from app.engine import Engine
 from app.gateway import Gateway, _history
 from app.http_api import create_app
-from app.models import State
+from app.models import Event, State
 from app.phoenix import Phoenix, PromptHub
 from app.phoenix import provider_values as _provider_values
 from app.presentation import (
@@ -59,6 +59,7 @@ from app.presentation import (
 )
 from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
+    TRANSPORT_RETRY_POLICY,
     TemporalError,
     TemporalRuntime,
     ThreadWorkflow,
@@ -816,6 +817,51 @@ async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
         }
     )
     assert result["state"]["turn"] == 2
+
+
+@pytest.mark.asyncio
+async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypatch) -> None:
+    seen: list[str] = []
+
+    class Engine:
+        async def handle(
+            self, event: Event, state_data: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            del state_data
+            seen.append(event.trigger.content)
+            return {"state": {"turn": 1}}
+
+    class ActivityInfo:
+        attempt = 2
+
+    monkeypatch.setattr("app.main.engine", Engine())
+
+    def activity_info() -> ActivityInfo:
+        return ActivityInfo()
+
+    monkeypatch.setattr("app.temporal_runtime.activity.info", activity_info)
+    await run_turn(
+        {
+            "event": {
+                "trigger": message("retry", "continue", thread="t"),
+                "kind": "startup",
+            },
+            "state": {},
+        }
+    )
+    assert seen == [
+        (
+            "continue\n\nContinue the current task from the existing workspace after the model "
+            "stream disconnected. Do not repeat completed commands; inspect the current state "
+            "and finish "
+            "the user's request.\n"
+        )
+    ]
+
+
+def test_temporal_retry_policy_is_bounded() -> None:
+    assert TRANSPORT_RETRY_POLICY.maximum_attempts == 2
+    assert TRANSPORT_RETRY_POLICY.maximum_interval == timedelta(seconds=30)
 
 
 def test_temporal_retries_disconnected_runner_result() -> None:
