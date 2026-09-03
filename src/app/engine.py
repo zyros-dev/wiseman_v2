@@ -8,8 +8,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import discord
 from prometheus_client import Counter
@@ -17,11 +16,11 @@ from prometheus_client import Counter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-from app.admission import ContextConfig, context
+from app.admission import context
 from app.admission import event_data as _event_data
 from app.admission import image_tool_instruction as _image_tool_instruction
 from app.admission import render_grammar as _grammar
-from app.models import ActiveTurn, EmbedMessageable, Event, Message, Messageable, State
+from app.models import ActiveTurn, Event, Message, Messageable, State
 from app.phoenix import Phoenix, PromptHub
 from app.phoenix import json_text as _json
 from app.phoenix import route_info as _route_info
@@ -41,86 +40,18 @@ from app.presentation import (
 from app.presentation import (
     startup_embed as _startup_embed,
 )
-from app.runner import HttpRunner, Runner, RunnerError, SteerableRunner
-
-if TYPE_CHECKING:
-    from app.types import JsonObject
+from app.runner import HttpRunner, Runner, SteerableRunner
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
 
 
-@dataclass(slots=True)
-class _Preparation:
-    event: Event
-    live: discord.Message | None
-    channel: Messageable | None
-    state: State
-    kind: str
-    trace: str
-
-
-@dataclass(slots=True)
-class _Lifecycle:
-    trigger: Message
-    live: discord.Message | None
-    channel: Messageable | None
-    progress_message: object | None
-    processing_emoji: str
-    trace: str
-    kind: str
-    state: State
-
-
-@dataclass(slots=True)
-class _Prepared:
-    prompt: str
-    current: dict[str, object]
-    progress_message: object | None
-    processing_emoji: str
-
-
-@dataclass(slots=True)
-class _Success:
-    lifecycle: _Lifecycle
-    current: dict[str, object]
-    prompt: str
-    output: str
-    billing: dict[str, object]
-
-
-class StateData(TypedDict):
-    codex_thread: str | None
-    seen: list[str]
-    processed: list[str]
-    turn: int
-
-
-class EngineResult(TypedDict, total=False):
-    trace: str
-    status: str
-    kind: str
-    error: str
-    output: str
-    selected_ids: list[str]
-    reactions: list[str]
-    progress: list[str]
-    state: StateData
-
-
 class Engine:
     """One turn state machine; production adapters can place each method in a Temporal Activity."""
 
-    def __init__(
-        self,
-        phoenix: Phoenix,
-        runner: Runner,
-        prompts: PromptHub | None = None,
-        context_config: ContextConfig | None = None,
-    ) -> None:
+    def __init__(self, phoenix: Phoenix, runner: Runner, prompts: PromptHub | None = None) -> None:
         self.phoenix, self.runner, self.prompts = phoenix, runner, prompts or PromptHub()
-        self.context_config = context_config or ContextConfig.from_env()
         self.states: dict[str, State] = defaultdict(State)
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
@@ -129,7 +60,6 @@ class Engine:
         self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
         self.working_reactions: dict[str, str] = {}
         self.active_turns: dict[str, ActiveTurn] = {}
-        self.deliveries: dict[str, object] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -138,10 +68,8 @@ class Engine:
         event: Event,
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
-        state_data: JsonObject | None = None,
-        *,
-        retry_transport: bool = False,
-    ) -> EngineResult:
+        state_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         key = event.trigger.thread_id or event.trigger.channel_id
         async with self.locks.setdefault(key, asyncio.Lock()):
             if live is None and self.lookup is not None:
@@ -151,23 +79,15 @@ class Engine:
                     delivery_channel = await self.lookup_channel(event)
                 elif live is not None:
                     delivery_channel = live.channel
-            return await self._handle(
-                event,
-                live,
-                delivery_channel,
-                state_data,
-                retry_transport=retry_transport,
-            )
+            return await self._handle(event, live, delivery_channel, state_data)
 
     async def _handle(
         self,
         event: Event,
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
-        state_data: JsonObject | None = None,
-        *,
-        retry_transport: bool = False,
-    ) -> EngineResult:
+        state_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         trigger = event.trigger
         key = trigger.thread_id or trigger.channel_id
         state = self._state(key, state_data)
@@ -185,25 +105,13 @@ class Engine:
         event.seen_ids = sorted(set(event.seen_ids) | state.seen)
         kind = event.kind or ("followup" if state.turn else "startup")
         trace = f"discord-{trigger.id}"
-        prepared = await self._prepare(
-            _Preparation(
-                event=event,
-                live=live,
-                channel=delivery_channel,
-                state=state,
-                kind=kind,
-                trace=trace,
-            )
-        )
-        lifecycle = _Lifecycle(
-            trigger=trigger,
+        prompt, current, progress_message, processing_emoji = await self._prepare(
+            event=event,
             live=live,
             channel=delivery_channel,
-            progress_message=prepared.progress_message,
-            processing_emoji=prepared.processing_emoji,
-            trace=trace,
-            kind=kind,
             state=state,
+            kind=kind,
+            trace=trace,
         )
 
         async def report(message: str) -> None:
@@ -211,11 +119,10 @@ class Engine:
                 return
             self.progress[trigger.id].append(message)
             await self.phoenix.record(trace, "progress", phase=message)
-            if lifecycle.progress_message is not None:
+            if progress_message is not None:
                 try:
                     await _edit_delivery(
-                        lifecycle.progress_message,
-                        _render_progress(self.progress[trigger.id], state.turn + 1),
+                        progress_message, _render_progress(self.progress[trigger.id])
                     )
                 except discord.DiscordException:
                     LOGGER.warning("Could not update progress message for %s", trigger.id)
@@ -224,42 +131,58 @@ class Engine:
             state.codex_thread, output, billing = await self._run_codex(
                 state=state,
                 trigger=trigger,
-                prompt=prepared.prompt,
+                prompt=prompt,
                 report=report,
             )
-        except Exception as exc:
-            if retry_transport and _transport_error(exc):
-                raise
-            return await self._failure(lifecycle, exc)
+        except Exception as exc:  # noqa: BLE001
+            return await self._failure(
+                trigger=trigger,
+                live=live,
+                channel=delivery_channel,
+                progress_message=progress_message,
+                processing_emoji=processing_emoji,
+                trace=trace,
+                kind=kind,
+                state=state,
+                error=exc,
+            )
         finally:
             self.active_turns.pop(key, None)
         return await self._success(
-            _Success(
-                lifecycle=lifecycle,
-                current=prepared.current,
-                prompt=prepared.prompt,
-                output=output,
-                billing=billing,
-            )
+            trigger=trigger,
+            live=live,
+            channel=delivery_channel,
+            progress_message=progress_message,
+            processing_emoji=processing_emoji,
+            trace=trace,
+            kind=kind,
+            state=state,
+            current=current,
+            prompt=prompt,
+            output=output,
+            billing=billing,
         )
 
-    def _state(self, key: str, data: JsonObject | None) -> State:
+    def _state(self, key: str, data: dict[str, Any] | None) -> State:
         if data is None:
             return self.states[key]
         return State(
-            codex_thread=cast("str | None", data.get("codex_thread")),
-            seen=_strings(data.get("seen", [])),
-            processed=_strings(data.get("processed", [])),
-            turn=int(cast("int", data.get("turn", 0))),
+            codex_thread=data.get("codex_thread"),
+            seen=set(data.get("seen", [])),
+            processed=set(data.get("processed", [])),
+            turn=int(data.get("turn", 0)),
         )
 
-    async def _prepare(self, request: _Preparation) -> _Prepared:
-        event = request.event
-        live = request.live
-        channel = request.channel
-        state = request.state
-        kind = request.kind
-        trace = request.trace
+    async def _prepare(
+        self,
+        *,
+        event: Event,
+        live: discord.Message | None,
+        channel: Messageable | None,
+        state: State,
+        kind: str,
+        trace: str,
+    ) -> tuple[str, dict[str, Any], object | None, str]:
         trigger = event.trigger
         raw = event.raw_payload or _event_data(event)
         await self.phoenix.record(
@@ -284,8 +207,8 @@ class Engine:
         if self._react(trigger.id, processing_emoji) and live is not None:
             await live.add_reaction(processing_emoji)
         await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
-        current = context(event, self.context_config)
-        state.seen.update(cast("list[str]", current["selected_ids"]))
+        current = context(event)
+        state.seen.update(current["selected_ids"])
         await self.phoenix.record(
             trace,
             "context",
@@ -295,26 +218,19 @@ class Engine:
         )
         grammar_name = "startup-context" if kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
-        grammar = _grammar(
-            grammar_name,
-            source,
-            raw,
-            mode=kind,
-            messages=cast("list[dict[str, object]]", current["messages"]),
-        )
+        grammar = _grammar(grammar_name, source, raw, mode=kind, messages=current["messages"])
         await self.phoenix.record(trace, "grammar", **grammar)
         parts = {
             "soul": await self.prompts.source("wiseman-soul"),
             "runtime": await self.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
-            "context": cast("str", grammar["rendered"]),
+            "context": grammar["rendered"],
             "user": "\n\n".join(
                 part
                 for part in (
                     trigger.content,
                     _image_tool_instruction(
-                        trigger.model_dump(mode="json"),
-                        cast("list[dict[str, object]]", current["reply_ancestors"]),
+                        [trigger.model_dump(mode="json"), *current["reply_ancestors"]]
                     ),
                 )
                 if part
@@ -322,23 +238,21 @@ class Engine:
         }
         prompt = _json(parts)
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
-        progress_message = self.deliveries.get(trigger.id)
-        if channel is not None and kind == "startup" and not self.progress[trigger.id]:
-            await cast("EmbedMessageable", channel).send(embed=_startup_embed())
+        progress_message: object | None = None
+        if channel is not None and kind == "startup":
+            await cast("Any", channel).send(embed=_startup_embed())
         phase = "codex starting" if kind == "startup" else "working"
         progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
-        if not self.progress[trigger.id]:
-            self.progress[trigger.id].append(phase)
+        self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
-        if progress_message is None and channel is not None:
-            progress_message = await channel.send(_render_progress([progress], state.turn + 1))
-            self.deliveries[trigger.id] = progress_message
+        if channel is not None:
+            progress_message = await channel.send(_render_progress([progress]))
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(
             trigger_id=trigger.id,
             delivery_id=str(getattr(progress_message, "id", "")) or None,
         )
-        return _Prepared(prompt, current, progress_message, processing_emoji)
+        return prompt, current, progress_message, processing_emoji
 
     async def _run_codex(
         self,
@@ -355,67 +269,86 @@ class Engine:
             )
         return await self.runner.run(state.codex_thread or "", prompt, trigger.author_id, workspace)
 
-    async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
-        trigger = lifecycle.trigger
+    async def _failure(
+        self,
+        *,
+        trigger: Message,
+        live: discord.Message | None,
+        channel: Messageable | None,
+        progress_message: object | None,
+        processing_emoji: str,
+        trace: str,
+        kind: str,
+        state: State,
+        error: Exception,
+    ) -> dict[str, Any]:
         TURN_FAILURES.inc()
-        await self.phoenix.record(lifecycle.trace, "failure", error=str(error))
+        await self.phoenix.record(trace, "failure", error=str(error))
         failure_emoji = self.reaction_emojis["failure"]
         if self._react(trigger.id, failure_emoji):
-            if lifecycle.live is not None:
-                await lifecycle.live.add_reaction(failure_emoji)
-            if lifecycle.channel is not None:
-                await _deliver_content(
-                    lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}"
-                )
-            await self._remove_working_reaction(trigger.id, lifecycle.live)
+            if live is not None:
+                await live.add_reaction(failure_emoji)
+            if channel is not None:
+                await _deliver_content(progress_message, channel, f"Codex failed: {error}")
+            await self._remove_working_reaction(trigger.id, live)
         await self.phoenix.record(
-            lifecycle.trace,
+            trace,
             "reaction",
-            operations=[f"add:{failure_emoji}", f"remove:{lifecycle.processing_emoji}"],
+            operations=[f"add:{failure_emoji}", f"remove:{processing_emoji}"],
         )
-        self.deliveries.pop(trigger.id, None)
         return {
-            "trace": lifecycle.trace,
-            "kind": lifecycle.kind,
+            "trace": trace,
+            "kind": kind,
             "error": str(error),
             "reactions": self.reactions[trigger.id],
-            "state": _state_data(lifecycle.state),
+            "state": _state_data(state),
         }
 
-    async def _success(self, result: _Success) -> EngineResult:
-        lifecycle = result.lifecycle
-        trigger = lifecycle.trigger
-        state = lifecycle.state
+    async def _success(
+        self,
+        *,
+        trigger: Message,
+        live: discord.Message | None,
+        channel: Messageable | None,
+        progress_message: object | None,
+        processing_emoji: str,
+        trace: str,
+        kind: str,
+        state: State,
+        current: dict[str, Any],
+        prompt: str,
+        output: str,
+        billing: dict[str, object],
+    ) -> dict[str, Any]:
         state.turn += 1
-        self.progress[trigger.id].append("✍️ Writing response...")
-        await self.phoenix.record(lifecycle.trace, "progress", phase="finalizing")
+        self.progress[trigger.id].append("finalizing")
+        await self.phoenix.record(trace, "progress", phase="finalizing")
         await self.phoenix.record(
-            lifecycle.trace,
+            trace,
             "codex",
-            input=result.prompt,
+            input=prompt,
             thread_id=state.codex_thread,
-            output=result.output,
-            **result.billing,
+            output=output,
+            **billing,
         )
-        await self.phoenix.record(lifecycle.trace, "delivery", output=result.output)
-        if lifecycle.channel is not None:
-            await _deliver_content(lifecycle.progress_message, lifecycle.channel, result.output)
+        await self.phoenix.record(trace, "delivery", output=output)
+        if channel is not None:
+            await _deliver_content(progress_message, channel, output)
         success_emoji = self.reaction_emojis["success"]
         if self._react(trigger.id, success_emoji):
-            if lifecycle.live is not None:
-                await lifecycle.live.add_reaction(success_emoji)
-            await self._remove_working_reaction(trigger.id, lifecycle.live)
+            if live is not None:
+                await live.add_reaction(success_emoji)
+            await self._remove_working_reaction(trigger.id, live)
         await self.phoenix.record(
-            lifecycle.trace,
+            trace,
             "reaction",
-            operations=[f"add:{success_emoji}", f"remove:{lifecycle.processing_emoji}"],
+            operations=[f"add:{success_emoji}", f"remove:{processing_emoji}"],
         )
-        self.deliveries.pop(trigger.id, None)
         return {
-            "trace": lifecycle.trace,
-            "kind": lifecycle.kind,
-            "output": result.output,
-            "selected_ids": cast("list[str]", result.current["selected_ids"]),
+            "trace": trace,
+            "kind": kind,
+            "output": output,
+            "selected_ids": current["selected_ids"],
             "reactions": self.reactions[trigger.id],
             "progress": self.progress[trigger.id],
             "state": _state_data(state),
@@ -468,26 +401,15 @@ class Engine:
         if emoji not in self.reactions[message_id]:
             return
         self.reactions[message_id].remove(emoji)
-        if live is not None and self.reaction_user is not None:
-            await live.remove_reaction(emoji, cast("discord.User", self.reaction_user))
+        remove = getattr(live, "remove_reaction", None)
+        if callable(remove) and self.reaction_user is not None:
+            await cast("Any", remove)(emoji, self.reaction_user)
 
 
-def _state_data(state: State) -> StateData:
+def _state_data(state: State) -> dict[str, Any]:
     return {
         "codex_thread": state.codex_thread,
         "seen": sorted(state.seen),
         "processed": sorted(state.processed),
         "turn": state.turn,
     }
-
-
-def _strings(value: object) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {str(item) for item in value}
-
-
-def _transport_error(error: Exception) -> bool:
-    return isinstance(error, RunnerError) or any(
-        marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5")
-    )
