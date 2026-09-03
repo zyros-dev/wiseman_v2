@@ -44,7 +44,11 @@ class Event(BaseModel):
 class Messageable(Protocol):
     """Minimal Discord channel surface needed for turn delivery."""
 
-    async def send(self, content: str) -> object: ...
+    async def send(self, content: str = "") -> object: ...
+
+
+class EmbedMessageable(Protocol):
+    async def send(self, content: str = "", *, embed: object | None = None) -> object: ...
 
 
 @dataclass
