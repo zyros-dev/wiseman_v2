@@ -203,7 +203,7 @@ class CodexRunner:
 
     async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
-        async with lock:
+        async with self.capacity, lock:
             return await self._start_locked(turn, path, account)
 
     async def _start_locked(self, turn: Turn, path: Path, account: str) -> dict[str, object]:
