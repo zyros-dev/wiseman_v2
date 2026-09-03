@@ -553,10 +553,10 @@ def _split_discord_content(content: str) -> list[str]:
 
 def _render_progress(steps: list[str]) -> str:
     """Render a bounded rolling trace while the final answer is still pending."""
-    turns = [int(match) for step in steps for match in re.findall(r"\bTurn (\d+)\b", step)]
+    turns = [int(match) for step in steps for match in re.findall(r"\bGurt (\d+)\b", step)]
     count = max(turns, default=0)
     visible = steps[-8:]
-    header = f"⏳ Working · {count} turn{'s' if count != 1 else ''}"
+    header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])
 
 

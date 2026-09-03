@@ -381,7 +381,7 @@ def _final_response(items: list[object]) -> str:
 def _progress_message(event: Notification, turn_number: int = 0) -> str | None:  # noqa: PLR0911
     """Map SDK lifecycle notifications to compact user-visible phases."""
     if event.method == "turn/started":
-        prefix = f"Turn {turn_number}: " if turn_number else ""
+        prefix = f"Gurt {turn_number}: " if turn_number else ""
         return f"🤖 {prefix}Codex turn started..."
     preview = " ".join(str(getattr(event.payload, "delta", "")).split())[:120]
     if event.method == "item/agentMessage/delta":

@@ -63,6 +63,7 @@ from runner.api import (
     Sandbox,
     Turn,
     Workspace,
+    _progress_message,
 )
 from runner.api import create_app as runner_app
 
@@ -542,15 +543,34 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
 
 
 def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
-    rendered = _render_progress(["🤖 Turn 1: Codex turn started...", "⚙️ Running command..."])
-    assert rendered.startswith("⏳ Working · 1 turn\n")
-    assert rendered.count("Turn 1") == 1
+    rendered = _render_progress(["🤖 Gurt 1: Codex turn started...", "⚙️ Running command..."])
+    assert rendered.startswith("⏳ Working · Gurt 1\n")
+    assert rendered.count("Gurt 1") == 2
 
     bounded = _render_progress(
-        ["🤖 Turn 1: Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)]
+        ["🤖 Gurt 1: Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)]
     )
-    assert bounded.startswith("⏳ Working · 1 turn\n")
+    assert bounded.startswith("⏳ Working · Gurt 1\n")
     assert bounded.count("\n") == 8
+
+
+def test_progress_message_names_only_actual_turn_starts() -> None:
+    codex_turn = CodexTurn(id="turn", items=[], status=TurnStatus.completed)
+    started = _progress_message(
+        Notification("turn/started", TurnStartedNotification(thread_id="t", turn=codex_turn)),
+        3,
+    )
+    command = _progress_message(
+        Notification(
+            "item/commandExecution/outputDelta",
+            CommandExecutionOutputDeltaNotification(
+                delta="output", item_id="command", thread_id="t", turn_id="turn"
+            ),
+        ),
+        3,
+    )
+    assert started == "🤖 Gurt 3: Codex turn started..."
+    assert command == '⚙️ Running command... "output"'
 
 
 @pytest.mark.asyncio
