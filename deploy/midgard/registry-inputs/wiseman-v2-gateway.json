@@ -18,7 +18,7 @@
   "env": {
     "TEMPORAL_ADDRESS": "temporal.midgard-system.svc.cluster.local:7233",
     "TEMPORAL_TASK_QUEUE": "wiseman-v2",
-    "PHOENIX_OTLP_ENDPOINT": "http://otel-gateway.midgard-monitor.svc.cluster.local:4318/v1/traces",
+    "PHOENIX_OTLP_ENDPOINT": "http://phoenix.midgard-apps.svc.cluster.local:6006/v1/traces",
     "PHOENIX_PROJECT": "wiseman-v2",
     "PHOENIX_PROMPT_HUB_URL": "http://phoenix.midgard-apps.svc.cluster.local:6006",
     "WISEMAN_RUNNER_URL": "http://wiseman-v2-sandbox.midgard-apps.svc.cluster.local:8090",
