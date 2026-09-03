@@ -14,7 +14,11 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 def _retryable_turn_result(result: dict[str, Any]) -> bool:
     error = result.get("error")
-    return isinstance(error, str) and error.startswith("runner returned HTTP 5")
+    return isinstance(error, str) and (
+        error.startswith("runner returned HTTP 5")
+        or "disconnected" in error.lower()
+        or "transport error" in error.lower()
+    )
 
 
 @activity.defn(name="wiseman.turn")
