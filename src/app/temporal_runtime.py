@@ -8,7 +8,13 @@ from datetime import timedelta
 from typing import Any, cast
 
 from temporalio import activity, workflow
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+
+
+def _retryable_turn_result(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    return isinstance(error, str) and error.startswith("runner returned HTTP 5")
 
 
 @activity.defn(name="wiseman.turn")
@@ -18,7 +24,10 @@ async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
     event = Event.model_validate(payload["event"])
     state = payload.get("state", {})
     event.seen_ids = list(state.get("seen", event.seen_ids))
-    return await engine.handle(event, state_data=state)
+    result = await engine.handle(event, state_data=state)
+    if _retryable_turn_result(result):
+        raise ApplicationError(str(result["error"]), type="runner_transport")
+    return result
 
 
 @activity.defn(name="wiseman.workspace")
@@ -91,7 +100,13 @@ class ThreadWorkflow:
             self.result = await workflow.execute_activity(
                 run_turn,
                 {"event": event, "state": self.state},
-                start_to_close_timeout=timedelta(minutes=5),
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=5),
+                    backoff_coefficient=2,
+                    maximum_interval=timedelta(seconds=30),
+                    maximum_attempts=2,
+                ),
             )
             self.state = self.result.get("state", self.state)
             try:

@@ -702,7 +702,7 @@ class HttpRunner:
             "input": prompt,
         }
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             request = asyncio.create_task(
                 client.post(f"{self.url}/turn", headers=headers, json=payload)
             )
