@@ -1432,8 +1432,11 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatch) -> None:
+    observed_progress: list[str] = []
+
     class Handle:
         async def stream(self):
+            observed_progress.append(runner.progress["t"])
             completed_turn = CodexTurn(id="turn", items=[], status=TurnStatus.completed)
             yield Notification(
                 "turn/started",
@@ -1498,6 +1501,7 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
     await runner.start(turn, Workspace(str(tmp_path)).thread("u", "t"))
     result = await runner.run(turn, Workspace(str(tmp_path)).thread("u", "t"))
     assert result["output"] == "answer"
+    assert observed_progress == ["🤖 Gurt 1: Codex turn started..."]
     assert runner.progress["t"] == '✍️ Writing response... "answer"'
 
 

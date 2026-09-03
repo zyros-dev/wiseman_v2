@@ -321,6 +321,9 @@ class CodexRunner:
                 "model": os.getenv("WISEMAN_MODEL", "codex"),
                 "usage": result.usage.model_dump(mode="json") if result.usage else None,
             }
+        turn_number = self.turn_counts.get(turn.thread_id, 0) + 1
+        self.turn_counts[turn.thread_id] = turn_number
+        self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
         active_turn = await thread.turn(
             turn.input,
             approval_mode=ApprovalMode.deny_all,
@@ -328,15 +331,11 @@ class CodexRunner:
             cwd=str(path),
         )
         self.active_turns[turn.thread_id] = active_turn
-        turn_number = self.turn_counts.get(turn.thread_id, 0)
         items: list[object] = []
         usage: object = None
         completed: TurnCompletedNotification | None = None
         try:
             async for event in active_turn.stream():
-                if event.method == "turn/started":
-                    turn_number += 1
-                    self.turn_counts[turn.thread_id] = turn_number
                 if message := _progress_message(event, turn_number):
                     self.progress[turn.thread_id] = message
                 payload = event.payload
