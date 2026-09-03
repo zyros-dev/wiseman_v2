@@ -1,0 +1,188 @@
+# Copyright (c) 2026 Nick van der Merwe
+"""Runner interfaces and the authenticated warm-sandbox client."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import TYPE_CHECKING, Any, Protocol
+
+import httpx
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+
+class Runner(Protocol):
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+    ) -> tuple[str, str, dict[str, object]]: ...
+
+
+class SteerableRunner(Protocol):
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
+
+
+class LifecycleRunner(Runner, Protocol):
+    async def acquire(self, user: str, workspace: str) -> None: ...
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str: ...
+
+
+class RunnerError(RuntimeError):
+    """Raised when the runner returns an invalid or failed response."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"runner returned HTTP {status}: {detail}")
+
+
+class HttpRunner:
+    """Thin authenticated client for the warm Codex runner."""
+
+    def __init__(self, url: str, token: str = "") -> None:
+        self.url, self.token = url.rstrip("/"), token
+
+    async def _post(
+        self, path: str, payload: dict[str, object], request_timeout: float = 30
+    ) -> dict[str, Any]:
+        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(f"{self.url}{path}", headers=headers, json=payload)
+        if response.is_error:
+            raise RunnerError(response.status_code, response.text[:1_000])
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        return value
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        await self._post("/acquire", {"thread_id": workspace, "user_id": user, "input": ""})
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        data = await self._post(
+            "/start",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": "",
+            },
+        )
+        return str(data.get("thread_id", thread))
+
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        if progress is not None:
+            return await self._run_with_progress(thread, prompt, user, workspace, progress)
+        return await self._post_turn(thread, prompt, user, workspace)
+
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
+        """Send a reply directly to the active Codex turn instead of queueing it."""
+        data = await self._post(
+            "/steer",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": prompt,
+            },
+        )
+        return bool(data.get("steered", False))
+
+    async def _post_turn(
+        self, thread: str, prompt: str, user: str, workspace: str
+    ) -> tuple[str, str, dict[str, object]]:
+        data = await self._post(
+            "/turn",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": prompt,
+            },
+            request_timeout=300,
+        )
+        billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
+        return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
+
+    async def _run_with_progress(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str,
+        progress: Callable[[str], Awaitable[None]],
+    ) -> tuple[str, str, dict[str, object]]:
+        payload = {
+            "thread_id": workspace or thread or f"thread-{user}",
+            "codex_thread_id": thread or None,
+            "user_id": user,
+            "input": prompt,
+        }
+        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient(timeout=600) as client:
+            request = asyncio.create_task(
+                client.post(f"{self.url}/turn", headers=headers, json=payload)
+            )
+            latest = ""
+            while not request.done():
+                try:
+                    status = await client.get(
+                        f"{self.url}/progress/{payload['thread_id']}",
+                        headers=headers,
+                        timeout=5,
+                    )
+                    if not status.is_error:
+                        value = status.json()
+                        message = value.get("message") if isinstance(value, dict) else None
+                        if isinstance(message, str) and message != latest:
+                            latest = message
+                            await progress(message)
+                except httpx.HTTPError:
+                    pass
+                if not request.done():
+                    await asyncio.sleep(0.75)
+            response = await request
+        if response.is_error:
+            raise RunnerError(response.status_code, response.text[:1_000])
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        billing = {key: value[key] for key in ("model", "cost", "usage") if key in value}
+        return str(value.get("thread_id", thread)), str(value.get("output", "")), billing
+
+
+class FakeRunner:
+    """Deterministic local runner used only when no sandbox URL is configured."""
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        del user, workspace
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        del workspace
+        return thread or f"codex-{user}"
+
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        del workspace, progress
+        return (
+            thread or f"codex-{user}",
+            f"Codex received: {prompt[:1000]}",
+            {"model": os.getenv("WISEMAN_MODEL", "local-fake")},
+        )
