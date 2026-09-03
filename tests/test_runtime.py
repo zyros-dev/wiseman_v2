@@ -1397,6 +1397,26 @@ def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
     assert '"user": "replay this"' in replay.json()["output"]
 
 
+def test_default_app_persists_admission_audit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("WISEMAN_AUDIT_DIR", str(tmp_path))
+    payload = {
+        "t": "MESSAGE_CREATE",
+        "d": {
+            **discord_message("default-audit-1", "persist this", thread="default-t"),
+            "author": {"id": "u", "username": "Nick", "bot": False},
+        },
+        "kind": "startup",
+    }
+    client = TestClient(create_app(token="secret"))
+    assert (
+        client.post(
+            "/v1/replay/discord", headers={"x-replay-token": "secret"}, json=payload
+        ).status_code
+        == 200
+    )
+    assert list(tmp_path.glob("*.json"))
+
+
 def test_runner_requires_bearer_and_materializes_shared_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("WISEMAN_RUNNER_API_TOKEN", "secret")

@@ -1682,6 +1682,7 @@ phoenix = Phoenix(
     os.getenv("PHOENIX_OTLP_ENDPOINT", ""),
     os.getenv("PHOENIX_API_KEY", ""),
     os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
+    os.getenv("WISEMAN_AUDIT_DIR"),
 )
 runner: Runner = (
     HttpRunner(os.environ["WISEMAN_RUNNER_URL"], os.getenv("WISEMAN_RUNNER_API_TOKEN", ""))
