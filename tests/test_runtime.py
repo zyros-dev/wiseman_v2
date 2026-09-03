@@ -52,6 +52,7 @@ from app.temporal_runtime import (
     TemporalError,
     TemporalRuntime,
     ThreadWorkflow,
+    _retryable_turn_result,
     provision_workspace,
     run_turn,
     start_codex,
@@ -770,6 +771,12 @@ async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
         }
     )
     assert result["state"]["turn"] == 2
+
+
+def test_temporal_retries_disconnected_runner_result() -> None:
+    assert _retryable_turn_result({"error": "Server disconnected without sending a response."})
+    assert _retryable_turn_result({"error": "runner returned HTTP 503: unavailable"})
+    assert not _retryable_turn_result({"error": "thread is closed"})
 
 
 @pytest.mark.asyncio
