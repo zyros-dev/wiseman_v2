@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+
+from app.models import Event
+
+if TYPE_CHECKING:
+    from app.runner import LifecycleRunner
 
 
 def _retryable_turn_result(result: dict[str, Any]) -> bool:
@@ -23,7 +28,7 @@ def _retryable_turn_result(result: dict[str, Any]) -> bool:
 
 @activity.defn(name="wiseman.turn")
 async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
-    from app.main import Event, engine  # noqa: PLC0415 - avoid workflow import cycle
+    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
 
     event = Event.model_validate(payload["event"])
     state = payload.get("state", {})
@@ -37,11 +42,7 @@ async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
 @activity.defn(name="wiseman.workspace")
 async def provision_workspace(payload: dict[str, Any]) -> dict[str, str]:
     """Materialize the warm runner workspace as its own observable Activity."""
-    from app.main import (  # noqa: PLC0415 - avoid workflow import cycle
-        Event,
-        LifecycleRunner,
-        engine,
-    )
+    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
 
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
@@ -52,11 +53,7 @@ async def provision_workspace(payload: dict[str, Any]) -> dict[str, str]:
 @activity.defn(name="wiseman.codex_start")
 async def start_codex(payload: dict[str, Any]) -> dict[str, Any]:
     """Create or resume the Codex SDK thread before the model turn Activity."""
-    from app.main import (  # noqa: PLC0415 - avoid workflow import cycle
-        Event,
-        LifecycleRunner,
-        engine,
-    )
+    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
 
     event = Event.model_validate(payload["event"])
     state = dict(payload.get("state", {}))

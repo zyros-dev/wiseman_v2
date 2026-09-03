@@ -7,7 +7,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import httpx
 import pytest
@@ -28,26 +28,36 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from app.main import (
-    Engine,
-    FakeRunner,
-    Gateway,
-    HttpRunner,
-    Phoenix,
-    PromptHub,
-    State,
-    _banner,
-    _deliver_content,
-    _describe_images,
-    _history,
-    _normalize_image_url,
-    _provider_values,
-    _render_progress,
-    _split_discord_content,
-    _thread_name,
-    create_app,
-    normalize_event,
+from app.admission import image_tool_instruction as _image_tool_instruction
+from app.admission import normalize_event
+from app.engine import Engine
+from app.gateway import Gateway, _history
+from app.http_api import create_app
+from app.models import State
+from app.phoenix import Phoenix, PromptHub
+from app.phoenix import provider_values as _provider_values
+from app.presentation import (
+    banner as _banner,
 )
+from app.presentation import (
+    deliver_content as _deliver_content,
+)
+from app.presentation import (
+    describe_images as _describe_images,
+)
+from app.presentation import (
+    normalize_image_url as _normalize_image_url,
+)
+from app.presentation import (
+    render_progress as _render_progress,
+)
+from app.presentation import (
+    split_discord_content as _split_discord_content,
+)
+from app.presentation import (
+    thread_name as _thread_name,
+)
+from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
     TemporalError,
     TemporalRuntime,
@@ -67,6 +77,9 @@ from runner.api import (
     _progress_message,
 )
 from runner.api import create_app as runner_app
+
+if TYPE_CHECKING:
+    import discord
 
 
 def message(
@@ -188,6 +201,39 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
     assert "https://cdn.example/old.png" not in prompt["user"]
 
 
+def test_image_tool_instruction_uses_nearest_referenced_image_only() -> None:
+    instruction = _image_tool_instruction(
+        {
+            "content": "what is in this image?",
+            "attachments": [],
+        },
+        [
+            {
+                "content": "old photo",
+                "attachments": [
+                    {"content_type": "image/png", "url": "https://cdn.example/old.png"}
+                ],
+            },
+            {
+                "content": "latest photo",
+                "attachments": [
+                    {"content_type": "image/png", "url": "https://cdn.example/latest.png"}
+                ],
+            },
+        ],
+    )
+    assert "https://cdn.example/latest.png" in instruction
+    assert "https://cdn.example/old.png" not in instruction
+
+
+def test_image_tool_instruction_ignores_historical_images_for_ordinary_text() -> None:
+    instruction = _image_tool_instruction(
+        {"content": "continue the task", "attachments": []},
+        [{"attachments": [{"content_type": "image/png", "url": "https://cdn.example/old.png"}]}],
+    )
+    assert instruction == ""
+
+
 def test_normalize_discord_gateway_message_create_envelope() -> None:
     payload = {"op": 0, "t": "MESSAGE_CREATE", "d": discord_message("gateway", "hello")}
     event = normalize_event(payload)
@@ -225,7 +271,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
             return Response()
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", Client)
     result = await _describe_images(
         [
             {
@@ -321,7 +367,7 @@ async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> Non
         seen.append(str(messages[0]["attachments"][0]["url"]))
         return {"text": "description", "attachments": ["image"], "question": question or None}
 
-    monkeypatch.setattr("app.main._describe_images", describe)
+    monkeypatch.setattr("app.http_api.describe_images", describe)
     response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
         "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
     )
@@ -360,7 +406,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
 
     monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
-    monkeypatch.setattr("app.main.discord.Thread", Thread)
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
     engine = Engine(Phoenix(), FakeRunner())
     app = create_app(engine, token="secret")
     app.state.gateway._connection.user = User()  # noqa: SLF001
@@ -521,7 +567,7 @@ async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> N
             assert body["codex_thread_id"] == "old"
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     result = await HttpRunner("http://runner", "secret").run("old", "prompt", "user", "workspace")
     assert result == ("next", "answer", {"model": "served", "cost": 0.1})
 
@@ -553,7 +599,7 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
             }
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     assert await HttpRunner("http://runner", "secret").steer(
         "codex", "use the other file", "user", "workspace"
     )
@@ -666,7 +712,7 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
             del kwargs
             return Response({"message": "🤖 Codex starting..."})
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     updates: list[str] = []
 
     async def receive(message: str) -> None:
@@ -967,7 +1013,7 @@ async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
         del _delay
 
     monkeypatch.setattr(bot, "start", fake_start)
-    monkeypatch.setattr("app.main.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("app.gateway.asyncio.sleep", fake_sleep)
     await bot.run_forever("discord")
     assert calls == 2
 
@@ -1030,7 +1076,7 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
             return Response()
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     engine = Engine(Phoenix(), FakeRunner())
     response = TestClient(create_app(engine)).post("/v1/responses", json={"model": "requested"})
     assert response.status_code == 200
@@ -1073,7 +1119,7 @@ def test_provider_relay_retries_disconnect_before_response(monkeypatch) -> None:
 
     client = Client()
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: client)
     response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
         "/v1/responses", json={"model": "requested"}
     )
@@ -1266,13 +1312,13 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     parent = Channel()
     bot_user = User()
     engine = Engine(Phoenix(), FakeRunner())
-    monkeypatch.setattr("app.main.discord.Thread", Thread)
-    bot = __import__("app.main", fromlist=["Gateway"]).Gateway(engine, {1})
-    bot._connection.user = bot_user  # noqa: SLF001
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
+    bot = Gateway(engine, {1})
+    bot._connection.user = cast("discord.ClientUser", bot_user)  # noqa: SLF001
     startup = Message("start", parent, "hello")
-    await bot.on_message(startup)
+    await bot.on_message(cast("discord.Message", startup))
     followup = Message("follow", parent.thread, "next")
-    await bot.on_message(followup)
+    await bot.on_message(cast("discord.Message", followup))
     assert engine.states["2"].turn == 2
     assert startup.reactions == ["✅"]
     assert followup.reactions == ["✅"]
@@ -1289,7 +1335,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     rejected = Channel()
     rejected.guild = Guild(2)
     ignored = Message("ignored", rejected, "hello")
-    await bot.on_message(ignored)
+    await bot.on_message(cast("discord.Message", ignored))
     assert "ignored" not in engine.states
 
 
@@ -1472,7 +1518,7 @@ async def test_prompt_hub_reads_phoenix_latest_version(monkeypatch) -> None:
             assert kwargs["headers"] == {"Authorization": "Bearer key"}
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     source = await PromptHub("http://phoenix", "key").source("startup")
     assert '"model": "model"' in source
 
@@ -1812,7 +1858,7 @@ async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monk
     transport = httpx.ASGITransport(app=runner_app())
     client_type = httpx.AsyncClient
     monkeypatch.setattr(
-        "app.main.httpx.AsyncClient",
+        "app.http_api.httpx.AsyncClient",
         lambda **kwargs: client_type(transport=transport, base_url="http://sandbox", **kwargs),
     )
     runner = HttpRunner("http://sandbox", "secret")

@@ -264,7 +264,7 @@ class Engine:
                 for part in (
                     trigger.content,
                     _image_tool_instruction(
-                        [trigger.model_dump(mode="json"), *current["reply_ancestors"]]
+                        trigger.model_dump(mode="json"), current["reply_ancestors"]
                     ),
                 )
                 if part
