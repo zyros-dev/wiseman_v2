@@ -21,7 +21,7 @@ from app.admission import context
 from app.admission import event_data as _event_data
 from app.admission import image_tool_instruction as _image_tool_instruction
 from app.admission import render_grammar as _grammar
-from app.models import ActiveTurn, Event, Message, Messageable, State
+from app.models import ActiveTurn, EmbedMessageable, Event, Message, Messageable, State
 from app.phoenix import Phoenix, PromptHub
 from app.phoenix import json_text as _json
 from app.phoenix import route_info as _route_info
@@ -42,6 +42,9 @@ from app.presentation import (
     startup_embed as _startup_embed,
 )
 from app.runner import HttpRunner, Runner, SteerableRunner
+
+if TYPE_CHECKING:
+    from app.types import JsonObject
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
@@ -73,7 +76,7 @@ class _Lifecycle:
 @dataclass(slots=True)
 class _Prepared:
     prompt: str
-    current: dict[str, Any]
+    current: JsonObject
     progress_message: object | None
     processing_emoji: str
 
@@ -81,7 +84,7 @@ class _Prepared:
 @dataclass(slots=True)
 class _Success:
     lifecycle: _Lifecycle
-    current: dict[str, Any]
+    current: JsonObject
     prompt: str
     output: str
     billing: dict[str, object]
@@ -108,7 +111,7 @@ class Engine:
         event: Event,
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
-        state_data: dict[str, Any] | None = None,
+        state_data: JsonObject | None = None,
     ) -> dict[str, Any]:
         key = event.trigger.thread_id or event.trigger.channel_id
         async with self.locks.setdefault(key, asyncio.Lock()):
@@ -126,7 +129,7 @@ class Engine:
         event: Event,
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
-        state_data: dict[str, Any] | None = None,
+        state_data: JsonObject | None = None,
     ) -> dict[str, Any]:
         trigger = event.trigger
         key = trigger.thread_id or trigger.channel_id
@@ -200,14 +203,14 @@ class Engine:
             )
         )
 
-    def _state(self, key: str, data: dict[str, Any] | None) -> State:
+    def _state(self, key: str, data: JsonObject | None) -> State:
         if data is None:
             return self.states[key]
         return State(
-            codex_thread=data.get("codex_thread"),
-            seen=set(data.get("seen", [])),
-            processed=set(data.get("processed", [])),
-            turn=int(data.get("turn", 0)),
+            codex_thread=cast("str | None", data.get("codex_thread")),
+            seen=_strings(data.get("seen", [])),
+            processed=_strings(data.get("processed", [])),
+            turn=int(cast("int", data.get("turn", 0))),
         )
 
     async def _prepare(self, request: _Preparation) -> _Prepared:
@@ -242,7 +245,7 @@ class Engine:
             await live.add_reaction(processing_emoji)
         await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
         current = context(event)
-        state.seen.update(current["selected_ids"])
+        state.seen.update(cast("list[str]", current["selected_ids"]))
         await self.phoenix.record(
             trace,
             "context",
@@ -252,19 +255,26 @@ class Engine:
         )
         grammar_name = "startup-context" if kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
-        grammar = _grammar(grammar_name, source, raw, mode=kind, messages=current["messages"])
+        grammar = _grammar(
+            grammar_name,
+            source,
+            raw,
+            mode=kind,
+            messages=cast("list[JsonObject]", current["messages"]),
+        )
         await self.phoenix.record(trace, "grammar", **grammar)
         parts = {
             "soul": await self.prompts.source("wiseman-soul"),
             "runtime": await self.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
-            "context": grammar["rendered"],
+            "context": cast("str", grammar["rendered"]),
             "user": "\n\n".join(
                 part
                 for part in (
                     trigger.content,
                     _image_tool_instruction(
-                        trigger.model_dump(mode="json"), current["reply_ancestors"]
+                        trigger.model_dump(mode="json"),
+                        cast("list[JsonObject]", current["reply_ancestors"]),
                     ),
                 )
                 if part
@@ -274,7 +284,7 @@ class Engine:
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
         progress_message: object | None = None
         if channel is not None and kind == "startup":
-            await cast("Any", channel).send(embed=_startup_embed())
+            await cast("EmbedMessageable", channel).send(embed=_startup_embed())
         phase = "codex starting" if kind == "startup" else "working"
         progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
         self.progress[trigger.id].append(phase)
@@ -414,9 +424,8 @@ class Engine:
         if emoji not in self.reactions[message_id]:
             return
         self.reactions[message_id].remove(emoji)
-        remove = getattr(live, "remove_reaction", None)
-        if callable(remove) and self.reaction_user is not None:
-            await cast("Any", remove)(emoji, self.reaction_user)
+        if live is not None and self.reaction_user is not None:
+            await live.remove_reaction(emoji, cast("discord.User", self.reaction_user))
 
 
 def _state_data(state: State) -> dict[str, Any]:
@@ -426,3 +435,9 @@ def _state_data(state: State) -> dict[str, Any]:
         "processed": sorted(state.processed),
         "turn": state.turn,
     }
+
+
+def _strings(value: object) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value}
