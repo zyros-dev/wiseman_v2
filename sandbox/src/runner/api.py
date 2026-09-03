@@ -198,6 +198,8 @@ class CodexRunner:
         self.threads: dict[str, object] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress: dict[str, str] = {}
+        self.active_turns: dict[str, object] = {}
+        self.turn_counts: dict[str, int] = {}
         limit = max(1, int(os.getenv("WISEMAN_MAX_CONCURRENT_TURNS", "1")))
         self.capacity = asyncio.Semaphore(limit)
 
@@ -325,19 +327,27 @@ class CodexRunner:
             sandbox=Sandbox.full_access,
             cwd=str(path),
         )
+        self.active_turns[turn.thread_id] = active_turn
+        turn_number = self.turn_counts.get(turn.thread_id, 0)
         items: list[object] = []
         usage: object = None
         completed: TurnCompletedNotification | None = None
-        async for event in active_turn.stream():
-            if message := _progress_message(event):
-                self.progress[turn.thread_id] = message
-            payload = event.payload
-            if isinstance(payload, ItemCompletedNotification):
-                items.append(payload.item)
-            elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
-                usage = payload.token_usage
-            elif isinstance(payload, TurnCompletedNotification):
-                completed = payload
+        try:
+            async for event in active_turn.stream():
+                if event.method == "turn/started":
+                    turn_number += 1
+                    self.turn_counts[turn.thread_id] = turn_number
+                if message := _progress_message(event, turn_number):
+                    self.progress[turn.thread_id] = message
+                payload = event.payload
+                if isinstance(payload, ItemCompletedNotification):
+                    items.append(payload.item)
+                elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+                    usage = payload.token_usage
+                elif isinstance(payload, TurnCompletedNotification):
+                    completed = payload
+        finally:
+            self.active_turns.pop(turn.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")  # noqa: TRY003
         if completed.turn.error is not None:
@@ -350,6 +360,15 @@ class CodexRunner:
             "usage": usage.model_dump(mode="json") if usage is not None else None,
         }
 
+    async def steer(self, turn: Turn, path: Path, account: str = "") -> bool:
+        """Steer the active SDK turn without starting a queued second turn."""
+        del path, account
+        active = self.active_turns.get(turn.thread_id)
+        if active is None or not hasattr(active, "steer"):
+            return False
+        await active.steer(turn.input)
+        return True
+
 
 def _final_response(items: list[object]) -> str:
     for item in reversed(items):
@@ -359,18 +378,20 @@ def _final_response(items: list[object]) -> str:
     return ""
 
 
-def _progress_message(event: Notification) -> str | None:  # noqa: PLR0911
+def _progress_message(event: Notification, turn_number: int = 0) -> str | None:  # noqa: PLR0911
     """Map SDK lifecycle notifications to compact user-visible phases."""
+    prefix = f"Turn {turn_number}: " if turn_number else ""
     if event.method == "turn/started":
-        return "🤖 Codex turn started..."
+        return f"🤖 {prefix}Codex turn started..."
+    preview = " ".join(str(getattr(event.payload, "delta", "")).split())[:120]
     if event.method == "item/agentMessage/delta":
-        return "✍️ Writing response..."
+        return f"✍️ {prefix}Writing response..." + (f' "{preview}"' if preview else "")
     if event.method == "item/commandExecution/outputDelta":
-        return "⚙️ Running command..."
+        return f"⚙️ {prefix}Running command..." + (f' "{preview}"' if preview else "")
     if event.method == "item/fileChange/outputDelta":
-        return "📝 Editing files..."
+        return f"📝 {prefix}Editing files..." + (f' "{preview}"' if preview else "")
     if event.method == "item/mcpToolCall/progress":
-        return "🔌 Using a tool..."
+        return f"🔌 {prefix}Using a tool..." + (f' "{preview}"' if preview else "")
     if event.method == "item/started":
         item = getattr(event.payload, "item", None)
         name = type(getattr(item, "root", item)).__name__
@@ -380,7 +401,7 @@ def _progress_message(event: Notification) -> str | None:  # noqa: PLR0911
             "McpToolCallThreadItem": "🔌 Using a tool...",
             "AgentMessageThreadItem": "✍️ Writing response...",
             "ReasoningThreadItem": "🧠 Reasoning...",
-        }.get(name, "🤖 Codex working...")
+        }.get(name, f"🤖 {prefix}Codex working...")
     return None
 
 
@@ -452,6 +473,17 @@ def create_app() -> FastAPI:  # noqa: C901
         except Exception as exc:
             raise HTTPException(503, f"codex unavailable: {exc}") from exc
         return data
+
+    @app.post("/steer")
+    async def steer(
+        turn: Turn, authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, bool]:
+        _auth(authorization, secret)
+        path = workspaces.thread(turn.user_id, turn.thread_id)
+        try:
+            return {"steered": await codex.steer(turn, path, workspaces.username(turn.user_id))}
+        except Exception as exc:
+            raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 
     @app.get("/progress/{thread_id}")
     async def progress(

@@ -161,6 +161,14 @@ class State:
     closed: bool = False
 
 
+@dataclass
+class ActiveTurn:
+    """The Discord delivery that can receive steering while Codex is running."""
+
+    trigger_id: str
+    delivery_id: str | None = None
+
+
 class Phoenix:
     """Record every semantic layer immediately and optionally forward it to Phoenix."""
 
@@ -249,7 +257,7 @@ class PromptHub:
 
 
 MAX_ANCESTORS = 12
-THREAD_IDLE_SECONDS = 7200
+THREAD_AUTO_ARCHIVE_MINUTES = 60
 THREAD_NAME_LIMIT = 100
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
@@ -543,6 +551,15 @@ def _split_discord_content(content: str) -> list[str]:
     return chunks
 
 
+def _render_progress(steps: list[str]) -> str:
+    """Render a bounded rolling trace while the final answer is still pending."""
+    turns = [int(match) for step in steps for match in re.findall(r"\bTurn (\d+)\b", step)]
+    count = max(turns, default=0)
+    visible = steps[-8:]
+    header = f"⏳ Working · {count} turn{'s' if count != 1 else ''}"
+    return "\n".join([header, *visible])
+
+
 async def _deliver_content(message: object | None, channel: Messageable, content: str) -> None:
     """Edit the progress message and send overflow chunks as normal messages."""
     chunks = _split_discord_content(content)
@@ -566,6 +583,10 @@ class Runner(Protocol):
         user: str,
         workspace: str = "",
     ) -> tuple[str, str, dict[str, object]]: ...
+
+
+class SteerableRunner(Protocol):
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
 
 
 class LifecycleRunner(Runner, Protocol):
@@ -627,6 +648,20 @@ class HttpRunner:
         if progress is not None:
             return await self._run_with_progress(thread, prompt, user, workspace, progress)
         return await self._post_turn(thread, prompt, user, workspace)
+
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
+        """Send a reply directly to the active Codex turn instead of queueing it."""
+        data = await self._post(
+            "/steer",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": prompt,
+            },
+            request_timeout=30,
+        )
+        return bool(data.get("steered", False))
 
     async def _post_turn(
         self, thread: str, prompt: str, user: str, workspace: str
@@ -729,6 +764,7 @@ class Engine:
         self.reaction_user: object | None = None
         self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
         self.working_reactions: dict[str, str] = {}
+        self.active_turns: dict[str, ActiveTurn] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -839,7 +875,11 @@ class Engine:
         self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if delivery_channel is not None:
-            progress_message = await delivery_channel.send(progress)
+            progress_message = await delivery_channel.send(_render_progress([progress]))
+        self.active_turns[key] = ActiveTurn(
+            trigger_id=trigger.id,
+            delivery_id=str(getattr(progress_message, "id", "")) or None,
+        )
 
         async def report(message: str) -> None:
             if self.progress[trigger.id] and self.progress[trigger.id][-1] == message:
@@ -848,7 +888,9 @@ class Engine:
             await self.phoenix.record(trace, "progress", phase=message)
             if progress_message is not None:
                 try:
-                    await _edit_delivery(progress_message, message)
+                    await _edit_delivery(
+                        progress_message, _render_progress(self.progress[trigger.id])
+                    )
                 except discord.DiscordException:
                     LOGGER.warning("Could not update progress message for %s", trigger.id)
 
@@ -892,6 +934,8 @@ class Engine:
                 "reactions": self.reactions[trigger.id],
                 "state": _state_data(state),
             }
+        finally:
+            self.active_turns.pop(key, None)
         state.turn += 1
         self.progress[trigger.id].append("finalizing")
         await self.phoenix.record(trace, "progress", phase="finalizing")
@@ -925,6 +969,29 @@ class Engine:
             "progress": self.progress[trigger.id],
             "state": _state_data(state),
         }
+
+    async def steer_if_active(
+        self, thread_id: str, message_id: str, prompt: str, user: str
+    ) -> bool:
+        """Route a reply to the visible working message into the live Codex turn."""
+        active = self.active_turns.get(thread_id)
+        if active is None or active.delivery_id != message_id:
+            return False
+        steer = getattr(self.runner, "steer", None)
+        if not callable(steer):
+            return False
+        accepted = await cast("SteerableRunner", self.runner).steer(
+            "", prompt, user, workspace=thread_id
+        )
+        if accepted:
+            await self.phoenix.record(
+                f"discord-{message_id}",
+                "steer",
+                thread_id=thread_id,
+                message_id=message_id,
+                input=prompt,
+            )
+        return accepted
 
     def _react(self, message_id: str, emoji: str) -> bool:
         if emoji not in self.reactions[message_id]:
@@ -1084,19 +1151,12 @@ class Gateway(discord.Client):
             await self._expire_once()
 
     async def _expire_once(self, now: float | None = None) -> None:
-        cutoff = (time.time() if now is None else now) - THREAD_IDLE_SECONDS
+        """Forget local tracking after Discord's native archive window expires."""
+        cutoff = (time.time() if now is None else now) - (THREAD_AUTO_ARCHIVE_MINUTES * 60)
         for thread_id, last_activity in list(self.thread_activity.items()):
             if last_activity > cutoff:
                 continue
-            try:
-                channel = await self.fetch_channel(int(thread_id))
-                if isinstance(channel, discord.Thread):
-                    await channel.edit(archived=True, locked=True)
-                self._forget_thread(thread_id)
-            except discord.NotFound:
-                self._forget_thread(thread_id)
-            except (discord.DiscordException, ValueError):
-                continue
+            self._forget_thread(thread_id)
 
     async def close(self) -> None:
         DISCORD_CONNECTED.set(0)
@@ -1139,27 +1199,31 @@ class Gateway(discord.Client):
             and str(message.channel.id) in self.thread_activity
         ):
             self._touch_thread(str(message.channel.id))
-        if message.author.bot or self.user not in message.mentions:
+        if message.author.bot:
             return
         channel = message.channel
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
         if self.allowlist and guild_id not in self.allowlist:
             return
         if isinstance(channel, discord.Thread):
+            reference_id = getattr(message.reference, "message_id", None)
+            if reference_id is not None and await self.engine.steer_if_active(
+                str(channel.id), str(reference_id), message.content, str(message.author.id)
+            ):
+                return
+        if self.user not in message.mentions:
+            return
+        if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
             delivery_channel = channel
-            last_activity = self.thread_activity.get(thread_id)
-            if last_activity is not None and time.time() - last_activity >= THREAD_IDLE_SECONDS:
-                await channel.edit(archived=True, locked=True)
-                self._forget_thread(thread_id)
-                return
             self._touch_thread(thread_id)
             old = self.engine.states[thread_id]
             thread_messages = await _history(channel, 100)
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
             thread = await message.create_thread(
-                name=_thread_name(message.content, len(message.attachments))
+                name=_thread_name(message.content, len(message.attachments)),
+                auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
             )
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
             delivery_channel = thread

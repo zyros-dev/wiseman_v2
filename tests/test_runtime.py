@@ -42,6 +42,7 @@ from app.main import (
     _history,
     _normalize_image_url,
     _provider_values,
+    _render_progress,
     _split_discord_content,
     _thread_name,
     create_app,
@@ -508,6 +509,94 @@ async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_http_runner_steers_active_turn(monkeypatch) -> None:
+    class Response:
+        is_error = False
+
+        def json(self) -> dict[str, object]:
+            return {"steered": True}
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def post(self, url: str, **kwargs: object) -> Response:
+            assert url.endswith("/steer")
+            body = kwargs["json"]
+            assert isinstance(body, dict)
+            assert body == {
+                "thread_id": "workspace",
+                "codex_thread_id": "codex",
+                "user_id": "user",
+                "input": "use the other file",
+            }
+            return Response()
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    assert await HttpRunner("http://runner", "secret").steer(
+        "codex", "use the other file", "user", "workspace"
+    )
+
+
+def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
+    steps = [f"⚙️ Turn {index}: command output" for index in range(1, 12)]
+    rendered = _render_progress(steps)
+    assert rendered.startswith("⏳ Working · 11 turns\n")
+    assert "Turn 3" not in rendered
+    assert "Turn 11" in rendered
+
+
+@pytest.mark.asyncio
+async def test_reply_to_active_delivery_is_steering_not_a_second_turn() -> None:
+    gate = asyncio.Event()
+    steers: list[str] = []
+
+    class Channel:
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            del kwargs
+
+            class Delivery:
+                id = "delivery"
+
+                async def edit(self, *, content: str) -> None:
+                    del content
+
+            return Delivery()
+
+    class Runner:
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            del thread, prompt, user, workspace
+            await gate.wait()
+            return "codex", "answer", {}
+
+        async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
+            del thread, user, workspace
+            steers.append(prompt)
+            return True
+
+    engine = Engine(Phoenix(), Runner())
+    task = asyncio.create_task(
+        engine.handle(
+            normalize_event(discord_message("trigger", "hello", thread="t")),
+            delivery_channel=Channel(),
+        )
+    )
+    for _ in range(10):
+        if "t" in engine.active_turns:
+            break
+        await asyncio.sleep(0)
+    assert await engine.steer_if_active("t", "delivery", "change direction", "user")
+    gate.set()
+    await task
+    assert steers == ["change direction"]
+
+
+@pytest.mark.asyncio
 async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
     class Response:
         is_error = False
@@ -844,9 +933,7 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
-    tmp_path, monkeypatch
-) -> None:
+async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tmp_path) -> None:
     activity_file = tmp_path / "activity.json"
     bot = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
     bot._touch_thread("123", timestamp=0)  # noqa: SLF001
@@ -854,24 +941,9 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
     assert restored.thread_activity == {"123": 0.0}
     restored.thread_activity["123"] = 7_200.0
 
-    class Thread:
-        def __init__(self) -> None:
-            self.edits: list[dict[str, bool]] = []
-
-        async def edit(self, **kwargs: bool) -> None:
-            self.edits.append(kwargs)
-
-    thread = Thread()
-    monkeypatch.setattr("app.main.discord.Thread", Thread)
     restored.thread_activity["456"] = 1
 
-    async def fetch_channel(channel_id: int) -> Thread:
-        assert channel_id == 456
-        return thread
-
-    monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
     await restored._expire_once(now=7_201)  # noqa: SLF001
-    assert thread.edits == [{"archived": True, "locked": True}]
     assert restored.thread_activity == {"123": 7_200.0}
 
 
@@ -1126,8 +1198,9 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             self.attachments, self.reference = (), None
             self.reactions: list[str] = []
 
-        async def create_thread(self, name: str) -> Thread:
+        async def create_thread(self, name: str, auto_archive_duration: int) -> Thread:
             assert name == "hello"
+            assert auto_archive_duration == 60
             self.channel.thread = Thread(self.channel)
             return self.channel.thread
 
@@ -1401,7 +1474,57 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
     await runner.start(turn, Workspace(str(tmp_path)).thread("u", "t"))
     result = await runner.run(turn, Workspace(str(tmp_path)).thread("u", "t"))
     assert result["output"] == "answer"
-    assert runner.progress["t"] == "✍️ Writing response..."
+    assert runner.progress["t"] == '✍️ Turn 1: Writing response... "answer"'
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_steers_active_sdk_turn(tmp_path, monkeypatch) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    steers: list[str] = []
+
+    class Handle:
+        async def steer(self, prompt: str) -> None:
+            steers.append(prompt)
+
+        async def stream(self):
+            started.set()
+            await release.wait()
+            yield Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="t",
+                    turn=CodexTurn(id="turn", items=[], status=TurnStatus.completed),
+                ),
+            )
+
+    class Thread:
+        id = "codex-thread"
+
+        async def turn(self, prompt: str, **kwargs: object) -> Handle:
+            del prompt, kwargs
+            return Handle()
+
+    class Codex:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def thread_start(self, **kwargs: object) -> Thread:
+            del kwargs
+            return Thread()
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr("runner.api.AsyncCodex", Codex)
+    runner = CodexRunner()
+    path = Workspace(str(tmp_path)).thread("u", "t")
+    turn = Turn(thread_id="t", user_id="u", input="hello")
+    await runner.start(turn, path)
+    task = asyncio.create_task(runner.run(turn, path))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert await runner.steer(Turn(thread_id="t", user_id="u", input="pivot"), path)
+    release.set()
+    await task
+    assert steers == ["pivot"]
 
 
 @pytest.mark.asyncio
