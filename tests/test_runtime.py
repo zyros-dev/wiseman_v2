@@ -2,6 +2,7 @@
 
 # Copyright (c) 2026 Nick van der Merwe
 
+import asyncio
 import json
 import os
 from datetime import UTC, datetime
@@ -11,6 +12,20 @@ from typing import Any, Self, cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai_codex.generated.v2_all import (
+    AgentMessageDeltaNotification,
+    AgentMessageThreadItem,
+    CommandExecutionOutputDeltaNotification,
+    ItemCompletedNotification,
+    ThreadItem,
+    TurnCompletedNotification,
+    TurnStartedNotification,
+    TurnStatus,
+)
+from openai_codex.generated.v2_all import (
+    Turn as CodexTurn,
+)
+from openai_codex.models import Notification
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.main import (
@@ -37,7 +52,14 @@ from app.temporal_runtime import (
     run_turn,
     start_codex,
 )
-from runner.api import CODEX_TEXT_ONLY_OVERRIDES, ApprovalMode, Sandbox, Workspace
+from runner.api import (
+    CODEX_TEXT_ONLY_OVERRIDES,
+    ApprovalMode,
+    CodexRunner,
+    Sandbox,
+    Turn,
+    Workspace,
+)
 from runner.api import create_app as runner_app
 
 
@@ -426,6 +448,48 @@ async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
+    class Response:
+        is_error = False
+        status_code = 200
+
+        def __init__(self, body: dict[str, object]) -> None:
+            self.body = body
+
+        def json(self) -> dict[str, object]:
+            return self.body
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def post(self, url: str, **kwargs: object) -> Response:
+            del url, kwargs
+            await asyncio.sleep(0.05)
+            return Response({"thread_id": "next", "output": "answer", "model": "served"})
+
+        async def get(self, url: str, **kwargs: object) -> Response:
+            assert url.endswith("/progress/workspace")
+            del kwargs
+            return Response({"message": "🤖 Codex starting..."})
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    updates: list[str] = []
+
+    async def receive(message: str) -> None:
+        updates.append(message)
+
+    result = await HttpRunner("http://runner", "secret").run(
+        "old", "prompt", "user", "workspace", progress=receive
+    )
+    assert result == ("next", "answer", {"model": "served"})
+    assert updates == ["🤖 Codex starting..."]
+
+
+@pytest.mark.asyncio
 async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     class FailingRunner:
         async def run(
@@ -572,6 +636,64 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
     assert live.channel.sent[1].startswith("Codex received: ")
     assert live.channel.embeds[0] is not None
     assert live.channel.embeds[0].title == "⚡ Wiseman thread startup"
+
+
+@pytest.mark.asyncio
+async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None:
+    class Channel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            del kwargs
+            index = len(self.sent)
+            self.sent.append(content)
+            channel = self
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    channel.sent[index] = content
+
+            return Delivery()
+
+    class Live:
+        def __init__(self) -> None:
+            self.channel = Channel()
+            self.reactions: list[str] = []
+
+        async def add_reaction(self, emoji: str) -> None:
+            self.reactions.append(emoji)
+
+        async def remove_reaction(self, emoji: str, member: object) -> None:
+            del member
+            self.reactions.remove(emoji)
+
+    class ProgressRunner(HttpRunner):
+        async def run(
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress=None,
+        ) -> tuple[str, str, dict[str, object]]:
+            del prompt, user, workspace
+            assert progress is not None
+            await progress("⚙️ Running command...")
+            await progress("⚙️ Running command...")
+            await progress("✍️ Writing response...")
+            return thread or "codex", "answer", {}
+
+    live: Any = Live()
+    engine = Engine(Phoenix(), ProgressRunner("http://runner"))
+    engine.reaction_user = object()
+    result = await engine.handle(
+        normalize_event(discord_message("progress", "hello", thread="t")), live
+    )
+    assert result["output"] == "answer"
+    assert live.channel.sent[-1] == "answer"
+    assert "⚙️ Running command..." in result["progress"]
+    assert "✍️ Writing response..." in result["progress"]
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1271,77 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
         'base_url = "http://relay/v1"'
         in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()
     )
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatch) -> None:
+    class Handle:
+        async def stream(self):
+            completed_turn = CodexTurn(id="turn", items=[], status=TurnStatus.completed)
+            yield Notification(
+                "turn/started",
+                TurnStartedNotification(thread_id="t", turn=completed_turn),
+            )
+            yield Notification(
+                "item/commandExecution/outputDelta",
+                CommandExecutionOutputDeltaNotification(
+                    delta="output",
+                    item_id="command",
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "item/agentMessage/delta",
+                AgentMessageDeltaNotification(
+                    delta="answer",
+                    item_id="item",
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "item/completed",
+                ItemCompletedNotification(
+                    completed_at_ms=1,
+                    item=ThreadItem(
+                        root=AgentMessageThreadItem(id="item", text="answer", type="agentMessage")
+                    ),
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="t",
+                    turn=completed_turn,
+                ),
+            )
+
+    class Thread:
+        id = "codex-thread"
+
+        async def turn(self, prompt: str, **kwargs: object) -> Handle:
+            del prompt, kwargs
+            return Handle()
+
+    class Codex:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def thread_start(self, **kwargs: object) -> Thread:
+            del kwargs
+            return Thread()
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr("runner.api.AsyncCodex", Codex)
+    runner = CodexRunner()
+    turn = Turn(thread_id="t", user_id="u", input="hello")
+    await runner.start(turn, Workspace(str(tmp_path)).thread("u", "t"))
+    result = await runner.run(turn, Workspace(str(tmp_path)).thread("u", "t"))
+    assert result["output"] == "answer"
+    assert runner.progress["t"] == "✍️ Writing response..."
 
 
 @pytest.mark.asyncio

@@ -512,7 +512,11 @@ async def _edit_delivery(message: object | None, content: str) -> bool:
 
 class Runner(Protocol):
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
     ) -> tuple[str, str, dict[str, object]]: ...
 
 
@@ -565,7 +569,19 @@ class HttpRunner:
         return str(data.get("thread_id", thread))
 
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        if progress is not None:
+            return await self._run_with_progress(thread, prompt, user, workspace, progress)
+        return await self._post_turn(thread, prompt, user, workspace)
+
+    async def _post_turn(
+        self, thread: str, prompt: str, user: str, workspace: str
     ) -> tuple[str, str, dict[str, object]]:
         data = await self._post(
             "/turn",
@@ -580,6 +596,52 @@ class HttpRunner:
         billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
 
+    async def _run_with_progress(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str,
+        progress: Callable[[str], Awaitable[None]],
+    ) -> tuple[str, str, dict[str, object]]:
+        payload = {
+            "thread_id": workspace or thread or f"thread-{user}",
+            "codex_thread_id": thread or None,
+            "user_id": user,
+            "input": prompt,
+        }
+        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient(timeout=300) as client:
+            request = asyncio.create_task(
+                client.post(f"{self.url}/turn", headers=headers, json=payload)
+            )
+            latest = ""
+            while not request.done():
+                try:
+                    status = await client.get(
+                        f"{self.url}/progress/{payload['thread_id']}",
+                        headers=headers,
+                        timeout=5,
+                    )
+                    if not status.is_error:
+                        value = status.json()
+                        message = value.get("message") if isinstance(value, dict) else None
+                        if isinstance(message, str) and message != latest:
+                            latest = message
+                            await progress(message)
+                except httpx.HTTPError:
+                    pass
+                if not request.done():
+                    await asyncio.sleep(0.75)
+            response = await request
+        if response.is_error:
+            raise RunnerError(response.status_code, response.text[:1_000])
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        billing = {key: value[key] for key in ("model", "cost", "usage") if key in value}
+        return str(value.get("thread_id", thread)), str(value.get("output", "")), billing
+
 
 class FakeRunner:
     """Deterministic local runner used only when no sandbox URL is configured."""
@@ -592,9 +654,14 @@ class FakeRunner:
         return thread or f"codex-{user}"
 
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]:
-        del workspace
+        del workspace, progress
         return (
             thread or f"codex-{user}",
             f"Codex received: {prompt[:1000]}",
@@ -719,24 +786,40 @@ class Engine:
         if delivery_channel is not None and kind == "startup":
             await cast("Any", delivery_channel).send(embed=_startup_embed())
         startup = kind == "startup"
-        progress = (
-            "🛠️ Workspace provisioning...\n🤖 Codex starting..." if startup else "⏳ Working..."
-        )
-        phase = "workspace provisioning" if startup else "working"
+        progress = "🤖 Codex starting..." if startup else "⏳ Working..."
+        phase = "codex starting" if startup else "working"
         self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if delivery_channel is not None:
             progress_message = await delivery_channel.send(progress)
-        if startup:
-            self.progress[trigger.id].append("codex started")
-            await self.phoenix.record(trace, "progress", phase="codex started")
+
+        async def report(message: str) -> None:
+            if self.progress[trigger.id] and self.progress[trigger.id][-1] == message:
+                return
+            self.progress[trigger.id].append(message)
+            await self.phoenix.record(trace, "progress", phase=message)
+            if progress_message is not None:
+                try:
+                    await _edit_delivery(progress_message, message)
+                except discord.DiscordException:
+                    LOGGER.warning("Could not update progress message for %s", trigger.id)
+
         try:
-            state.codex_thread, output, billing = await self.runner.run(
-                state.codex_thread or "",
-                prompt,
-                trigger.author_id,
-                trigger.thread_id or trigger.channel_id,
-            )
+            if isinstance(self.runner, HttpRunner):
+                state.codex_thread, output, billing = await self.runner.run(
+                    state.codex_thread or "",
+                    prompt,
+                    trigger.author_id,
+                    trigger.thread_id or trigger.channel_id,
+                    progress=report,
+                )
+            else:
+                state.codex_thread, output, billing = await self.runner.run(
+                    state.codex_thread or "",
+                    prompt,
+                    trigger.author_id,
+                    trigger.thread_id or trigger.channel_id,
+                )
         except Exception as exc:  # noqa: BLE001 - visible turn failure, thread survives
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))

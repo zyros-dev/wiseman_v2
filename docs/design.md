@@ -70,7 +70,9 @@ processing reaction -> context -> grammar -> workspace progress -> Codex -> deli
 
 The live Discord adapter creates a thread for a parent-channel mention,
 collects bounded history, emits one green startup embed, and edits one compact
-working message into the answer for each turn. Startup-only provisioning and
+working message into the answer for each turn. While Codex runs, the gateway
+edits that message for meaningful SDK phases such as command execution, file
+changes, tool calls, and response writing. Startup-only provisioning and
 Codex-start status is never repeated on follow-ups. It adds `👀` once and then
 `✅` or `❌`; it removes the processing `👀` after adding the terminal reaction and does not duplicate terminal reactions. The deployment allowlist is
 guild-based and is enforced for both parent channels and managed threads;

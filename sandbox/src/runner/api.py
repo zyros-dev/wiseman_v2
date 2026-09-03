@@ -13,13 +13,22 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+from openai_codex.generated.v2_all import (
+    AgentMessageThreadItem,
+    ItemCompletedNotification,
+    ThreadTokenUsageUpdatedNotification,
+    TurnCompletedNotification,
+)
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from openai_codex.models import Notification
 
 CODEX_TEXT_ONLY_OVERRIDES = (
     "features.view_image=false",
@@ -188,6 +197,7 @@ class CodexRunner:
         self.codex: dict[str, AsyncCodex] = {}
         self.threads: dict[str, object] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self.progress: dict[str, str] = {}
 
     async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
@@ -263,31 +273,38 @@ class CodexRunner:
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
         async with lock:
-            # A client owns its cwd and Codex session environment, so it is
-            # private to a Discord thread even when the user has many threads.
-            key = turn.thread_id
-            client = self._client(turn, path, account)
-            provider = "wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None
-            model = os.getenv("WISEMAN_MODEL") or None
-            thread = self.threads.get(key)
-            if thread is None or (
-                turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id
-            ):
-                if not turn.codex_thread_id:
-                    started = await self._start_locked(turn, path, account)
-                    thread = self.threads[key]
-                    assert started["thread_id"] == thread.id
-                else:
-                    thread = await client.thread_resume(
-                        turn.codex_thread_id,
-                        approval_mode=ApprovalMode.deny_all,
-                        sandbox=Sandbox.full_access,
-                        cwd=str(path),
-                        model=model,
-                        model_provider=provider,
-                    )
-                    self.threads[key] = thread
-            assert thread is not None
+            thread = await self._thread(turn, path, account)
+            self.progress[turn.thread_id] = "🤖 Codex turn started..."
+            return await self._run_thread(thread, turn, path)
+
+    async def _thread(self, turn: Turn, path: Path, account: str) -> object:
+        # A client owns its cwd and Codex session environment, so it is private
+        # to a Discord thread even when the user has many threads.
+        key = turn.thread_id
+        client = self._client(turn, path, account)
+        thread = self.threads.get(key)
+        if thread is None or (
+            turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id
+        ):
+            if not turn.codex_thread_id:
+                started = await self._start_locked(turn, path, account)
+                thread = self.threads[key]
+                assert started["thread_id"] == thread.id
+            else:
+                thread = await client.thread_resume(
+                    turn.codex_thread_id,
+                    approval_mode=ApprovalMode.deny_all,
+                    sandbox=Sandbox.full_access,
+                    cwd=str(path),
+                    model=os.getenv("WISEMAN_MODEL") or None,
+                    model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
+                )
+                self.threads[key] = thread
+        assert thread is not None
+        return thread
+
+    async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
+        if not hasattr(thread, "turn"):
             result = await thread.run(
                 turn.input,
                 approval_mode=ApprovalMode.deny_all,
@@ -300,6 +317,69 @@ class CodexRunner:
                 "model": os.getenv("WISEMAN_MODEL", "codex"),
                 "usage": result.usage.model_dump(mode="json") if result.usage else None,
             }
+        active_turn = await thread.turn(
+            turn.input,
+            approval_mode=ApprovalMode.deny_all,
+            sandbox=Sandbox.full_access,
+            cwd=str(path),
+        )
+        items: list[object] = []
+        usage: object = None
+        completed: TurnCompletedNotification | None = None
+        async for event in active_turn.stream():
+            if message := _progress_message(event):
+                self.progress[turn.thread_id] = message
+            payload = event.payload
+            if isinstance(payload, ItemCompletedNotification):
+                items.append(payload.item)
+            elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+                usage = payload.token_usage
+            elif isinstance(payload, TurnCompletedNotification):
+                completed = payload
+        if completed is None:
+            raise RuntimeError("turn completed event not received")  # noqa: TRY003
+        if completed.turn.error is not None:
+            raise RuntimeError(completed.turn.error.message or "Codex turn failed")
+        final_response = _final_response(items)
+        return {
+            "thread_id": thread.id,
+            "output": final_response,
+            "model": os.getenv("WISEMAN_MODEL", "codex"),
+            "usage": usage.model_dump(mode="json") if usage is not None else None,
+        }
+
+
+def _final_response(items: list[object]) -> str:
+    for item in reversed(items):
+        root = getattr(item, "root", item)
+        if isinstance(root, AgentMessageThreadItem) and root.text:
+            return root.text
+    return ""
+
+
+def _progress_message(event: Notification) -> str | None:  # noqa: PLR0911
+    """Map SDK lifecycle notifications to compact user-visible phases."""
+    if event.method == "turn/started":
+        return "🤖 Codex turn started..."
+    if event.method == "item/agentMessage/delta":
+        return "✍️ Writing response..."
+    if event.method == "item/commandExecution/outputDelta":
+        return "⚙️ Running command..."
+    if event.method == "item/fileChange/outputDelta":
+        return "📝 Editing files..."
+    if event.method == "item/mcpToolCall/progress":
+        return "🔌 Using a tool..."
+    if event.method == "item/started":
+        item = getattr(event.payload, "item", None)
+        name = type(getattr(item, "root", item)).__name__
+        return {
+            "CommandExecutionThreadItem": "⚙️ Running command...",
+            "FileChangeThreadItem": "📝 Editing files...",
+            "McpToolCallThreadItem": "🔌 Using a tool...",
+            "AgentMessageThreadItem": "✍️ Writing response...",
+            "ReasoningThreadItem": "🧠 Reasoning...",
+        }.get(name, "🤖 Codex working...")
+    return None
 
 
 def create_app() -> FastAPI:  # noqa: C901
@@ -370,6 +450,13 @@ def create_app() -> FastAPI:  # noqa: C901
         except Exception as exc:
             raise HTTPException(503, f"codex unavailable: {exc}") from exc
         return data
+
+    @app.get("/progress/{thread_id}")
+    async def progress(
+        thread_id: str, authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, str]:
+        _auth(authorization, secret)
+        return {"message": codex.progress.get(thread_id, "🤖 Codex starting...")}
 
     return app
 
