@@ -43,7 +43,11 @@ jobs:
         run: |
           set -eu
           test -n "$MIDGARD_DEPLOY_REMOTE"
-          apk add --no-cache git jq
+          for attempt in 1 2 3; do
+            apk add --no-cache git jq && break
+            test "$attempt" -lt 3 || exit 1
+            sleep 2
+          done
           git clone "$MIDGARD_DEPLOY_REMOTE" /tmp/midgard
           cd /tmp/midgard
           git config user.name "Wiseman V2 release"
