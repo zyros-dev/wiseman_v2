@@ -8,12 +8,14 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import discord
 from prometheus_client import Gauge
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
 from app.models import Event, Message, Messageable
@@ -306,18 +308,24 @@ class Gateway(discord.Client):
 
 
 async def _history(
-    channel: Any,  # noqa: ANN401 - Discord's channel union shares the history protocol
+    channel: object | None,
     limit: int,
     before: discord.Message | None = None,
 ) -> list[Message]:
     """Normalize bounded Discord history for the same grammar path as replay."""
     if channel is None:
         return []
-    kwargs: dict[str, Any] = {"limit": limit}
-    if before is not None:
-        kwargs["before"] = before
+    method = getattr(channel, "history", None)
+    if not callable(method):
+        return []
+    history_method = cast("Callable[..., AsyncIterator[discord.Message]]", method)
     thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
-    channel_id = str(getattr(channel, "parent_id", channel.id))
+    channel_id = str(getattr(channel, "parent_id", getattr(channel, "id", "")))
+    history = (
+        history_method(limit=limit, before=before)
+        if before is not None
+        else history_method(limit=limit)
+    )
     return [
         Message(
             id=str(item.id),
@@ -341,5 +349,5 @@ async def _history(
                 for attachment in item.attachments
             ],
         )
-        async for item in channel.history(**kwargs)
+        async for item in history
     ]

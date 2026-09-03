@@ -76,7 +76,7 @@ class _Lifecycle:
 @dataclass(slots=True)
 class _Prepared:
     prompt: str
-    current: JsonObject
+    current: dict[str, object]
     progress_message: object | None
     processing_emoji: str
 
@@ -84,7 +84,7 @@ class _Prepared:
 @dataclass(slots=True)
 class _Success:
     lifecycle: _Lifecycle
-    current: JsonObject
+    current: dict[str, object]
     prompt: str
     output: str
     billing: dict[str, object]
@@ -260,7 +260,7 @@ class Engine:
             source,
             raw,
             mode=kind,
-            messages=cast("list[JsonObject]", current["messages"]),
+            messages=cast("list[dict[str, object]]", current["messages"]),
         )
         await self.phoenix.record(trace, "grammar", **grammar)
         parts = {
@@ -274,7 +274,7 @@ class Engine:
                     trigger.content,
                     _image_tool_instruction(
                         trigger.model_dump(mode="json"),
-                        cast("list[JsonObject]", current["reply_ancestors"]),
+                        cast("list[dict[str, object]]", current["reply_ancestors"]),
                     ),
                 )
                 if part

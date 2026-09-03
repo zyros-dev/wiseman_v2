@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
 import discord
@@ -17,6 +18,8 @@ from jinja2 import Environment, StrictUndefined
 from app.phoenix import route_info
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from app.models import Messageable
 
 DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
@@ -65,12 +68,15 @@ def startup_embed() -> discord.Embed:
     return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
 
 
-async def describe_images(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+async def describe_images(
+    messages: Sequence[Mapping[str, object]], question: str = ""
+) -> dict[str, object]:
     """Ask the configured vision model to answer about bounded Discord image attachments."""
     images: list[dict[str, str]] = []
     seen: set[str] = set()
     for message in messages:
-        for attachment in message.get("attachments", []):
+        for value in _sequence(message.get("attachments")):
+            attachment = _mapping(value)
             content_type = str(attachment.get("content_type") or "")
             url = str(attachment.get("url") or attachment.get("proxy_url") or "")
             attachment_id = str(attachment.get("id") or url)
@@ -88,7 +94,7 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "attachments": [item["id"] for item in images],
             "question": question or None,
         }
-    content: list[dict[str, Any]] = [
+    content: list[dict[str, object]] = [
         {"type": "text", "text": _vision_question(question)},
         *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
     ]
@@ -104,8 +110,11 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
                 },
             )
             response.raise_for_status()
-            data = response.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            value: object = response.json()
+        data = _mapping(value)
+        choices = _sequence(data.get("choices"))
+        first = _mapping(choices[0]) if choices else {}
+        answer = _mapping(first.get("message")).get("content", "")
         if isinstance(answer, list):
             answer = "".join(str(item.get("text", "")) for item in answer if isinstance(item, dict))
         usage = data.get("usage")
@@ -113,7 +122,7 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "text": str(answer),
             "model": data.get("model", model),
             "usage": usage,
-            "cost": usage.get("cost") if isinstance(usage, dict) else data.get("cost"),
+            "cost": _mapping(usage).get("cost") if isinstance(usage, dict) else data.get("cost"),
             "attachments": [item["id"] for item in images],
             "question": question or None,
         }
@@ -141,8 +150,16 @@ async def edit_delivery(message: object | None, content: str) -> bool:
     edit = getattr(message, "edit", None)
     if not callable(edit):
         return False
-    await cast("Any", edit)(content=content)
+    await cast("Callable[..., Awaitable[object]]", edit)(content=content)
     return True
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: object) -> Sequence[object]:
+    return value if isinstance(value, Sequence) and not isinstance(value, str) else ()
 
 
 def normalize_image_url(value: object) -> str:
