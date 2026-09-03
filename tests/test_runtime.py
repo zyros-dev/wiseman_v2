@@ -1184,7 +1184,7 @@ async def test_temporal_old_workflow_history_keeps_one_activity(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:  # noqa: C901
+async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:
     class Guild:
         def __init__(self, gid: int) -> None:
             self.id = gid

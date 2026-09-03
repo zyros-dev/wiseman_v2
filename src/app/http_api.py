@@ -135,7 +135,7 @@ def create_app(  # noqa: C901, PLR0915
         return value
 
     @app.post("/v1/responses")
-    async def responses(  # noqa: C901
+    async def responses(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:

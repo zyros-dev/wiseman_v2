@@ -308,7 +308,7 @@ class CodexRunner:
         assert thread is not None
         return thread
 
-    async def _run_thread(  # noqa: C901, PLR0912
+    async def _run_thread(  # noqa: PLR0912
         self, thread: object, turn: Turn, path: Path
     ) -> dict[str, object]:
         if not hasattr(thread, "turn"):
@@ -436,7 +436,7 @@ def _progress_message(event: Notification, turn_number: int = 0) -> str | None: 
     return None
 
 
-def create_app() -> FastAPI:  # noqa: C901
+def create_app() -> FastAPI:
     root, secret = (
         os.getenv("WISEMAN_WORKSPACE_ROOT", "/workspaces"),
         os.getenv("WISEMAN_RUNNER_API_TOKEN", ""),
