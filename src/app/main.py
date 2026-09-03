@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -15,6 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -36,6 +39,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.temporal_runtime import TemporalRuntime
 
 LOGGER = logging.getLogger("wiseman")
+
+DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
+MAX_DISCORD_CONTENT_LENGTH = 2_000
+MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_REACTION_LENGTH = 32
+MIN_DISCORD_USERNAME_LENGTH = 2
+MAX_DISCORD_USERNAME_LENGTH = 32
 
 
 class Message(BaseModel):
@@ -502,10 +512,73 @@ async def _edit_delivery(message: object | None, content: str) -> bool:
     return True
 
 
+def _normalize_image_url(value: object) -> str:
+    """Accept plain URLs and the angle-bracket form used in model output."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().strip("<>\"'")
+    parsed = urlsplit(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+    return ""
+
+
+def _split_discord_content(content: str) -> list[str]:
+    """Split an answer at readable boundaries within Discord's content limit."""
+    if len(content) <= MAX_DISCORD_CONTENT_LENGTH:
+        return [content]
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= MAX_DISCORD_CONTENT_LENGTH:
+            chunks.append(remaining)
+            break
+        boundary = remaining.rfind("\n", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary < MAX_DISCORD_CONTENT_LENGTH // 2:
+            boundary = remaining.rfind(" ", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
+        if boundary <= 0:
+            boundary = MAX_DISCORD_CONTENT_LENGTH
+        chunks.append(remaining[:boundary].rstrip())
+        remaining = remaining[boundary:].lstrip()
+    return chunks
+
+
+async def _deliver_content(message: object | None, channel: Messageable, content: str) -> None:
+    """Edit the progress message and send overflow chunks as normal messages."""
+    chunks = _split_discord_content(content)
+    edited = False
+    if message is not None:
+        try:
+            edited = await _edit_delivery(message, chunks[0])
+        except discord.DiscordException:
+            LOGGER.warning("Could not edit Discord delivery message")
+    if not edited:
+        await channel.send(chunks[0])
+    for chunk in chunks[1:]:
+        await channel.send(chunk)
+
+
 class Runner(Protocol):
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
     ) -> tuple[str, str, dict[str, object]]: ...
+
+
+class LifecycleRunner(Runner, Protocol):
+    async def acquire(self, user: str, workspace: str) -> None: ...
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str: ...
+
+
+class RunnerError(RuntimeError):
+    """Raised when the runner returns an invalid or failed response."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"runner returned HTTP {status}: {detail}")
 
 
 class HttpRunner:
@@ -514,37 +587,129 @@ class HttpRunner:
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 
-    async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
-    ) -> tuple[str, str, dict[str, object]]:
+    async def _post(
+        self, path: str, payload: dict[str, object], request_timeout: float = 30
+    ) -> dict[str, Any]:
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(
-                f"{self.url}/turn",
-                headers=headers,
-                json={
-                    "thread_id": workspace or thread or f"thread-{user}",
-                    "codex_thread_id": thread or None,
-                    "user_id": user,
-                    "input": prompt,
-                },
-            )
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(f"{self.url}{path}", headers=headers, json=payload)
         if response.is_error:
             detail = response.text[:1_000]
-            error = f"runner returned HTTP {response.status_code}: {detail}"
-            raise RuntimeError(error)
-        data = response.json()
+            raise RunnerError(response.status_code, detail)
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        return value
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        await self._post("/acquire", {"thread_id": workspace, "user_id": user, "input": ""})
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        data = await self._post(
+            "/start",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": "",
+            },
+        )
+        return str(data.get("thread_id", thread))
+
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        if progress is not None:
+            return await self._run_with_progress(thread, prompt, user, workspace, progress)
+        return await self._post_turn(thread, prompt, user, workspace)
+
+    async def _post_turn(
+        self, thread: str, prompt: str, user: str, workspace: str
+    ) -> tuple[str, str, dict[str, object]]:
+        data = await self._post(
+            "/turn",
+            {
+                "thread_id": workspace or thread or f"thread-{user}",
+                "codex_thread_id": thread or None,
+                "user_id": user,
+                "input": prompt,
+            },
+            request_timeout=300,
+        )
         billing = {key: data[key] for key in ("model", "cost", "usage") if key in data}
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
+
+    async def _run_with_progress(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str,
+        progress: Callable[[str], Awaitable[None]],
+    ) -> tuple[str, str, dict[str, object]]:
+        payload = {
+            "thread_id": workspace or thread or f"thread-{user}",
+            "codex_thread_id": thread or None,
+            "user_id": user,
+            "input": prompt,
+        }
+        headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient(timeout=300) as client:
+            request = asyncio.create_task(
+                client.post(f"{self.url}/turn", headers=headers, json=payload)
+            )
+            latest = ""
+            while not request.done():
+                try:
+                    status = await client.get(
+                        f"{self.url}/progress/{payload['thread_id']}",
+                        headers=headers,
+                        timeout=5,
+                    )
+                    if not status.is_error:
+                        value = status.json()
+                        message = value.get("message") if isinstance(value, dict) else None
+                        if isinstance(message, str) and message != latest:
+                            latest = message
+                            await progress(message)
+                except httpx.HTTPError:
+                    pass
+                if not request.done():
+                    await asyncio.sleep(0.75)
+            response = await request
+        if response.is_error:
+            raise RunnerError(response.status_code, response.text[:1_000])
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RunnerError(response.status_code, "runner returned a non-object response")
+        billing = {key: value[key] for key in ("model", "cost", "usage") if key in value}
+        return str(value.get("thread_id", thread)), str(value.get("output", "")), billing
 
 
 class FakeRunner:
     """Deterministic local runner used only when no sandbox URL is configured."""
 
-    async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
-    ) -> tuple[str, str, dict[str, object]]:
+    async def acquire(self, user: str, workspace: str) -> None:
+        del user, workspace
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
         del workspace
+        return thread or f"codex-{user}"
+
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        del workspace, progress
         return (
             thread or f"codex-{user}",
             f"Codex received: {prompt[:1000]}",
@@ -562,6 +727,8 @@ class Engine:
         self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
         self.reaction_user: object | None = None
+        self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
+        self.working_reactions: dict[str, str] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -625,10 +792,12 @@ class Engine:
             route=_route_info(),
             input=event.raw_payload or _event_data(event),
         )
-        added = self._react(trigger.id, "👀")
+        processing_emoji = self.reaction_emojis["processing"]
+        self.working_reactions[trigger.id] = processing_emoji
+        added = self._react(trigger.id, processing_emoji)
         if live is not None and added:
-            await live.add_reaction("👀")
-        await self.phoenix.record(trace, "reaction", operations=["add:👀"])
+            await live.add_reaction(processing_emoji)
+        await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
         current = context(event)
         state.seen.update(current["selected_ids"])
         await self.phoenix.record(
@@ -665,36 +834,57 @@ class Engine:
         if delivery_channel is not None and kind == "startup":
             await cast("Any", delivery_channel).send(embed=_startup_embed())
         startup = kind == "startup"
-        progress = (
-            "🛠️ Workspace provisioning...\n🤖 Codex starting..." if startup else "⏳ Working..."
-        )
-        phase = "workspace provisioning" if startup else "working"
+        progress = "🤖 Codex starting..." if startup else "⏳ Working..."
+        phase = "codex starting" if startup else "working"
         self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if delivery_channel is not None:
             progress_message = await delivery_channel.send(progress)
-        if startup:
-            self.progress[trigger.id].append("codex started")
-            await self.phoenix.record(trace, "progress", phase="codex started")
+
+        async def report(message: str) -> None:
+            if self.progress[trigger.id] and self.progress[trigger.id][-1] == message:
+                return
+            self.progress[trigger.id].append(message)
+            await self.phoenix.record(trace, "progress", phase=message)
+            if progress_message is not None:
+                try:
+                    await _edit_delivery(progress_message, message)
+                except discord.DiscordException:
+                    LOGGER.warning("Could not update progress message for %s", trigger.id)
+
         try:
-            state.codex_thread, output, billing = await self.runner.run(
-                state.codex_thread or "",
-                prompt,
-                trigger.author_id,
-                trigger.thread_id or trigger.channel_id,
-            )
+            if isinstance(self.runner, HttpRunner):
+                state.codex_thread, output, billing = await self.runner.run(
+                    state.codex_thread or "",
+                    prompt,
+                    trigger.author_id,
+                    trigger.thread_id or trigger.channel_id,
+                    progress=report,
+                )
+            else:
+                state.codex_thread, output, billing = await self.runner.run(
+                    state.codex_thread or "",
+                    prompt,
+                    trigger.author_id,
+                    trigger.thread_id or trigger.channel_id,
+                )
         except Exception as exc:  # noqa: BLE001 - visible turn failure, thread survives
             TURN_FAILURES.inc()
             await self.phoenix.record(trace, "failure", error=str(exc))
-            if self._react(trigger.id, "❌"):
+            failure_emoji = self.reaction_emojis["failure"]
+            if self._react(trigger.id, failure_emoji):
                 if live is not None:
-                    await live.add_reaction("❌")
-                if delivery_channel is not None and not await _edit_delivery(
-                    progress_message, f"Codex failed: {exc}"
-                ):
-                    await delivery_channel.send(f"Codex failed: {exc}")
+                    await live.add_reaction(failure_emoji)
+                if delivery_channel is not None:
+                    await _deliver_content(
+                        progress_message, delivery_channel, f"Codex failed: {exc}"
+                    )
                 await self._remove_working_reaction(trigger.id, live)
-            await self.phoenix.record(trace, "reaction", operations=["add:❌", "remove:👀"])
+            await self.phoenix.record(
+                trace,
+                "reaction",
+                operations=[f"add:{failure_emoji}", f"remove:{processing_emoji}"],
+            )
             return {
                 "trace": trace,
                 "kind": kind,
@@ -714,13 +904,18 @@ class Engine:
             **billing,
         )
         await self.phoenix.record(trace, "delivery", output=output)
-        if delivery_channel is not None and not await _edit_delivery(progress_message, output):
-            await delivery_channel.send(output)
-        if self._react(trigger.id, "✅"):
+        if delivery_channel is not None:
+            await _deliver_content(progress_message, delivery_channel, output)
+        success_emoji = self.reaction_emojis["success"]
+        if self._react(trigger.id, success_emoji):
             if live is not None:
-                await live.add_reaction("✅")
+                await live.add_reaction(success_emoji)
             await self._remove_working_reaction(trigger.id, live)
-        await self.phoenix.record(trace, "reaction", operations=["add:✅", "remove:👀"])
+        await self.phoenix.record(
+            trace,
+            "reaction",
+            operations=[f"add:{success_emoji}", f"remove:{processing_emoji}"],
+        )
         return {
             "trace": trace,
             "kind": kind,
@@ -737,13 +932,27 @@ class Engine:
             return True
         return False
 
+    def set_reaction_emojis(self, values: dict[str, str]) -> dict[str, str]:
+        """Set future lifecycle reactions; in-flight turns retain their original emoji."""
+        updated = dict(self.reaction_emojis)
+        for phase in DEFAULT_REACTION_EMOJIS:
+            value = values.get(phase)
+            if value is not None:
+                if not value.strip() or len(value) > MAX_REACTION_LENGTH:
+                    reason = f"invalid {phase} reaction"
+                    raise ValueError(reason)
+                updated[phase] = value
+        self.reaction_emojis = updated
+        return dict(updated)
+
     async def _remove_working_reaction(self, message_id: str, live: discord.Message | None) -> None:
-        if "👀" not in self.reactions[message_id]:
+        emoji = self.working_reactions.pop(message_id, self.reaction_emojis["processing"])
+        if emoji not in self.reactions[message_id]:
             return
-        self.reactions[message_id].remove("👀")
+        self.reactions[message_id].remove(emoji)
         remove = getattr(live, "remove_reaction", None)
         if callable(remove) and self.reaction_user is not None:
-            await cast("Any", remove)("👀", self.reaction_user)
+            await cast("Any", remove)(emoji, self.reaction_user)
 
 
 def _state_data(state: State) -> dict[str, Any]:
@@ -759,7 +968,11 @@ class Gateway(discord.Client):
     """Direct Discord gateway adapter; it delegates to the same admission used by raw replay."""
 
     def __init__(
-        self, engine: Engine, allowlist: set[int], activity_path: str | Path | None = None
+        self,
+        engine: Engine,
+        allowlist: set[int],
+        activity_path: str | Path | None = None,
+        profile_path: str | Path | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -767,7 +980,9 @@ class Gateway(discord.Client):
         self.engine, self.allowlist = engine, allowlist
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
+        self.profile_path = Path(profile_path) if profile_path else None
         self.thread_activity = self._load_thread_activity()
+        self._load_profile()
         self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
         engine.lookup_channel = self.resolve_channel
@@ -816,6 +1031,33 @@ class Gateway(discord.Client):
         if thread_id in self.thread_activity:
             self.thread_activity.pop(thread_id)
             self._persist_thread_activity()
+
+    def _load_profile(self) -> None:
+        if self.profile_path is None or not self.profile_path.exists():
+            return
+        try:
+            value = json.loads(self.profile_path.read_text(encoding="utf-8"))
+            reactions = value.get("reaction_emojis", {})
+            if isinstance(reactions, dict):
+                self.engine.set_reaction_emojis(
+                    {str(key): str(item) for key, item in reactions.items()}
+                )
+        except (OSError, TypeError, ValueError, AttributeError):
+            LOGGER.warning("Ignoring invalid Wiseman profile state")
+
+    def persist_profile(self) -> None:
+        if self.profile_path is None:
+            return
+        try:
+            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.profile_path.with_name(f".{self.profile_path.name}.tmp")
+            temporary.write_text(
+                json.dumps({"reaction_emojis": self.engine.reaction_emojis}, sort_keys=True),
+                encoding="utf-8",
+            )
+            temporary.replace(self.profile_path)
+        except OSError:
+            LOGGER.exception("Could not persist Wiseman profile state")
 
     async def run_forever(self, token: str) -> None:
         """Keep the gateway supervised when Discord returns a fatal session error."""
@@ -1024,7 +1266,12 @@ def create_app(  # noqa: C901, PLR0915
     allowlist = {
         int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value
     }
-    bot = Gateway(engine, allowlist, os.getenv("WISEMAN_ACTIVITY_FILE"))
+    activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
+    profile_file = os.getenv("WISEMAN_PROFILE_FILE")
+    if profile_file is None and activity_file:
+        profile_file = str(Path(activity_file).with_name("profile.json"))
+    bot = Gateway(engine, allowlist, activity_file, profile_file)
+    app.state.gateway = bot
     temporal = (
         TemporalRuntime(os.environ["TEMPORAL_ADDRESS"], os.getenv("TEMPORAL_TASK_QUEUE", "wiseman"))
         if os.getenv("TEMPORAL_ADDRESS")
@@ -1088,42 +1335,49 @@ def create_app(  # noqa: C901, PLR0915
             async with (
                 httpx.AsyncClient(timeout=300) as client,
             ):
+                stream_started = False
                 for attempt in range(UPSTREAM_RETRY_ATTEMPTS):
-                    async with client.stream(
-                        "POST",
-                        f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
-                        headers={
-                            "authorization": f"Bearer {key}",
-                            "content-type": "application/json",
-                        },
-                        json=payload,
-                    ) as response:
-                        if response.is_error:
-                            detail = (await response.aread()).decode(errors="replace")[:1_000]
-                            retryable = (
-                                response.status_code in UPSTREAM_RETRY_STATUSES
-                                or response.status_code >= UPSTREAM_SERVER_ERROR
-                            ) and not (
-                                response.status_code == HTTP_NOT_FOUND
-                                and "No endpoints found that support image input" in detail
-                            )
-                            if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
-                                await asyncio.sleep(0.5 * (attempt + 1))
-                                continue
-                            error = f"OpenRouter returned HTTP {response.status_code}: {detail}"
-                            raise RuntimeError(error)
-                        async for line in response.aiter_lines():
-                            if line.startswith("data:"):
-                                try:
-                                    body = json.loads(line[5:].strip())
-                                    if isinstance(body, dict):
-                                        usage, cost, served_model = _provider_values(
-                                            body, usage, cost, served_model
-                                        )
-                                except ValueError:
-                                    pass
-                            yield f"{line}\n".encode()
-                        break
+                    try:
+                        async with client.stream(
+                            "POST",
+                            f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
+                            headers={
+                                "authorization": f"Bearer {key}",
+                                "content-type": "application/json",
+                            },
+                            json=payload,
+                        ) as response:
+                            if response.is_error:
+                                detail = (await response.aread()).decode(errors="replace")[:1_000]
+                                retryable = (
+                                    response.status_code in UPSTREAM_RETRY_STATUSES
+                                    or response.status_code >= UPSTREAM_SERVER_ERROR
+                                ) and not (
+                                    response.status_code == HTTP_NOT_FOUND
+                                    and "No endpoints found that support image input" in detail
+                                )
+                                if retryable and attempt + 1 < UPSTREAM_RETRY_ATTEMPTS:
+                                    await asyncio.sleep(0.5 * (attempt + 1))
+                                    continue
+                                error = f"OpenRouter returned HTTP {response.status_code}: {detail}"
+                                raise RuntimeError(error)
+                            async for line in response.aiter_lines():
+                                stream_started = True
+                                if line.startswith("data:"):
+                                    try:
+                                        body = json.loads(line[5:].strip())
+                                        if isinstance(body, dict):
+                                            usage, cost, served_model = _provider_values(
+                                                body, usage, cost, served_model
+                                            )
+                                    except ValueError:
+                                        pass
+                                yield f"{line}\n".encode()
+                            break
+                    except httpx.HTTPError:
+                        if stream_started or attempt + 1 >= UPSTREAM_RETRY_ATTEMPTS:
+                            raise
+                        await asyncio.sleep(0.5 * (attempt + 1))
             await engine.phoenix.record(
                 trace,
                 "provider",
@@ -1144,8 +1398,8 @@ def create_app(  # noqa: C901, PLR0915
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid tool token")
-        url = str(payload.get("url") or "")
-        if not url.startswith(("https://", "http://")):
+        url = _normalize_image_url(payload.get("url"))
+        if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
         attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
         result = await _describe_images(
@@ -1158,6 +1412,88 @@ def create_app(  # noqa: C901, PLR0915
         )
         await engine.phoenix.record(trace, "vision_tool", **result)
         return result
+
+    def tool_authorized(authorization: str | None) -> None:
+        expected = os.getenv("WISEMAN_MCP_TOKEN", os.getenv("WISEMAN_PROVIDER_TOKEN", token))
+        if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(401, "invalid tool token")
+
+    @app.post("/v1/tools/set-reactions")
+    async def set_reactions(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        try:
+            values = {
+                phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload
+            }
+            configured = engine.set_reaction_emojis(values)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        bot.persist_profile()
+        return {"reaction_emojis": configured}
+
+    @app.post("/v1/tools/set-profile")
+    async def set_profile(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
+            raise HTTPException(403, "profile edits are disabled")
+        username = payload.get("username")
+        if username is not None and (
+            not isinstance(username, str)
+            or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH
+        ):
+            raise HTTPException(422, "username must be 2-32 characters")
+        kwargs: dict[str, Any] = {}
+        if username is not None:
+            kwargs["username"] = username
+        avatar = payload.get("avatar_base64")
+        if avatar is not None:
+            if not isinstance(avatar, str):
+                raise HTTPException(422, "avatar_base64 must be a string")
+            try:
+                data = base64.b64decode(avatar, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(422, "avatar_base64 is invalid") from exc
+            if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
+                raise HTTPException(422, "avatar exceeds the 8 MiB limit")
+            kwargs["avatar"] = data
+        if not kwargs:
+            raise HTTPException(422, "provide username or avatar")
+        if bot.user is None:
+            raise HTTPException(503, "Discord gateway is not ready")
+        await bot.user.edit(**kwargs)
+        return {"status": "updated", "username": getattr(bot.user, "name", None)}
+
+    @app.post("/v1/tools/send-file")
+    async def send_file(
+        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        tool_authorized(authorization)
+        thread_id = str(payload.get("thread_id") or "")
+        filename = Path(str(payload.get("filename") or "")).name
+        encoded = payload.get("data_base64")
+        if not thread_id or not filename or filename in {".", ".."} or not isinstance(encoded, str):
+            raise HTTPException(422, "thread_id, filename, and data_base64 are required")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, "data_base64 is invalid") from exc
+        if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
+            raise HTTPException(422, "file must be non-empty and no larger than 8 MiB")
+        try:
+            channel = await bot.fetch_channel(int(thread_id))
+        except (ValueError, discord.DiscordException) as exc:
+            raise HTTPException(404, "Discord thread was not found") from exc
+        if not isinstance(channel, discord.Thread):
+            raise HTTPException(422, "file delivery requires a Discord thread")
+        content = str(payload.get("caption") or "")[:2_000]
+        message = await channel.send(
+            content=content, file=discord.File(io.BytesIO(data), filename=filename)
+        )
+        return {"status": "sent", "message_id": str(message.id), "url": str(message.jump_url)}
 
     @app.post("/v1/replay/discord")
     async def replay(

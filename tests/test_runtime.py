@@ -2,6 +2,7 @@
 
 # Copyright (c) 2026 Nick van der Merwe
 
+import asyncio
 import json
 import os
 from datetime import UTC, datetime
@@ -11,6 +12,20 @@ from typing import Any, Self, cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai_codex.generated.v2_all import (
+    AgentMessageDeltaNotification,
+    AgentMessageThreadItem,
+    CommandExecutionOutputDeltaNotification,
+    ItemCompletedNotification,
+    ThreadItem,
+    TurnCompletedNotification,
+    TurnStartedNotification,
+    TurnStatus,
+)
+from openai_codex.generated.v2_all import (
+    Turn as CodexTurn,
+)
+from openai_codex.models import Notification
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.main import (
@@ -22,15 +37,32 @@ from app.main import (
     PromptHub,
     State,
     _banner,
+    _deliver_content,
     _describe_images,
     _history,
+    _normalize_image_url,
     _provider_values,
+    _split_discord_content,
     _thread_name,
     create_app,
     normalize_event,
 )
-from app.temporal_runtime import TemporalError, TemporalRuntime, ThreadWorkflow, run_turn
-from runner.api import CODEX_TEXT_ONLY_OVERRIDES, ApprovalMode, Sandbox, Workspace
+from app.temporal_runtime import (
+    TemporalError,
+    TemporalRuntime,
+    ThreadWorkflow,
+    provision_workspace,
+    run_turn,
+    start_codex,
+)
+from runner.api import (
+    CODEX_TEXT_ONLY_OVERRIDES,
+    ApprovalMode,
+    CodexRunner,
+    Sandbox,
+    Turn,
+    Workspace,
+)
 from runner.api import create_app as runner_app
 
 
@@ -221,6 +253,155 @@ def test_reaction_state_is_idempotent() -> None:
     assert engine.reactions["message"] == ["👀"]
 
 
+def test_discord_content_splits_long_answers_at_readable_boundaries() -> None:
+    content = "first paragraph\n\n" + ("word " * 600)
+    chunks = _split_discord_content(content)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 2_000 for chunk in chunks)
+    assert "".join(chunks).replace(" ", "") == content.replace(" ", "")
+
+
+def test_image_url_normalization_accepts_model_wrappers() -> None:
+    assert _normalize_image_url(" <https://cdn.example/image.png> ") == (
+        "https://cdn.example/image.png"
+    )
+    assert _normalize_image_url("attachment://image.png") == ""
+
+
+@pytest.mark.asyncio
+async def test_long_delivery_edits_first_chunk_and_sends_overflow() -> None:
+    class Channel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, content: str = "") -> object:
+            index = len(self.sent)
+            self.sent.append(content)
+            channel = self
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    channel.sent[index] = content
+
+            return Delivery()
+
+    channel = Channel()
+    progress = await channel.send("working")
+    content = "paragraph\n\n" + ("word " * 600)
+    await _deliver_content(progress, channel, content)
+    assert len(channel.sent) >= 2
+    assert all(len(chunk) <= 2_000 for chunk in channel.sent)
+    assert "".join(channel.sent).replace(" ", "") == content.replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> None:
+    seen: list[str] = []
+
+    async def describe(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+        seen.append(str(messages[0]["attachments"][0]["url"]))
+        return {"text": "description", "attachments": ["image"], "question": question or None}
+
+    monkeypatch.setattr("app.main._describe_images", describe)
+    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+        "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
+    )
+    assert response.status_code == 200
+    assert seen == ["https://cdn.example/image.png"]
+
+
+def test_reaction_configuration_changes_future_turns() -> None:
+    engine = Engine(Phoenix(), FakeRunner())
+    assert engine.set_reaction_emojis({"processing": "🔵", "success": "🟩", "failure": "🟥"}) == {
+        "processing": "🔵",
+        "success": "🟩",
+        "failure": "🟥",
+    }
+    assert engine.reaction_emojis["processing"] == "🔵"
+
+
+def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> None:
+    class User:
+        name = "Wiseman"
+
+        def __init__(self) -> None:
+            self.edits: list[dict[str, object]] = []
+
+        async def edit(self, **kwargs: object) -> None:
+            self.edits.append(kwargs)
+
+    class Sent:
+        id = 42
+        jump_url = "https://discord.test/messages/42"
+
+    class Thread:
+        async def send(self, **kwargs: object) -> Sent:
+            self.payload = kwargs
+            return Sent()
+
+    monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
+    monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
+    monkeypatch.setattr("app.main.discord.Thread", Thread)
+    engine = Engine(Phoenix(), FakeRunner())
+    app = create_app(engine, token="secret")
+    app.state.gateway._connection.user = User()  # noqa: SLF001
+
+    with TestClient(app) as client:
+        headers = {"authorization": "Bearer secret"}
+        reactions = client.post(
+            "/v1/tools/set-reactions",
+            headers=headers,
+            json={"processing": "🔵", "success": "🟩", "failure": "🟥"},
+        )
+        assert reactions.json()["reaction_emojis"] == {
+            "processing": "🔵",
+            "success": "🟩",
+            "failure": "🟥",
+        }
+        replay = client.post(
+            "/v1/replay/discord",
+            headers={"x-replay-token": "secret"},
+            json={
+                "trigger": discord_message("configured", "hello", thread="t"),
+                "kind": "startup",
+            },
+        )
+        assert replay.json()["reactions"] == ["🟩"]
+        profile = client.post(
+            "/v1/tools/set-profile",
+            headers=headers,
+            json={"username": "New Wiseman", "avatar_base64": "aGVsbG8="},
+        )
+        assert profile.status_code == 200
+        assert app.state.gateway.user.edits == [{"username": "New Wiseman", "avatar": b"hello"}]
+
+        monkeypatch.setattr(
+            app.state.gateway,
+            "fetch_channel",
+            lambda _channel_id: __import__("asyncio").sleep(0, result=Thread()),
+        )
+        uploaded = client.post(
+            "/v1/tools/send-file",
+            headers=headers,
+            json={
+                "thread_id": "123",
+                "filename": "report.png",
+                "caption": "Here it is",
+                "data_base64": "aGVsbG8=",
+            },
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json()["message_id"] == "42"
+
+    assert app.state.gateway.profile_path is None
+
+
+def test_discord_tools_require_authentication() -> None:
+    client = TestClient(create_app(Engine(Phoenix(), FakeRunner()), token="secret"))
+    assert client.post("/v1/tools/set-reactions", json={"success": "🎉"}).status_code == 401
+    assert client.post("/v1/tools/send-file", json={}).status_code == 401
+
+
 def test_thread_name_uses_message_without_mentions_and_stays_bounded() -> None:
     assert _thread_name("<@123> investigate the queue") == "investigate the queue"
     assert _thread_name("  <@!123>\ncheck   this  ") == "check this"
@@ -327,6 +508,48 @@ async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
+    class Response:
+        is_error = False
+        status_code = 200
+
+        def __init__(self, body: dict[str, object]) -> None:
+            self.body = body
+
+        def json(self) -> dict[str, object]:
+            return self.body
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def post(self, url: str, **kwargs: object) -> Response:
+            del url, kwargs
+            await asyncio.sleep(0.05)
+            return Response({"thread_id": "next", "output": "answer", "model": "served"})
+
+        async def get(self, url: str, **kwargs: object) -> Response:
+            assert url.endswith("/progress/workspace")
+            del kwargs
+            return Response({"message": "🤖 Codex starting..."})
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    updates: list[str] = []
+
+    async def receive(message: str) -> None:
+        updates.append(message)
+
+    result = await HttpRunner("http://runner", "secret").run(
+        "old", "prompt", "user", "workspace", progress=receive
+    )
+    assert result == ("next", "answer", {"model": "served"})
+    assert updates == ["🤖 Codex starting..."]
+
+
+@pytest.mark.asyncio
 async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     class FailingRunner:
         async def run(
@@ -340,6 +563,58 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     assert result["error"] == "runner down"
     assert result["reactions"] == ["❌"]
     assert any(item["node"] == "failure" for item in engine.phoenix.records)
+
+
+@pytest.mark.asyncio
+async def test_same_thread_turns_are_serialized() -> None:
+    active = maximum = 0
+
+    class Runner:
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            nonlocal active, maximum
+            del prompt, user, workspace
+            active += 1
+            maximum = max(maximum, active)
+            await __import__("asyncio").sleep(0)
+            active -= 1
+            return thread or "codex", "answer", {}
+
+    engine = Engine(Phoenix(), Runner())
+    events = [
+        normalize_event(discord_message(str(index), "hello", thread="same")) for index in (1, 2)
+    ]
+    results = await __import__("asyncio").gather(*(engine.handle(event) for event in events))
+    assert maximum == 1
+    assert [result["state"]["turn"] for result in results] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_new_turn_recovers_after_previous_failure() -> None:
+    attempts = 0
+
+    class Runner:
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            nonlocal attempts
+            del prompt, user, workspace
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary runner failure")  # noqa: TRY003
+            return thread or "codex", "recovered", {}
+
+    engine = Engine(Phoenix(), Runner())
+    first = await engine.handle(
+        normalize_event(discord_message("failed", "hello", thread="recover"))
+    )
+    second = await engine.handle(
+        normalize_event(discord_message("recovered", "retry", thread="recover"))
+    )
+    assert first["reactions"] == ["❌"]
+    assert second["reactions"] == ["✅"]
+    assert second["output"] == "recovered"
 
 
 @pytest.mark.asyncio
@@ -421,6 +696,64 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
     assert live.channel.sent[1].startswith("Codex received: ")
     assert live.channel.embeds[0] is not None
     assert live.channel.embeds[0].title == "⚡ Wiseman thread startup"
+
+
+@pytest.mark.asyncio
+async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None:
+    class Channel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            del kwargs
+            index = len(self.sent)
+            self.sent.append(content)
+            channel = self
+
+            class Delivery:
+                async def edit(self, *, content: str) -> None:
+                    channel.sent[index] = content
+
+            return Delivery()
+
+    class Live:
+        def __init__(self) -> None:
+            self.channel = Channel()
+            self.reactions: list[str] = []
+
+        async def add_reaction(self, emoji: str) -> None:
+            self.reactions.append(emoji)
+
+        async def remove_reaction(self, emoji: str, member: object) -> None:
+            del member
+            self.reactions.remove(emoji)
+
+    class ProgressRunner(HttpRunner):
+        async def run(
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress=None,
+        ) -> tuple[str, str, dict[str, object]]:
+            del prompt, user, workspace
+            assert progress is not None
+            await progress("⚙️ Running command...")
+            await progress("⚙️ Running command...")
+            await progress("✍️ Writing response...")
+            return thread or "codex", "answer", {}
+
+    live: Any = Live()
+    engine = Engine(Phoenix(), ProgressRunner("http://runner"))
+    engine.reaction_user = object()
+    result = await engine.handle(
+        normalize_event(discord_message("progress", "hello", thread="t")), live
+    )
+    assert result["output"] == "answer"
+    assert live.channel.sent[-1] == "answer"
+    assert "⚙️ Running command..." in result["progress"]
+    assert "✍️ Writing response..." in result["progress"]
 
 
 @pytest.mark.asyncio
@@ -588,13 +921,59 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     assert provider["request"] == {"model": "requested"}
 
 
+def test_provider_relay_retries_disconnect_before_response(monkeypatch) -> None:
+    class Response:
+        is_error = False
+        status_code = 200
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def aiter_lines(self):
+            yield 'data: {"response":{"model":"served"}}'
+            yield "data: [DONE]"
+
+    class Client:
+        attempts = 0
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        def stream(self, method: str, url: str, **kwargs: object) -> Response:
+            del method, url, kwargs
+            self.attempts += 1
+            if self.attempts == 1:
+                raise httpx.RemoteProtocolError("disconnected")
+            return Response()
+
+    client = Client()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: client)
+    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+        "/v1/responses", json={"model": "requested"}
+    )
+    assert response.status_code == 200
+    assert client.attempts == 2
+    assert "[DONE]" in response.text
+
+
 @pytest.mark.asyncio
 async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     await workflow.submit({"id": "queued"})
+    activities: list[object] = []
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
-        del args, kwargs
+        del kwargs
+        activities.append(args[0])
+        if args[0] is start_codex:
+            return {"state": {"codex_thread": "codex-thread"}}
         return {"state": {"turn": 1}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
@@ -603,8 +982,86 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
+    assert activities == [provision_workspace, start_codex, run_turn]
+
+
+@pytest.mark.asyncio
+async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        if args[0] is start_codex:
+            return {"state": {"codex_thread": "codex-thread"}}
+        return {"state": {"turn": len(activities)}}
+
+    async def wait_for_signal(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        workflow.pending.append({"id": "followup"})
+        if len(activities) > 3:
+            raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    result = await workflow.run({"event": {"id": "first"}})
+    assert result == {"state": {"turn": 4}}
+    assert activities == [provision_workspace, start_codex, run_turn, run_turn]
+
+
+@pytest.mark.asyncio
+async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Runner:
+        async def acquire(self, user: str, workspace: str) -> None:
+            calls.append(("acquire", (user, workspace)))
+
+        async def start(self, thread: str, user: str, workspace: str) -> str:
+            calls.append(("start", (thread, user, workspace)))
+            return "codex-thread"
+
+    class Engine:
+        runner = Runner()
+
+    monkeypatch.setattr("app.main.engine", Engine())
+    payload = {
+        "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
+    }
+    assert await provision_workspace(payload) == {"workspace": "t"}
+    assert await start_codex({**payload, "state": {"turn": 0}}) == {
+        "state": {"turn": 0, "codex_thread": "codex-thread"},
+        "workspace": "t",
+        "codex_thread": "codex-thread",
+    }
+    assert calls == [("acquire", ("u", "t")), ("start", ("", "u", "t"))]
+
+
+@pytest.mark.asyncio
+async def test_temporal_old_workflow_history_keeps_one_activity(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        return {"state": {"turn": 1}}
+
+    async def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _id: False)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    result = await workflow.run({"event": {"id": "old"}})
+    assert result == {"state": {"turn": 1}}
+    assert activities == [run_turn]
 
 
 @pytest.mark.asyncio
@@ -769,6 +1226,8 @@ def test_managed_account_name_is_stable_without_touching_host_accounts(
     workspace.thread("discord-user", "thread")
     assert commands[0][0].endswith("groupadd")
     assert commands[1][0].endswith("useradd")
+    assert commands[1][commands[1].index("--shell") + 1] == "/bin/bash"
+    assert commands[1][commands[1].index("--groups") + 1] == "wsm_sudo"
 
 
 @pytest.mark.asyncio
@@ -836,8 +1295,23 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     client = TestClient(runner_app())
     headers = {"authorization": "Bearer secret"}
+    started = client.post(
+        "/start", headers=headers, json={"thread_id": "t", "user_id": "u", "input": ""}
+    )
+    assert started.json()["thread_id"] == "codex-thread"
+    retried_start = client.post(
+        "/start", headers=headers, json={"thread_id": "t", "user_id": "u", "input": ""}
+    )
+    assert retried_start.json()["thread_id"] == "codex-thread"
     first = client.post(
-        "/turn", headers=headers, json={"thread_id": "t", "user_id": "u", "input": "one"}
+        "/turn",
+        headers=headers,
+        json={
+            "thread_id": "t",
+            "codex_thread_id": "codex-thread",
+            "user_id": "u",
+            "input": "one",
+        },
     )
     second = client.post(
         "/turn",
@@ -849,12 +1323,85 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert calls[0]["sandbox"] is Sandbox.full_access
     assert calls[0]["model"] == "provider/model"
     assert calls[0]["model_provider"] == "wiseman-relay"
+    assert len(calls) == 1
     assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
+    assert "sudo -n apt-get" in str(calls[0]["developer_instructions"])
     assert configs[0].config_overrides == CODEX_TEXT_ONLY_OVERRIDES
     assert (
         'base_url = "http://relay/v1"'
         in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()
     )
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatch) -> None:
+    class Handle:
+        async def stream(self):
+            completed_turn = CodexTurn(id="turn", items=[], status=TurnStatus.completed)
+            yield Notification(
+                "turn/started",
+                TurnStartedNotification(thread_id="t", turn=completed_turn),
+            )
+            yield Notification(
+                "item/commandExecution/outputDelta",
+                CommandExecutionOutputDeltaNotification(
+                    delta="output",
+                    item_id="command",
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "item/agentMessage/delta",
+                AgentMessageDeltaNotification(
+                    delta="answer",
+                    item_id="item",
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "item/completed",
+                ItemCompletedNotification(
+                    completed_at_ms=1,
+                    item=ThreadItem(
+                        root=AgentMessageThreadItem(id="item", text="answer", type="agentMessage")
+                    ),
+                    thread_id="t",
+                    turn_id="turn",
+                ),
+            )
+            yield Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="t",
+                    turn=completed_turn,
+                ),
+            )
+
+    class Thread:
+        id = "codex-thread"
+
+        async def turn(self, prompt: str, **kwargs: object) -> Handle:
+            del prompt, kwargs
+            return Handle()
+
+    class Codex:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def thread_start(self, **kwargs: object) -> Thread:
+            del kwargs
+            return Thread()
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr("runner.api.AsyncCodex", Codex)
+    runner = CodexRunner()
+    turn = Turn(thread_id="t", user_id="u", input="hello")
+    await runner.start(turn, Workspace(str(tmp_path)).thread("u", "t"))
+    result = await runner.run(turn, Workspace(str(tmp_path)).thread("u", "t"))
+    assert result["output"] == "answer"
+    assert runner.progress["t"] == "✍️ Writing response..."
 
 
 @pytest.mark.asyncio

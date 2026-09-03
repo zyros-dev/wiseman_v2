@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import activity, workflow
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -21,6 +21,40 @@ async def run_turn(payload: dict[str, Any]) -> dict[str, Any]:
     return await engine.handle(event, state_data=state)
 
 
+@activity.defn(name="wiseman.workspace")
+async def provision_workspace(payload: dict[str, Any]) -> dict[str, str]:
+    """Materialize the warm runner workspace as its own observable Activity."""
+    from app.main import (  # noqa: PLC0415 - avoid workflow import cycle
+        Event,
+        LifecycleRunner,
+        engine,
+    )
+
+    event = Event.model_validate(payload["event"])
+    workspace = event.trigger.thread_id or event.trigger.channel_id
+    await cast("LifecycleRunner", engine.runner).acquire(event.trigger.author_id, workspace)
+    return {"workspace": workspace}
+
+
+@activity.defn(name="wiseman.codex_start")
+async def start_codex(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create or resume the Codex SDK thread before the model turn Activity."""
+    from app.main import (  # noqa: PLC0415 - avoid workflow import cycle
+        Event,
+        LifecycleRunner,
+        engine,
+    )
+
+    event = Event.model_validate(payload["event"])
+    state = dict(payload.get("state", {}))
+    workspace = event.trigger.thread_id or event.trigger.channel_id
+    thread = await cast("LifecycleRunner", engine.runner).start(
+        str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
+    )
+    state["codex_thread"] = thread
+    return {"state": state, "workspace": workspace, "codex_thread": thread}
+
+
 @workflow.defn(name="wiseman.thread")
 class ThreadWorkflow:
     """Serialize turns and retain the Codex thread/context cursor durably."""
@@ -29,6 +63,7 @@ class ThreadWorkflow:
         self.pending: list[dict[str, Any]] = []
         self.state: dict[str, Any] = {}
         self.result: dict[str, Any] = {}
+        self.started = False
 
     @workflow.signal
     async def submit(self, event: dict[str, Any]) -> None:
@@ -37,8 +72,22 @@ class ThreadWorkflow:
     @workflow.run
     async def run(self, first: dict[str, Any]) -> dict[str, Any]:
         self.pending.append(first["event"])
+        split_startup = workflow.patched("split-startup-activities")
         while True:
             event = self.pending.pop(0)
+            if split_startup and not self.started:
+                await workflow.execute_activity(
+                    provision_workspace,
+                    {"event": event, "state": self.state},
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                started = await workflow.execute_activity(
+                    start_codex,
+                    {"event": event, "state": self.state},
+                    start_to_close_timeout=timedelta(seconds=90),
+                )
+                self.state = started.get("state", self.state)
+                self.started = True
             self.result = await workflow.execute_activity(
                 run_turn,
                 {"event": event, "state": self.state},
@@ -81,7 +130,7 @@ class TemporalRuntime:
             self.client,
             task_queue=self.queue,
             workflows=[ThreadWorkflow],
-            activities=[run_turn],
+            activities=[provision_workspace, start_codex, run_turn],
         ):
             await asyncio.Event().wait()
 

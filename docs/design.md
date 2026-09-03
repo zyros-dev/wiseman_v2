@@ -38,6 +38,23 @@ multimodal Chat Completions endpoint. The result is returned to Codex only when
 requested, and the `vision_tool` event records the model, attachment ID,
 question, usage, cost, and description.
 
+The sandbox also provides `wiseman-discord`. `send-file` uploads a file or
+image from the current thread workspace into the managed Discord thread;
+`set-reactions` changes the processing, success, and failure symbols for
+future turns; and `set-profile` changes the bot username and/or avatar when
+profile edits are enabled. These commands call authenticated gateway tools.
+Uploads are limited to the current thread or its owner-shared directory and
+8 MiB; the gateway never accepts a host path or a Discord credential from the
+sandbox. Reaction configuration is persisted on the gateway state volume.
+The trusted sandbox intentionally does not bake in a compiler or project
+toolchain: managed accounts have passwordless sudo, a usable shell, outbound
+package access, and a writable root filesystem, so Codex can install the
+dependencies required by the current project itself.
+Each managed account keeps its private primary group for workspace ownership
+and is also placed in the container-local `wsm_sudo` group; that group is the
+only sudo policy entry, and it is intentionally unrestricted because this is a
+trusted shared runner rather than a hostile-user boundary.
+
 ## Turn semantics
 
 The first event for a thread is `startup`: it selects at most 100 parent
@@ -53,7 +70,9 @@ processing reaction -> context -> grammar -> workspace progress -> Codex -> deli
 
 The live Discord adapter creates a thread for a parent-channel mention,
 collects bounded history, emits one green startup embed, and edits one compact
-working message into the answer for each turn. Startup-only provisioning and
+working message into the answer for each turn. While Codex runs, the gateway
+edits that message for meaningful SDK phases such as command execution, file
+changes, tool calls, and response writing. Startup-only provisioning and
 Codex-start status is never repeated on follow-ups. It adds `👀` once and then
 `✅` or `❌`; it removes the processing `👀` after adding the terminal reaction and does not duplicate terminal reactions. The deployment allowlist is
 guild-based and is enforced for both parent channels and managed threads;

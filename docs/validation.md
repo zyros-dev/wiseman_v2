@@ -86,3 +86,23 @@ until those dependencies are available.
   and `docker compose config` passed with required values supplied.
 - Deployment and signed-in Discord acceptance are still pending for this
   change; no completion claim is made from local tests alone.
+
+## Discord presentation tools: 2026-09-03
+
+- Added authenticated sandbox commands for sending files/images, changing
+  lifecycle reactions, and changing the bot username/avatar.
+- Gateway contract tests cover authentication, bounded avatar decoding,
+  reaction configuration, profile mutation, and thread file delivery.
+- The sandbox image includes `/usr/local/bin/wiseman-discord`; deployment
+  enables profile edits and persists reaction configuration at
+  `/var/lib/wiseman/profile.json`.
+
+## Trusted package installation: 2026-09-03
+
+- The sandbox image does not preinstall a compiler or kernel-specific
+  toolchain. Managed accounts receive `/bin/bash` and passwordless sudo;
+  Codex is instructed to install project-specific packages itself with
+  noninteractive `apt-get` commands.
+- A live disposable managed-style account initially exposed the bad wildcard
+  sudo rule (`sudo: a password is required`). The rule now uses the dedicated
+  `wsm_sudo` group and is queued for redeploy and repeat verification.
