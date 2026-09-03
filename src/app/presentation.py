@@ -49,15 +49,11 @@ def banner() -> str:
     )
 
 
-def thread_name(content: str, attachment_count: int = 0) -> str:
-    """Turn the triggering message into a valid, readable Discord thread name."""
-    name = re.sub(r"<@!?\d+>", "", content)
-    name = " ".join(name.split()).strip()
-    if not name:
-        name = "image" if attachment_count else "wiseman"
-    if len(name) > THREAD_NAME_LIMIT:
-        name = name[: THREAD_NAME_LIMIT - 1].rstrip() + "…"
-    return name
+def thread_name(number: int) -> str:
+    """Return the stable sequence name shown in the Discord channel list."""
+    if number < 1:
+        raise ValueError("thread number must be positive")  # noqa: TRY003
+    return f"Gurt {number}"[:THREAD_NAME_LIMIT]
 
 
 def startup_embed() -> discord.Embed:

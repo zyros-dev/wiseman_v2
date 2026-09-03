@@ -467,12 +467,11 @@ def test_discord_tools_require_authentication() -> None:
     assert client.post("/v1/tools/send-file", json={}).status_code == 401
 
 
-def test_thread_name_uses_message_without_mentions_and_stays_bounded() -> None:
-    assert _thread_name("<@123> investigate the queue") == "investigate the queue"
-    assert _thread_name("  <@!123>\ncheck   this  ") == "check this"
-    assert _thread_name("<@123>", 1) == "image"
-    assert _thread_name("<@123>") == "wiseman"
-    assert len(_thread_name("<@123> " + "x" * 150)) == 100
+def test_thread_name_uses_persisted_sequence() -> None:
+    assert _thread_name(1) == "Gurt 1"
+    assert _thread_name(42) == "Gurt 42"
+    with pytest.raises(ValueError, match="positive"):
+        _thread_name(0)
 
 
 def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
@@ -1292,7 +1291,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             self.reactions: list[str] = []
 
         async def create_thread(self, name: str, auto_archive_duration: int) -> Thread:
-            assert name == "hello"
+            assert name == "Gurt 1"
             assert auto_archive_duration == 60
             self.channel.thread = Thread(self.channel)
             return self.channel.thread
@@ -1337,6 +1336,17 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     ignored = Message("ignored", rejected, "hello")
     await bot.on_message(cast("discord.Message", ignored))
     assert "ignored" not in engine.states
+
+
+@pytest.mark.asyncio
+async def test_gateway_persists_gurt_thread_sequence(tmp_path) -> None:
+    sequence = tmp_path / "thread-sequence.json"
+    first = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    assert first._next_thread_name() == "Gurt 1"  # noqa: SLF001
+    assert first._next_thread_name() == "Gurt 2"  # noqa: SLF001
+
+    restored = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    assert restored._next_thread_name() == "Gurt 3"  # noqa: SLF001
 
 
 def test_replay_accepts_discord_message_json() -> None:
