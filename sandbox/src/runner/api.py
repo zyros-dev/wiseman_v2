@@ -34,7 +34,7 @@ CODEX_TEXT_ONLY_OVERRIDES = (
     "features.view_image=false",
     "features.image_generation=false",
 )
-CODEX_STREAM_RETRY_ATTEMPTS = 3
+CODEX_STREAM_RETRY_ATTEMPTS = 4
 
 
 class Turn(BaseModel):
