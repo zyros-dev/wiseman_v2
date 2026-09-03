@@ -4,21 +4,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from app.clients.client_interfaces import (
     ClientContainer,
     ClientMode,
     DiscordClient,
+    JsonObject,
+    JsonValue,
     PhoenixClient,
     ProviderClient,
     RunnerClient,
     RunnerResult,
     TemporalClient,
 )
-
-if TYPE_CHECKING:
-    from app.types import JsonObject, JsonValue
 
 type Failure = str
 
@@ -48,11 +46,6 @@ class MockState:
     messages: dict[str, str] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
     threads: dict[str, str] = field(default_factory=dict)
-    thread_activity: dict[str, float] = field(default_factory=dict)
-    archived: set[str] = field(default_factory=set)
-    locked: set[str] = field(default_factory=set)
-    channel_history: dict[str, list[JsonObject]] = field(default_factory=dict)
-    fake_time: float = 0
     records: list[JsonObject] = field(default_factory=list)
     audits: dict[str, JsonObject] = field(default_factory=dict)
     turn_ids: dict[str, str] = field(default_factory=dict)
@@ -72,14 +65,13 @@ class MockDiscord(DiscordClient):
 
     async def history(self, channel_id: str, limit: int) -> list[JsonObject]:
         self.state.call("discord", "history", channel_id, str(limit))
-        return list(self.state.channel_history.get(channel_id, []))[-limit:]
+        return []
 
     async def create_thread(self, channel_id: str, name: str, auto_archive_minutes: int) -> str:
         self.state.call("discord", "create_thread", channel_id, name, str(auto_archive_minutes))
         thread_id = f"thread-{self.next_id}"
         self.next_id += 1
         self.state.threads[thread_id] = name
-        self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
     async def send(
@@ -90,9 +82,6 @@ class MockDiscord(DiscordClient):
         message_id = f"message-{self.next_id}"
         self.next_id += 1
         self.state.messages[message_id] = content
-        self.state.channel_history.setdefault(channel_id, []).append(
-            {"id": message_id, "channel_id": channel_id, "content": content}
-        )
         return message_id
 
     async def edit(self, message_id: str, content: str) -> None:
@@ -113,26 +102,13 @@ class MockDiscord(DiscordClient):
 
     async def archive_thread(self, thread_id: str) -> None:
         self.state.call("discord", "archive_thread", thread_id)
-        self.state.archived.add(thread_id)
 
     async def lock_thread(self, thread_id: str) -> None:
         self.state.call("discord", "lock_thread", thread_id)
-        self.state.locked.add(thread_id)
 
     async def send_file(self, channel_id: str, path: str, caption: str = "") -> str:
         self.state.call("discord", "send_file", channel_id, path, caption)
-        message_id = f"file-{self.next_id}"
-        self.next_id += 1
-        return message_id
-
-    def advance(self, seconds: float) -> None:
-        if seconds < 0:
-            raise ValueError("fake time cannot move backwards")  # noqa: TRY003
-        self.state.fake_time += seconds
-        for thread_id, touched in self.state.thread_activity.items():
-            if self.state.fake_time - touched >= 60 * 60:
-                self.state.archived.add(thread_id)
-                self.state.locked.add(thread_id)
+        return f"file-{self.next_id}"
 
     async def set_profile(self, username: str | None, avatar: str | None) -> None:
         self.state.call("discord", "set_profile", username or "", avatar or "")

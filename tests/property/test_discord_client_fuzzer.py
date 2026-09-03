@@ -67,10 +67,6 @@ class DiscordClientMachine(RuleBasedStateMachine):
         if self.thread_ids:
             run(self.client.archive_thread(self.thread_ids[-1]))
 
-    @rule(seconds=st.integers(min_value=0, max_value=7_200))
-    def advances_fake_time(self, seconds: int) -> None:
-        self.client.advance(seconds)
-
     @invariant()
     def reactions_are_sets(self) -> None:
         assert all(len(values) == len(set(values)) for values in self.state.reactions.values())
@@ -78,13 +74,6 @@ class DiscordClientMachine(RuleBasedStateMachine):
     @invariant()
     def every_call_is_recorded_as_discord(self) -> None:
         assert all(call.client == "discord" for call in self.state.calls)
-
-    @invariant()
-    def idle_threads_are_closed(self) -> None:
-        for thread_id, created in self.state.thread_activity.items():
-            if self.state.fake_time - created >= 3_600:
-                assert thread_id in self.state.archived
-                assert thread_id in self.state.locked
 
 
 TestDiscordClientMachine = DiscordClientMachine.TestCase
