@@ -34,6 +34,7 @@ CODEX_TEXT_ONLY_OVERRIDES = (
     "features.view_image=false",
     "features.image_generation=false",
 )
+CODEX_STREAM_RETRY_ATTEMPTS = 3
 
 
 class Turn(BaseModel):
@@ -307,7 +308,9 @@ class CodexRunner:
         assert thread is not None
         return thread
 
-    async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
+    async def _run_thread(  # noqa: C901, PLR0912
+        self, thread: object, turn: Turn, path: Path
+    ) -> dict[str, object]:
         if not hasattr(thread, "turn"):
             result = await thread.run(
                 turn.input,
@@ -323,30 +326,43 @@ class CodexRunner:
             }
         turn_number = self.turn_counts.get(turn.thread_id, 0) + 1
         self.turn_counts[turn.thread_id] = turn_number
-        self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
-        active_turn = await thread.turn(
-            turn.input,
-            approval_mode=ApprovalMode.deny_all,
-            sandbox=Sandbox.full_access,
-            cwd=str(path),
-        )
-        self.active_turns[turn.thread_id] = active_turn
         items: list[object] = []
         usage: object = None
         completed: TurnCompletedNotification | None = None
-        try:
-            async for event in active_turn.stream():
-                if message := _progress_message(event, turn_number):
-                    self.progress[turn.thread_id] = message
-                payload = event.payload
-                if isinstance(payload, ItemCompletedNotification):
-                    items.append(payload.item)
-                elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
-                    usage = payload.token_usage
-                elif isinstance(payload, TurnCompletedNotification):
-                    completed = payload
-        finally:
-            self.active_turns.pop(turn.thread_id, None)
+        for attempt in range(CODEX_STREAM_RETRY_ATTEMPTS):
+            self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
+            prompt = turn.input
+            if attempt:
+                prompt = (
+                    "Continue the current task from the existing workspace after the model "
+                    "stream disconnected. Do not repeat completed commands; inspect the "
+                    "current state and finish the user's request."
+                )
+                self.progress[turn.thread_id] = "🔁 Reconnecting to Codex..."
+            active_turn = await thread.turn(
+                prompt,
+                approval_mode=ApprovalMode.deny_all,
+                sandbox=Sandbox.full_access,
+                cwd=str(path),
+            )
+            self.active_turns[turn.thread_id] = active_turn
+            try:
+                async for event in active_turn.stream():
+                    if message := _progress_message(event, turn_number):
+                        self.progress[turn.thread_id] = message
+                    payload = event.payload
+                    if isinstance(payload, ItemCompletedNotification):
+                        items.append(payload.item)
+                    elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+                        usage = payload.token_usage
+                    elif isinstance(payload, TurnCompletedNotification):
+                        completed = payload
+                break
+            except Exception as exc:  # SDK transport types vary by release
+                if attempt + 1 >= CODEX_STREAM_RETRY_ATTEMPTS or not _stream_is_retryable(exc):
+                    raise
+            finally:
+                self.active_turns.pop(turn.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")  # noqa: TRY003
         if completed.turn.error is not None:
@@ -367,6 +383,22 @@ class CodexRunner:
             return False
         await active.steer(turn.input)
         return True
+
+
+def _stream_is_retryable(error: BaseException) -> bool:
+    """Recognize provider transport loss without retrying a completed Codex error."""
+    message = str(error).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "disconnect",
+            "transport error",
+            "network error",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+        )
+    )
 
 
 def _final_response(items: list[object]) -> str:

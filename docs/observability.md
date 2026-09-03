@@ -8,6 +8,15 @@ execution, not only at the end:
 turn -> reaction(add:👀) -> context -> grammar -> progress -> codex -> delivery -> reaction(add:✅|❌, remove:👀)
 ```
 
+The first `admission` child is a replay artifact. It stores the exact raw
+request accepted by the gateway, the normalized event passed to the shared
+admission function, and the `normalize_event:v2` revision. The artifact is
+available in Phoenix span attributes as `wiseman.raw_request` and through the
+authenticated `GET /v1/phoenix/audits/<trace-id>` endpoint. In a non-production
+environment, `POST /v1/replay/phoenix/<trace-id>` feeds that raw request back
+through the same normalizer and Temporal submission path; it does not invent a
+second test-only request format.
+
 The `context` event contains raw Discord JSON, normalized messages, selected
 IDs, authors, mentions, reply ancestry, and attachment metadata. The
 `grammar` event contains the grammar name, content hash, source, raw input,

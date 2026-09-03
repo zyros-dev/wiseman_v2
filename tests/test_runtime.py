@@ -1308,6 +1308,53 @@ def test_replay_accepts_discord_message_json() -> None:
     assert "username" in str(context["raw"])
 
 
+def test_admission_audit_is_exact_and_replayable() -> None:
+    engine = Engine(Phoenix(), FakeRunner())
+    client = TestClient(create_app(engine, token="replay-secret"))
+    payload = {
+        "t": "MESSAGE_CREATE",
+        "d": {
+            **discord_message(
+                "audit-1", "write an engine in rust for balatro scoring", thread="audit-t"
+            ),
+            "author": {"id": "u", "username": "Nick", "bot": False},
+        },
+        "kind": "startup",
+        "parent_messages": [],
+    }
+    response = client.post(
+        "/v1/replay/discord", headers={"x-replay-token": "replay-secret"}, json=payload
+    )
+    assert response.status_code == 200
+    audit = client.get(
+        "/v1/phoenix/audits/discord-audit-1", headers={"x-replay-token": "replay-secret"}
+    )
+    assert audit.status_code == 200
+    artifact = audit.json()
+    assert artifact["raw_request"] == payload
+    assert artifact["normalized_request"]["trigger"]["content"] == payload["d"]["content"]
+    assert artifact["normalizer"] == "normalize_event:v2"
+
+    replay = client.post(
+        "/v1/replay/phoenix/discord-audit-1",
+        headers={"x-replay-token": "replay-secret"},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "duplicate"
+    assert (
+        client.get(
+            "/v1/phoenix/audits/missing", headers={"x-replay-token": "replay-secret"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            "/v1/phoenix/audits/discord-audit-1", headers={"x-replay-token": "bad"}
+        ).status_code
+        == 401
+    )
+
+
 def test_runner_requires_bearer_and_materializes_shared_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("WISEMAN_RUNNER_API_TOKEN", "secret")
@@ -1519,6 +1566,59 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
     assert result["output"] == "answer"
     assert observed_progress == ["🤖 Gurt 1: Codex turn started..."]
     assert runner.progress["t"] == '✍️ Writing response... "answer"'
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_recovers_from_midstream_disconnect(tmp_path, monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class Handle:
+        def __init__(self, attempt: int) -> None:
+            self.failed = attempt == 1
+
+        async def stream(self):
+            if self.failed:
+                raise RuntimeError("disconnect")
+            yield Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="t",
+                    turn=CodexTurn(id="turn", items=[], status=TurnStatus.completed),
+                ),
+            )
+
+    class Thread:
+        id = "codex-thread"
+        calls = 0
+
+        async def turn(self, prompt: str, **kwargs: object) -> Handle:
+            del kwargs
+            prompts.append(prompt)
+            self.calls += 1
+            return Handle(self.calls)
+
+    class Codex:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def thread_start(self, **kwargs: object) -> Thread:
+            del kwargs
+            return Thread()
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr("runner.api.AsyncCodex", Codex)
+    runner = CodexRunner()
+    path = Workspace(str(tmp_path)).thread("u", "t")
+    result = await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
+    assert result["thread_id"] == "codex-thread"
+    assert prompts == [
+        "hello",
+        (
+            "Continue the current task from the existing workspace after the model stream "
+            "disconnected. Do not repeat completed commands; inspect the current state and "
+            "finish the user's request."
+        ),
+    ]
 
 
 @pytest.mark.asyncio

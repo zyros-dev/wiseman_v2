@@ -175,6 +175,7 @@ class Phoenix:
     def __init__(self, endpoint: str = "", key: str = "", project: str = "") -> None:
         self.endpoint = endpoint.rstrip("/")
         self.records: list[dict[str, Any]] = []
+        self.audits: dict[str, dict[str, Any]] = {}
         self.roots: dict[str, Any] = {}
         self.contexts: dict[str, Any] = {}
         self.provider = TracerProvider(
@@ -194,6 +195,8 @@ class Phoenix:
     async def record(self, trace: str, node: str, **data: object) -> None:
         item = {"trace": trace, "node": node, **{k: v for k, v in data.items() if v is not None}}
         self.records.append(item)
+        if node == "admission" and isinstance(data.get("audit_id"), str):
+            self.audits[data["audit_id"]] = dict(item)
         if trace not in self.roots:
             root = self.tracer.start_span("wiseman.turn")
             self.roots[trace] = root
@@ -210,6 +213,11 @@ class Phoenix:
         if terminal:
             self.roots.pop(trace).end()
             self.contexts.pop(trace)
+
+    def audit(self, audit_id: str) -> dict[str, Any] | None:
+        """Return an in-process replay artifact captured at the admission boundary."""
+        value = self.audits.get(audit_id)
+        return dict(value) if value is not None else None
 
 
 class PromptHub:
@@ -819,6 +827,15 @@ class Engine:
         event.seen_ids = sorted(set(event.seen_ids) | state.seen)
         kind = event.kind or ("followup" if state.turn else "startup")
         trace = f"discord-{trigger.id}"
+        raw_request = event.raw_payload or _event_data(event)
+        await self.phoenix.record(
+            trace,
+            "admission",
+            audit_id=trace,
+            raw_request=raw_request,
+            normalized_request=_event_data(event),
+            normalizer="normalize_event:v2",
+        )
         await self.phoenix.record(
             trace,
             "turn",
@@ -1383,6 +1400,21 @@ def create_app(  # noqa: C901, PLR0915
     async def events() -> list[dict[str, Any]]:
         return engine.phoenix.records
 
+    def replay_authorized(x_replay_token: str | None) -> None:
+        expected = os.getenv("WISEMAN_REPLAY_TOKEN", token)
+        if expected and not hmac.compare_digest(x_replay_token or "", expected):
+            raise HTTPException(401, "invalid replay token")
+
+    @app.get("/v1/phoenix/audits/{audit_id}")
+    async def audit(
+        audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        replay_authorized(x_replay_token)
+        value = engine.phoenix.audit(audit_id)
+        if value is None:
+            raise HTTPException(404, "Phoenix admission audit was not found")
+        return value
+
     @app.post("/v1/responses")
     async def responses(  # noqa: C901
         request: Request,
@@ -1568,9 +1600,7 @@ def create_app(  # noqa: C901, PLR0915
     async def replay(
         payload: dict[str, Any], x_replay_token: Annotated[str | None, Header()] = None
     ) -> dict[str, Any]:
-        expected = os.getenv("WISEMAN_REPLAY_TOKEN", token)
-        if expected and not hmac.compare_digest(x_replay_token or "", expected):
-            raise HTTPException(401, "invalid replay token")
+        replay_authorized(x_replay_token)
         try:
             event = normalize_event(payload)
         except (KeyError, TypeError, ValueError) as exc:
@@ -1579,6 +1609,28 @@ def create_app(  # noqa: C901, PLR0915
             await temporal.submit(event.model_dump(mode="json"))
             return {"status": "queued", "message_id": event.trigger.id}
         return await engine.handle(event)
+
+    @app.post("/v1/replay/phoenix/{audit_id}")
+    async def replay_audit(
+        audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
+    ) -> dict[str, Any]:
+        """Replay the exact raw request captured by the Phoenix admission audit."""
+        replay_authorized(x_replay_token)
+        artifact = engine.phoenix.audit(audit_id)
+        if artifact is None:
+            raise HTTPException(404, "Phoenix admission audit was not found")
+        payload = artifact.get("raw_request")
+        if not isinstance(payload, dict):
+            raise HTTPException(422, "Phoenix audit has no replayable raw request")
+        try:
+            event = normalize_event(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(422, "Phoenix audit contains an invalid Discord event") from exc
+        if temporal is not None:
+            await temporal.submit(event.model_dump(mode="json"))
+            return {"status": "queued", "message_id": event.trigger.id, "audit_id": audit_id}
+        result = await engine.handle(event)
+        return {**result, "audit_id": audit_id}
 
     app.add_api_route("/v1/discord/events", replay, methods=["POST"])
 
