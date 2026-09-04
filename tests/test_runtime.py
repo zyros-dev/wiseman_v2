@@ -912,17 +912,20 @@ async def test_closed_thread_rejects_new_work() -> None:
 async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
     engine = Engine(Phoenix(), FakeRunner())
     monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
-    result = cast("EngineResult", await run_turn(
-        {
-            "event": {
-                "trigger": message("activity", "hello", thread="t"),
-                "kind": "followup",
-                "parent_messages": [],
-                "thread_messages": [],
-            },
-            "state": {"seen": ["old"], "turn": 1},
-        }
-    ))
+    result = cast(
+        "EngineResult",
+        await run_turn(
+            {
+                "event": {
+                    "trigger": message("activity", "hello", thread="t"),
+                    "kind": "followup",
+                    "parent_messages": [],
+                    "thread_messages": [],
+                },
+                "state": {"seen": ["old"], "turn": 1},
+            }
+        ),
+    )
     assert result["state"]["turn"] == 2
 
 
@@ -1004,9 +1007,7 @@ async def test_temporal_final_transport_attempt_returns_failure(monkeypatch) -> 
     monkeypatch.setattr("app.temporal_runtime.activity.info", activity_info)
     result = cast(
         "EngineResult",
-        await run_turn(
-            {"event": {"trigger": message("final", "hello", thread="t")}, "state": {}}
-        ),
+        await run_turn({"event": {"trigger": message("final", "hello", thread="t")}, "state": {}}),
     )
     assert result["error"].startswith("Server disconnected")
 
