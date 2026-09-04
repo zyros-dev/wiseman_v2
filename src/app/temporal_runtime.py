@@ -113,13 +113,14 @@ class ThreadWorkflow:
     @workflow.run
     async def run(self, first: dict) -> JsonObject:
         self.pending.append(_object_map(first["event"]))
+        split_startup = workflow.patched("split-startup-activities")
         while True:
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             processed = self.state.get("processed", [])
             if message_id and message_id in _sequence(processed):
                 continue
-            if not self.state.get("codex_thread"):
+            if split_startup and not self.state.get("codex_thread"):
                 await workflow.execute_activity(
                     provision_workspace,
                     {"event": event, "state": self.state},
