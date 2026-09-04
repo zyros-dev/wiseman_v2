@@ -893,9 +893,13 @@ async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypat
 
     class Engine:
         async def handle(
-            self, event: Event, state_data: dict[str, object] | None = None
+            self,
+            event: Event,
+            state_data: dict[str, object] | None = None,
+            *,
+            retry_transport: bool = False,
         ) -> dict[str, object]:
-            del state_data
+            del state_data, retry_transport
             seen.append(event.trigger.content)
             return {"state": {"turn": 1}}
 

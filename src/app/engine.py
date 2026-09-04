@@ -41,7 +41,7 @@ from app.presentation import (
 from app.presentation import (
     startup_embed as _startup_embed,
 )
-from app.runner import HttpRunner, Runner, SteerableRunner
+from app.runner import HttpRunner, Runner, RunnerError, SteerableRunner
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -129,6 +129,7 @@ class Engine:
         self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
         self.working_reactions: dict[str, str] = {}
         self.active_turns: dict[str, ActiveTurn] = {}
+        self.deliveries: dict[str, object] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
@@ -138,6 +139,8 @@ class Engine:
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
         state_data: JsonObject | None = None,
+        *,
+        retry_transport: bool = False,
     ) -> EngineResult:
         key = event.trigger.thread_id or event.trigger.channel_id
         async with self.locks.setdefault(key, asyncio.Lock()):
@@ -148,7 +151,13 @@ class Engine:
                     delivery_channel = await self.lookup_channel(event)
                 elif live is not None:
                     delivery_channel = live.channel
-            return await self._handle(event, live, delivery_channel, state_data)
+            return await self._handle(
+                event,
+                live,
+                delivery_channel,
+                state_data,
+                retry_transport=retry_transport,
+            )
 
     async def _handle(
         self,
@@ -156,6 +165,8 @@ class Engine:
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
         state_data: JsonObject | None = None,
+        *,
+        retry_transport: bool = False,
     ) -> EngineResult:
         trigger = event.trigger
         key = trigger.thread_id or trigger.channel_id
@@ -215,7 +226,9 @@ class Engine:
                 prompt=prepared.prompt,
                 report=report,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            if retry_transport and _transport_error(exc):
+                raise
             return await self._failure(lifecycle, exc)
         finally:
             self.active_turns.pop(key, None)
@@ -308,15 +321,17 @@ class Engine:
         }
         prompt = _json(parts)
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
-        progress_message: object | None = None
-        if channel is not None and kind == "startup":
+        progress_message = self.deliveries.get(trigger.id)
+        if channel is not None and kind == "startup" and not self.progress[trigger.id]:
             await cast("EmbedMessageable", channel).send(embed=_startup_embed())
         phase = "codex starting" if kind == "startup" else "working"
         progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
-        self.progress[trigger.id].append(phase)
+        if not self.progress[trigger.id]:
+            self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
-        if channel is not None:
+        if progress_message is None and channel is not None:
             progress_message = await channel.send(_render_progress([progress]))
+            self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(
             trigger_id=trigger.id,
@@ -357,6 +372,7 @@ class Engine:
             "reaction",
             operations=[f"add:{failure_emoji}", f"remove:{lifecycle.processing_emoji}"],
         )
+        self.deliveries.pop(trigger.id, None)
         return {
             "trace": lifecycle.trace,
             "kind": lifecycle.kind,
@@ -393,6 +409,7 @@ class Engine:
             "reaction",
             operations=[f"add:{success_emoji}", f"remove:{lifecycle.processing_emoji}"],
         )
+        self.deliveries.pop(trigger.id, None)
         return {
             "trace": lifecycle.trace,
             "kind": lifecycle.kind,
@@ -467,3 +484,9 @@ def _strings(value: object) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {str(item) for item in value}
+
+
+def _transport_error(error: Exception) -> bool:
+    return isinstance(error, RunnerError) or any(
+        marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5")
+    )
