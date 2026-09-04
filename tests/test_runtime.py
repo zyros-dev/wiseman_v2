@@ -1368,6 +1368,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     workflow = ThreadWorkflow()
     await workflow.submit({"id": "queued"})
     activities: list[object] = []
+    child_states: list[dict[str, object]] = []
     turns = 0
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
@@ -1382,6 +1383,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
         del kwargs
         turns += 1
         activities.append(args[0])
+        child_states.append(cast("dict[str, object]", cast("dict[str, object]", args[1])["state"]))
         return {"state": {"turn": turns}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
@@ -1394,6 +1396,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
+    assert child_states == [{"turn": 1}]
     assert activities == [
         publish_progress,
         provision_workspace,

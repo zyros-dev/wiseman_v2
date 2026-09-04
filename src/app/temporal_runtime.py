@@ -136,11 +136,12 @@ class ThreadWorkflow:
             try:
                 if not self.state.get("codex_thread"):
                     self.state = await _setup(event, self.state)
-                await _activity(
+                progress = await _activity(
                     publish_progress,
                     {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."},
                     timedelta(seconds=30),
                 )
+                self.state = _object_map(progress.get("state", self.state))
                 if child_workflow:
                     self.result = await workflow.execute_child_workflow(
                         TurnWorkflow.run,
