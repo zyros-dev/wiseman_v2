@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Temporal boundary for one durable workflow per Discord thread."""
-
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -13,7 +12,10 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
-from app.engine import EngineResult  # noqa: TC001 - Temporal resolves the TypedDict annotation
+from app.engine import (  # noqa: TC001 - Temporal resolves the TypedDict annotation
+    Engine,
+    EngineResult,
+)
 from app.models import Event
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
@@ -33,6 +35,24 @@ if TYPE_CHECKING:
     from app.types import JsonObject
 
 
+@dataclass(slots=True)
+class _ActivityRuntime:
+    engine: Engine | None = None
+
+
+_activity_runtime = _ActivityRuntime()
+
+
+def configure_engine(engine: Engine) -> None:
+    _activity_runtime.engine = engine
+
+
+def _engine() -> Engine:
+    if _activity_runtime.engine is None:
+        raise RuntimeError("Temporal Activities are not configured")  # noqa: TRY003
+    return _activity_runtime.engine
+
+
 def _retryable_turn_result(result: Mapping[str, object]) -> bool:
     error = result.get("error")
     return isinstance(error, str) and (
@@ -44,14 +64,12 @@ def _retryable_turn_result(result: Mapping[str, object]) -> bool:
 
 @activity.defn(name="wiseman.turn")
 async def run_turn(payload: Mapping[str, object]) -> EngineResult:
-    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
-
     event = Event.model_validate(payload["event"])
     if _activity_attempt() > 1:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
     state = _json_object(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
-    result = await engine.handle(
+    result = await _engine().handle(
         event,
         state_data=state,
         retry_transport=_activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1),
@@ -63,24 +81,18 @@ async def run_turn(payload: Mapping[str, object]) -> EngineResult:
 
 @activity.defn(name="wiseman.workspace")
 async def provision_workspace(payload: Mapping[str, object]) -> dict[str, str]:
-    """Materialize the warm runner workspace as its own observable Activity."""
-    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
-
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    await cast("LifecycleRunner", engine.runner).acquire(event.trigger.author_id, workspace)
+    await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
     return {"workspace": workspace}
 
 
 @activity.defn(name="wiseman.codex_start")
 async def start_codex(payload: Mapping[str, object]) -> dict[str, object]:
-    """Create or resume the Codex SDK thread before the model turn Activity."""
-    from app.main import engine  # noqa: PLC0415 - entrypoint dependency
-
     event = Event.model_validate(payload["event"])
     state = _json_object(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await cast("LifecycleRunner", engine.runner).start(
+    thread = await cast("LifecycleRunner", _engine().runner).start(
         str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
     )
     state["codex_thread"] = thread
@@ -89,8 +101,6 @@ async def start_codex(payload: Mapping[str, object]) -> dict[str, object]:
 
 @workflow.defn(name="wiseman.thread")
 class ThreadWorkflow:
-    """Serialize turns and retain the Codex thread/context cursor durably."""
-
     def __init__(self) -> None:
         self.pending: list[dict[str, object]] = []
         self.state: dict[str, object] = {}
@@ -137,15 +147,11 @@ class ThreadWorkflow:
 
 
 class TemporalError(RuntimeError):
-    """Raised when a workflow is submitted before the client is connected."""
-
     def __init__(self) -> None:
         super().__init__("Temporal is not connected")
 
 
 class TemporalRuntime:
-    """Start the worker and route each event to its thread workflow."""
-
     def __init__(self, address: str, queue: str) -> None:
         self.address, self.queue = address, queue
         self.client: object | None = None

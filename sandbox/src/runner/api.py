@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Authenticated warm Codex runner with per-user shared and private workspaces."""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,18 +40,15 @@ class Turn(BaseModel):
     codex_thread_id: str | None = None
     user_id: str = Field(min_length=1)
     input: str = Field(max_length=100_000)
+    turn_number: int = Field(default=0, ge=0)
 
 
 class WorkspaceError(ValueError):
-    """Raised when a workspace path or link is unsafe."""
-
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
 
 
 class Workspace:
-    """Materialize an owner tree and reject symlink escapes before every run."""
-
     def __init__(self, root: str = "/workspaces") -> None:
         self.root = Path(root).resolve()
 
@@ -171,7 +166,6 @@ class Workspace:
         return path
 
     def cleanup(self, idle_seconds: int = 259200) -> int:
-        """Remove thread state after three idle days while retaining shared state."""
         removed = 0
         users = self.root / "users"
         for path in users.glob("*/threads/*"):
@@ -192,16 +186,15 @@ def _auth(got: str | None, expected: str) -> None:
 
 
 class CodexRunner:
-    """Use one SDK client and resumable Codex thread per warm runner."""
-
     def __init__(self) -> None:
         self.codex: dict[str, AsyncCodex] = {}
         self.threads: dict[str, object] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress: dict[str, str] = {}
+        self.progress_steps: dict[str, list[str]] = {}
         self.active_turns: dict[str, object] = {}
         self.turn_counts: dict[str, int] = {}
-        limit = max(1, int(os.getenv("WISEMAN_MAX_CONCURRENT_TURNS", "1")))
+        limit = max(1, int(os.getenv("WISEMAN_MAX_CONCURRENT_TURNS", "4")))
         self.capacity = asyncio.Semaphore(limit)
 
     async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
@@ -263,8 +256,16 @@ class CodexRunner:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
         async with self.capacity, lock:
             thread = await self._thread(turn, path, account)
-            self.progress[turn.thread_id] = "🤖 Codex turn started..."
+            self.progress_steps[turn.thread_id] = []
+            prefix = f"Gurt {turn.turn_number}: " if turn.turn_number else ""
+            self._set_progress(turn.thread_id, f"🤖 {prefix}Codex turn started...")
             return await self._run_thread(thread, turn, path)
+
+    def _set_progress(self, thread_id: str, message: str) -> None:
+        self.progress[thread_id] = message
+        steps = self.progress_steps.setdefault(thread_id, [])
+        if not steps or steps[-1] != message:
+            steps.append(message)
 
     async def _thread(self, turn: Turn, path: Path, account: str) -> object:
         # A client owns its cwd and Codex session environment, so it is private
@@ -306,12 +307,12 @@ class CodexRunner:
                 "model": os.getenv("WISEMAN_MODEL", "codex"),
                 "usage": result.usage.model_dump(mode="json") if result.usage else None,
             }
-        turn_number = self.turn_counts.get(turn.thread_id, 0) + 1
+        turn_number = turn.turn_number or self.turn_counts.get(turn.thread_id, 0) + 1
         self.turn_counts[turn.thread_id] = turn_number
+        self._set_progress(turn.thread_id, f"🤖 Gurt {turn_number}: Codex turn started...")
         items: list[object] = []
         usage: object = None
         completed: TurnCompletedNotification | None = None
-        self.progress[turn.thread_id] = f"🤖 Gurt {turn_number}: Codex turn started..."
         active_turn = await thread.turn(
             turn.input,
             approval_mode=ApprovalMode.deny_all,
@@ -322,7 +323,7 @@ class CodexRunner:
         try:
             async for event in active_turn.stream():
                 if message := _progress_message(event, turn_number):
-                    self.progress[turn.thread_id] = message
+                    self._set_progress(turn.thread_id, message)
                 payload = event.payload
                 if isinstance(payload, ItemCompletedNotification):
                     items.append(payload.item)
@@ -345,7 +346,6 @@ class CodexRunner:
         }
 
     async def steer(self, turn: Turn, path: Path, account: str = "") -> bool:
-        """Steer the active SDK turn without starting a queued second turn."""
         del path, account
         active = self.active_turns.get(turn.thread_id)
         if active is None or not hasattr(active, "steer"):
@@ -372,7 +372,6 @@ def _final_response(items: list[object]) -> str:
 
 
 def _progress_message(event: Notification, turn_number: int = 0) -> str | None:  # noqa: PLR0911
-    """Map SDK lifecycle notifications to compact user-visible phases."""
     if event.method == "turn/started":
         prefix = f"Gurt {turn_number}: " if turn_number else ""
         return f"🤖 {prefix}Codex turn started..."
@@ -483,7 +482,10 @@ def create_app() -> FastAPI:
         thread_id: str, authorization: Annotated[str | None, Header()] = None
     ) -> dict[str, str]:
         _auth(authorization, secret)
-        return {"message": codex.progress.get(thread_id, "🤖 Codex starting...")}
+        return {
+            "message": codex.progress.get(thread_id, "🤖 Codex starting..."),
+            "steps": codex.progress_steps.get(thread_id, []),
+        }
 
     return app
 

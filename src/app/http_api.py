@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""FastAPI application and provider/tool endpoints."""
-
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 import discord
 import httpx
@@ -22,22 +20,30 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from app.clients.client_interfaces import (
+        DiscordClient,
+        PhoenixClient,
+        ProviderClient,
+        RunnerClient,
+        TemporalClient,
+    )
+
 from app.admission import normalize_event
+from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
+from app.clients.real_clients import HttpProvider, RealDependencies, UnavailableTemporal
 from app.engine import Engine
 from app.gateway import Gateway
-from app.phoenix import Phoenix, PromptHub
-from app.phoenix import json_text as _json
-from app.phoenix import provider_values as _provider_values
+from app.phoenix import Phoenix, PromptHub, json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
     MAX_DISCORD_USERNAME_LENGTH,
     MIN_DISCORD_USERNAME_LENGTH,
     describe_images,
+    normalize_image_url,
 )
-from app.presentation import normalize_image_url as _normalize_image_url
 from app.runner import FakeRunner, HttpRunner
-from app.temporal_runtime import TemporalRuntime
+from app.temporal_runtime import TemporalRuntime, configure_engine
 
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
@@ -81,21 +87,27 @@ def _profile_values(payload: dict[str, object]) -> tuple[str | None, bytes | Non
 
 
 def create_app(  # noqa: C901, PLR0915
-    engine: Engine | None = None, token: str = "", discord_token: str = ""
+    engine: Engine | None = None,
+    token: str = "",
+    discord_token: str = "",
+    clients: ClientContainer | None = None,
 ) -> FastAPI:
-    """Create health, raw Discord replay, and Phoenix inspection endpoints."""
+    settings = clients.settings if clients is not None else ClientSettings.from_env()
+    token = token or settings.runner_token
+    discord_token = discord_token or settings.discord_token
     engine = engine or Engine(
         Phoenix(
-            os.getenv("PHOENIX_OTLP_ENDPOINT", ""),
-            os.getenv("PHOENIX_API_KEY", ""),
-            os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
+            settings.phoenix_endpoint,
+            settings.phoenix_key,
+            settings.phoenix_project,
             os.getenv("WISEMAN_AUDIT_DIR"),
         ),
-        HttpRunner(os.getenv("WISEMAN_RUNNER_URL", ""), token)
-        if os.getenv("WISEMAN_RUNNER_URL")
+        HttpRunner(settings.runner_url, settings.runner_token)
+        if settings.runner_url
         else FakeRunner(),
-        PromptHub(os.getenv("PHOENIX_PROMPT_HUB_URL", ""), os.getenv("PHOENIX_API_KEY", "")),
+        PromptHub(settings.prompt_hub_url, settings.phoenix_key),
     )
+    configure_engine(engine)
     app = FastAPI(title="wiseman-v2", docs_url=None, redoc_url=None)
     allowlist = {
         int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value
@@ -112,6 +124,22 @@ def create_app(  # noqa: C901, PLR0915
         else None
     )
     bot.temporal = temporal
+    if clients is None:
+        clients = build_clients(
+            ClientMode.REAL,
+            settings,
+            RealDependencies(
+                discord=cast("DiscordClient", bot),
+                temporal=cast("TemporalClient", temporal or UnavailableTemporal()),
+                phoenix=cast("PhoenixClient", engine.phoenix),
+                runner=cast("RunnerClient", engine.runner),
+                provider=cast(
+                    "ProviderClient", HttpProvider(settings.provider_url, settings.provider_token)
+                ),
+            ),
+        )
+    app_clients = clients
+    app.state.clients = app_clients
     task: asyncio.Task[None] | None = None
 
     @app.on_event("startup")
@@ -175,7 +203,7 @@ def create_app(  # noqa: C901, PLR0915
         key = os.getenv("OPENROUTER_API_KEY", "")
         if not key:
             raise HTTPException(503, "OpenRouter is not configured")
-        trace = f"provider-{hashlib.sha256(_json(payload).encode()).hexdigest()[:16]}"
+        trace = f"provider-{hashlib.sha256(json_text(payload).encode()).hexdigest()[:16]}"
 
         async def stream() -> AsyncIterator[bytes]:
             usage: object = None
@@ -216,7 +244,7 @@ def create_app(  # noqa: C901, PLR0915
                                     try:
                                         body = json.loads(line[5:].strip())
                                         if isinstance(body, dict):
-                                            usage, cost, served_model = _provider_values(
+                                            usage, cost, served_model = provider_values(
                                                 body, usage, cost, served_model
                                             )
                                     except ValueError:
@@ -247,7 +275,7 @@ def create_app(  # noqa: C901, PLR0915
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid tool token")
-        url = _normalize_image_url(payload.get("url"))
+        url = normalize_image_url(payload.get("url"))
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
         attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
@@ -347,7 +375,6 @@ def create_app(  # noqa: C901, PLR0915
     async def replay_audit(
         audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
     ) -> dict[str, object]:
-        """Replay the exact raw request captured by the Phoenix admission audit."""
         replay_authorized(x_replay_token)
         artifact = engine.phoenix.audit(audit_id)
         if artifact is None:

@@ -872,7 +872,7 @@ async def test_closed_thread_rejects_new_work() -> None:
 @pytest.mark.asyncio
 async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
     engine = Engine(Phoenix(), FakeRunner())
-    monkeypatch.setattr("app.main.engine", engine)
+    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
     result = await run_turn(
         {
             "event": {
@@ -906,7 +906,7 @@ async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypat
     class ActivityInfo:
         attempt = 2
 
-    monkeypatch.setattr("app.main.engine", Engine())
+    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", Engine())
 
     def activity_info() -> ActivityInfo:
         return ActivityInfo()
@@ -1323,7 +1323,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
     class Engine:
         runner = Runner()
 
-    monkeypatch.setattr("app.main.engine", Engine())
+    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", Engine())
     payload = {
         "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
     }

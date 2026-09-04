@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Normalize Discord requests and build bounded model context."""
-
 from __future__ import annotations
 
 import hashlib
@@ -23,8 +21,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ContextConfig:
-    """Bound the context window at the application configuration boundary."""
-
     max_ancestors: int = 12
 
     def __post_init__(self) -> None:
@@ -41,7 +37,6 @@ class ContextConfig:
 
 
 def _message(value: Mapping[str, object], thread_id: str | None = None) -> Message:
-    """Normalize either a canonical message or Discord REST JSON."""
     if "author_id" in value:
         return Message.model_validate(dict(value))
     author = _mapping(value.get("author"))
@@ -78,7 +73,6 @@ def _message(value: Mapping[str, object], thread_id: str | None = None) -> Messa
 
 
 def normalize_event(value: object) -> Event:
-    """Use one admission normalizer for raw Discord fixtures and canonical events."""
     raw = _mapping(value)
     if isinstance(raw.get("d"), dict) and raw.get("t") == "MESSAGE_CREATE":
         value = {
@@ -114,7 +108,6 @@ def event_data(event: Event) -> dict[str, object]:
 
 
 def render_grammar(name: str, source: str, raw: object, **values: object) -> dict[str, object]:
-    """Produce the inspectable raw, normalized, source, and rendered grammar layers."""
     normalized = {"messages": values.get("messages", []), "mode": values.get("mode", "")}
     try:
         rendered = (
@@ -142,7 +135,6 @@ def render_grammar(name: str, source: str, raw: object, **values: object) -> dic
 
 
 def context(event: Event, config: ContextConfig | None = None) -> dict[str, object]:
-    """Select startup history or only unseen follow-up history, capped at 100 messages."""
     config = config or ContextConfig.from_env()
     trigger = event.trigger
     startup = event.kind in (None, "startup")
@@ -191,7 +183,6 @@ IMAGE_REFERENCE_WORDS = re.compile(
 def image_tool_instruction(
     trigger: Mapping[str, object], reply_ancestors: Sequence[Mapping[str, object]] | None = None
 ) -> str:
-    """Select only the current or explicitly referenced Discord image."""
     messages = [trigger]
     if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(
         str(trigger.get("content") or "")

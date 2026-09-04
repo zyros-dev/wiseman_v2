@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Turn lifecycle coordination and reaction state."""
-
 from __future__ import annotations
 
 import asyncio
@@ -17,31 +15,18 @@ from prometheus_client import Counter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-from app.admission import ContextConfig, context
-from app.admission import event_data as _event_data
-from app.admission import image_tool_instruction as _image_tool_instruction
-from app.admission import render_grammar as _grammar
+from app.admission import ContextConfig, context, event_data, image_tool_instruction, render_grammar
 from app.models import ActiveTurn, EmbedMessageable, Event, Message, Messageable, State
-from app.phoenix import Phoenix, PromptHub
-from app.phoenix import json_text as _json
-from app.phoenix import route_info as _route_info
+from app.phoenix import Phoenix, PromptHub, json_text, route_info
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_REACTION_LENGTH,
+    deliver_content,
+    edit_delivery,
+    render_progress,
+    startup_embed,
 )
-from app.presentation import (
-    deliver_content as _deliver_content,
-)
-from app.presentation import (
-    edit_delivery as _edit_delivery,
-)
-from app.presentation import (
-    render_progress as _render_progress,
-)
-from app.presentation import (
-    startup_embed as _startup_embed,
-)
-from app.runner import HttpRunner, Runner, RunnerError, SteerableRunner
+from app.runner import TURN_NUMBER, HttpRunner, Runner, RunnerError, SteerableRunner
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -110,8 +95,6 @@ class EngineResult(TypedDict, total=False):
 
 
 class Engine:
-    """One turn state machine; production adapters can place each method in a Temporal Activity."""
-
     def __init__(
         self,
         phoenix: Phoenix,
@@ -213,9 +196,9 @@ class Engine:
             await self.phoenix.record(trace, "progress", phase=message)
             if lifecycle.progress_message is not None:
                 try:
-                    await _edit_delivery(
+                    await edit_delivery(
                         lifecycle.progress_message,
-                        _render_progress(self.progress[trigger.id], state.turn + 1),
+                        render_progress(self.progress[trigger.id], state.turn + 1),
                     )
                 except discord.DiscordException:
                     LOGGER.warning("Could not update progress message for %s", trigger.id)
@@ -261,13 +244,13 @@ class Engine:
         kind = request.kind
         trace = request.trace
         trigger = event.trigger
-        raw = event.raw_payload or _event_data(event)
+        raw = event.raw_payload or event_data(event)
         await self.phoenix.record(
             trace,
             "admission",
             audit_id=trace,
             raw_request=raw,
-            normalized_request=_event_data(event),
+            normalized_request=event_data(event),
             normalizer="normalize_event:v2",
         )
         await self.phoenix.record(
@@ -276,7 +259,7 @@ class Engine:
             thread_id=trigger.thread_id,
             message_id=trigger.id,
             kind=kind,
-            route=_route_info(),
+            route=route_info(),
             input=raw,
         )
         processing_emoji = self.reaction_emojis["processing"]
@@ -289,13 +272,13 @@ class Engine:
         await self.phoenix.record(
             trace,
             "context",
-            raw=_json(raw),
+            raw=json_text(raw),
             normalized=current,
             selected_ids=current["selected_ids"],
         )
         grammar_name = "startup-context" if kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
-        grammar = _grammar(
+        grammar = render_grammar(
             grammar_name,
             source,
             raw,
@@ -312,7 +295,7 @@ class Engine:
                 part
                 for part in (
                     trigger.content,
-                    _image_tool_instruction(
+                    image_tool_instruction(
                         trigger.model_dump(mode="json"),
                         cast("list[dict[str, object]]", current["reply_ancestors"]),
                     ),
@@ -320,18 +303,18 @@ class Engine:
                 if part
             ),
         }
-        prompt = _json(parts)
+        prompt = json_text(parts)
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
         progress_message = self.deliveries.get(trigger.id)
         if channel is not None and kind == "startup" and not self.progress[trigger.id]:
-            await cast("EmbedMessageable", channel).send(embed=_startup_embed())
+            await cast("EmbedMessageable", channel).send(embed=startup_embed())
         phase = "codex starting" if kind == "startup" else "working"
         progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
             self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if progress_message is None and channel is not None:
-            progress_message = await channel.send(_render_progress([progress], state.turn + 1))
+            progress_message = await channel.send(render_progress([progress], state.turn + 1))
             self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(
@@ -350,9 +333,13 @@ class Engine:
     ) -> tuple[str, str, dict[str, object]]:
         workspace = trigger.thread_id or trigger.channel_id
         if isinstance(self.runner, HttpRunner):
-            return await self.runner.run(
-                state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
-            )
+            token = TURN_NUMBER.set(state.turn + 1)
+            try:
+                return await self.runner.run(
+                    state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
+                )
+            finally:
+                TURN_NUMBER.reset(token)
         return await self.runner.run(state.codex_thread or "", prompt, trigger.author_id, workspace)
 
     async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
@@ -364,7 +351,7 @@ class Engine:
             if lifecycle.live is not None:
                 await lifecycle.live.add_reaction(failure_emoji)
             if lifecycle.channel is not None:
-                await _deliver_content(
+                await deliver_content(
                     lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}"
                 )
             await self._remove_working_reaction(trigger.id, lifecycle.live)
@@ -399,7 +386,7 @@ class Engine:
         )
         await self.phoenix.record(lifecycle.trace, "delivery", output=result.output)
         if lifecycle.channel is not None:
-            await _deliver_content(lifecycle.progress_message, lifecycle.channel, result.output)
+            await deliver_content(lifecycle.progress_message, lifecycle.channel, result.output)
         success_emoji = self.reaction_emojis["success"]
         if self._react(trigger.id, success_emoji):
             if lifecycle.live is not None:
@@ -424,7 +411,6 @@ class Engine:
     async def steer_if_active(
         self, thread_id: str, message_id: str, prompt: str, user: str
     ) -> bool:
-        """Route a reply to the visible working message into the live Codex turn."""
         active = self.active_turns.get(thread_id)
         if active is None or active.delivery_id != message_id:
             return False
@@ -451,7 +437,6 @@ class Engine:
         return False
 
     def set_reaction_emojis(self, values: dict[str, str]) -> dict[str, str]:
-        """Set future lifecycle reactions; in-flight turns retain their original emoji."""
         updated = dict(self.reaction_emojis)
         for phase in DEFAULT_REACTION_EMOJIS:
             value = values.get(phase)

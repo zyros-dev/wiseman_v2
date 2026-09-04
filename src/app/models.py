@@ -1,19 +1,13 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Shared data models and small protocol boundaries."""
-
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.types import JsonObject  # noqa: TC001 - Pydantic resolves recursive aliases at runtime
+from app.types import JsonObject
 
 
 class Message(BaseModel):
-    """The bounded message shape shared by Discord and replay admission."""
-
     model_config = ConfigDict(extra="ignore")
     id: str
     author_id: str
@@ -29,8 +23,6 @@ class Message(BaseModel):
 
 
 class Event(BaseModel):
-    """Raw Discord-shaped event accepted by the HTTP replay harness."""
-
     model_config = ConfigDict(extra="ignore")
     trigger: Message
     kind: str | None = None
@@ -42,8 +34,6 @@ class Event(BaseModel):
 
 
 class Messageable(Protocol):
-    """Minimal Discord channel surface needed for turn delivery."""
-
     async def send(self, content: str = "") -> object: ...
 
 
@@ -53,8 +43,6 @@ class EmbedMessageable(Protocol):
 
 @dataclass
 class State:
-    """The small durable state that Temporal would persist between activities."""
-
     codex_thread: str | None = None
     seen: set[str] = field(default_factory=set)
     processed: set[str] = field(default_factory=set)
@@ -65,7 +53,5 @@ class State:
 
 @dataclass
 class ActiveTurn:
-    """The Discord delivery that can receive steering while Codex is running."""
-
     trigger_id: str
     delivery_id: str | None = None
