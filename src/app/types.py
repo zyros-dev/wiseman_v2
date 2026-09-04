@@ -2,9 +2,9 @@
 
 from typing import TypedDict
 
-type JsonScalar = str | int | float | bool | None
-type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
-type JsonObject = dict[str, JsonValue]
+JsonScalar = str | int | float | bool | None
+JsonValue = JsonScalar | list | dict
+JsonObject = dict[str, JsonValue]
 
 
 type StateData = dict[str, object]
