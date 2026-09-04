@@ -1698,6 +1698,8 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     await bot.on_message(cast("discord.Message", startup))
     assert parent.thread is not None
     followup = Message("follow", parent.thread, "next")
+    followup.author.bot = True
+    followup.author.id = 8
     await bot.on_message(cast("discord.Message", followup))
     assert engine.states["2"].turn == 2
     assert startup.reactions == ["✅"]
