@@ -973,6 +973,33 @@ def test_temporal_retries_disconnected_runner_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_temporal_final_transport_attempt_returns_failure(monkeypatch) -> None:
+    class Engine:
+        async def handle(
+            self,
+            event: Event,
+            state_data: dict[str, object] | None = None,
+            *,
+            retry_transport: bool = False,
+        ) -> dict[str, object]:
+            del event, state_data, retry_transport
+            return {"error": "Server disconnected without sending a response."}
+
+    class ActivityInfo:
+        attempt = 2
+
+    def activity_info() -> ActivityInfo:
+        return ActivityInfo()
+
+    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", Engine())
+    monkeypatch.setattr("app.temporal_runtime.activity.info", activity_info)
+    result = await run_turn(
+        {"event": {"trigger": message("final", "hello", thread="t")}, "state": {}}
+    )
+    assert result["error"].startswith("Server disconnected")
+
+
+@pytest.mark.asyncio
 async def test_temporal_submit_without_client_is_explicit() -> None:
     with pytest.raises(RuntimeError):
         await TemporalRuntime("temporal", "wiseman").submit(
