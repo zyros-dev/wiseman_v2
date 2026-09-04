@@ -171,7 +171,7 @@ class Gateway(discord.Client):
             threads = getattr(result, "threads", result)
             iterable = cast("list[object]", threads) if isinstance(threads, (list, tuple)) else []
             for thread in iterable:
-                if not _managed_thread(thread):
+                if not _managed_thread(thread, self.user):
                     continue
                 thread_id = str(getattr(thread, "id", ""))
                 if not thread_id:
@@ -372,8 +372,10 @@ def mention_ids(message: object) -> list[str]:
     )
 
 
-def _managed_thread(thread: object) -> bool:
-    return str(getattr(thread, "name", "")).startswith(("Gurt ", "wiseman"))
+def _managed_thread(thread: object, user: object | None) -> bool:
+    return bool(getattr(user, "id", None)) and str(getattr(thread, "owner_id", "")) == str(
+        getattr(user, "id", "")
+    )
 
 
 def _last_message_time(thread: object) -> float:
