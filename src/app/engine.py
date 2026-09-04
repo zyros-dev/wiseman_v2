@@ -6,7 +6,7 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 import discord
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 from app.admission import ContextConfig, context, event_data, image_tool_instruction, render_grammar
 from app.models import ActiveTurn, Event, Message, Messageable, State
-from app.phoenix import Phoenix, PromptHub, json_text, route_info
+from app.phoenix import json_text, route_info
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_REACTION_LENGTH,
@@ -76,26 +76,28 @@ class _Success:
     billing: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class EngineConfig:
+    phoenix: PhoenixClient
+    runner: Runner
+    prompts: PromptClient
+    context: ContextConfig = field(default_factory=ContextConfig.from_env)
+
+
 class Engine:
     def __init__(
         self,
-        phoenix: Phoenix | None = None,
-        runner: Runner | None = None,
-        prompts: PromptHub | None = None,
-        context_config: ContextConfig | None = None,
+        config: EngineConfig | None = None,
+        *,
         clients: ClientContainer | None = None,
     ) -> None:
-        if clients is None and (phoenix is None or runner is None):
-            raise ValueError("phoenix and runner are required without clients")  # noqa: TRY003
-        self.phoenix: PhoenixClient = (
-            clients.phoenix if clients is not None else cast("PhoenixClient", phoenix)
-        )
-        self.runner: Runner = clients.runner if clients is not None else cast("Runner", runner)
-        self.prompts: PromptClient = (
-            clients.prompts if clients is not None else prompts or PromptHub()
-        )
-        self.clients = clients
-        self.context_config = context_config or ContextConfig.from_env()
+        if clients is not None:
+            if config is not None:
+                raise ValueError("choose config or clients")  # noqa: TRY003
+            config = EngineConfig(clients.phoenix, clients.runner, clients.prompts)
+        if config is None:
+            raise ValueError("engine config is required")  # noqa: TRY003
+        self.config = config
         self.states: dict[str, State] = defaultdict(State)
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
@@ -109,10 +111,9 @@ class Engine:
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
     def bind_clients(self, clients: ClientContainer) -> None:
-        self.clients = clients
-        self.phoenix = clients.phoenix
-        self.runner = clients.runner
-        self.prompts = clients.prompts
+        self.config = EngineConfig(
+            clients.phoenix, clients.runner, clients.prompts, self.config.context
+        )
 
     async def handle(
         self,
@@ -190,7 +191,7 @@ class Engine:
             if self.progress[trigger.id] and self.progress[trigger.id][-1] == message:
                 return
             self.progress[trigger.id].append(message)
-            await self.phoenix.record(trace, "progress", phase=message)
+            await self.config.phoenix.record(trace, "progress", phase=message)
             if lifecycle.progress_message is not None:
                 try:
                     await edit_delivery(
@@ -263,7 +264,7 @@ class Engine:
         r = request
         trigger = r.event.trigger
         raw = r.event.raw_payload or event_data(r.event)
-        await self.phoenix.record(
+        await self.config.phoenix.record(
             r.trace,
             "admission",
             audit_id=r.trace,
@@ -271,7 +272,7 @@ class Engine:
             normalized_request=event_data(r.event),
             normalizer="normalize_event:v2",
         )
-        await self.phoenix.record(
+        await self.config.phoenix.record(
             r.trace,
             "turn",
             thread_id=trigger.thread_id,
@@ -284,10 +285,12 @@ class Engine:
         self.working_reactions[trigger.id] = processing_emoji
         self._react(trigger.id, processing_emoji)
         await self._ensure_live_reaction(r.live, processing_emoji)
-        await self.phoenix.record(r.trace, "reaction", operations=[f"add:{processing_emoji}"])
-        current = context(r.event, self.context_config)
+        await self.config.phoenix.record(
+            r.trace, "reaction", operations=[f"add:{processing_emoji}"]
+        )
+        current = context(r.event, self.config.context)
         r.state.seen.update(cast("list[str]", current["selected_ids"]))
-        await self.phoenix.record(
+        await self.config.phoenix.record(
             r.trace,
             "context",
             raw=json_text(raw),
@@ -295,7 +298,7 @@ class Engine:
             selected_ids=current["selected_ids"],
         )
         grammar_name = "startup-context" if r.kind == "startup" else "followup-context"
-        source = await self.prompts.source(grammar_name)
+        source = await self.config.prompts.source(grammar_name)
         grammar = render_grammar(
             grammar_name,
             source,
@@ -303,10 +306,10 @@ class Engine:
             mode=r.kind,
             messages=cast("list[dict[str, object]]", current["messages"]),
         )
-        await self.phoenix.record(r.trace, "grammar", **grammar)
+        await self.config.phoenix.record(r.trace, "grammar", **grammar)
         parts = {
-            "soul": await self.prompts.source("wiseman-soul"),
-            "runtime": await self.prompts.source("wiseman-runtime"),
+            "soul": await self.config.prompts.source("wiseman-soul"),
+            "runtime": await self.config.prompts.source("wiseman-runtime"),
             "memories": os.getenv("WISEMAN_MEMORIES", ""),
             "context": cast("str", grammar["rendered"]),
             "user": "\n\n".join(
@@ -322,7 +325,7 @@ class Engine:
             ),
         }
         prompt = json_text(parts)
-        await self.phoenix.record(r.trace, "prompt", parts=parts, final_input=prompt)
+        await self.config.phoenix.record(r.trace, "prompt", parts=parts, final_input=prompt)
         progress_message = self.deliveries.get(trigger.id)
         if r.channel is not None and r.kind == "startup" and not self.progress[trigger.id]:
             with suppress(discord.DiscordException):
@@ -333,7 +336,7 @@ class Engine:
         progress = "🤖 Codex starting..." if r.kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
             self.progress[trigger.id].append(phase)
-        await self.phoenix.record(r.trace, "progress", phase=phase)
+        await self.config.phoenix.record(r.trace, "progress", phase=phase)
         if progress_message is None and r.channel is not None:
             with suppress(discord.DiscordException):
                 progress_message = await r.channel.send(render_progress([progress], r.state.turn + 1))  # fmt: skip  # noqa: E501
@@ -353,7 +356,7 @@ class Engine:
         workspace = trigger.thread_id or trigger.channel_id
         token = TURN_NUMBER.set(state.turn + 1)
         try:
-            return await self.runner.run(
+            return await self.config.runner.run(
                 state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
             )
         finally:
@@ -362,7 +365,7 @@ class Engine:
     async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
         trigger = lifecycle.trigger
         TURN_FAILURES.inc()
-        await self.phoenix.record(lifecycle.trace, "failure", error=str(error))
+        await self.config.phoenix.record(lifecycle.trace, "failure", error=str(error))
         failure_emoji = self.reaction_emojis["failure"]
         if self._react(trigger.id, failure_emoji):
             await self._ensure_live_reaction(lifecycle.live, failure_emoji)
@@ -371,7 +374,7 @@ class Engine:
                     lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}"
                 )
             await self._remove_working_reaction(trigger.id, lifecycle.live)
-        await self.phoenix.record(
+        await self.config.phoenix.record(
             lifecycle.trace,
             "reaction",
             operations=[f"add:{failure_emoji}", f"remove:{lifecycle.processing_emoji}"],
@@ -391,8 +394,8 @@ class Engine:
         state = lifecycle.state
         state.turn += 1
         self.progress[trigger.id].append("✍️ Writing response...")
-        await self.phoenix.record(lifecycle.trace, "progress", phase="finalizing")
-        await self.phoenix.record(
+        await self.config.phoenix.record(lifecycle.trace, "progress", phase="finalizing")
+        await self.config.phoenix.record(
             lifecycle.trace,
             "codex",
             input=result.prompt,
@@ -400,14 +403,14 @@ class Engine:
             output=result.output,
             **result.billing,
         )
-        await self.phoenix.record(lifecycle.trace, "delivery", output=result.output)
+        await self.config.phoenix.record(lifecycle.trace, "delivery", output=result.output)
         if lifecycle.channel is not None:
             await deliver_content(lifecycle.progress_message, lifecycle.channel, result.output)
         success_emoji = self.reaction_emojis["success"]
         if self._react(trigger.id, success_emoji):
             await self._ensure_live_reaction(lifecycle.live, success_emoji)
             await self._remove_working_reaction(trigger.id, lifecycle.live)
-        await self.phoenix.record(
+        await self.config.phoenix.record(
             lifecycle.trace,
             "reaction",
             operations=[f"add:{success_emoji}", f"remove:{lifecycle.processing_emoji}"],
@@ -429,14 +432,14 @@ class Engine:
         active = self.active_turns.get(thread_id)
         if active is None or active.delivery_id != message_id:
             return False
-        steer = getattr(self.runner, "steer", None)
+        steer = getattr(self.config.runner, "steer", None)
         if not callable(steer):
             return False
         accepted = await cast("Callable[..., Awaitable[bool]]", steer)(
             "", prompt, user, workspace=thread_id
         )
         if accepted:
-            await self.phoenix.record(
+            await self.config.phoenix.record(
                 f"discord-{message_id}",
                 "steer",
                 thread_id=thread_id,

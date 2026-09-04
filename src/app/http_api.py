@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 from app.admission import normalize_event
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
 from app.clients.real_clients import RealDependencies, UnavailableTemporal, real_services
-from app.engine import Engine
+from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
 from app.phoenix import json_text, provider_values
 from app.presentation import (
@@ -101,7 +101,7 @@ def create_app(  # noqa: C901, PLR0915
             engine = Engine(clients=clients)
         else:
             assert services is not None
-            engine = Engine(phoenix=services[0], runner=services[2], prompts=services[1])
+            engine = Engine(EngineConfig(services[0], services[2], services[1]))
     configure_engine(engine)
     app = FastAPI(title="wiseman-v2", docs_url=None, redoc_url=None)
     allowlist = {
@@ -128,9 +128,9 @@ def create_app(  # noqa: C901, PLR0915
             RealDependencies(
                 discord=cast("DiscordClient", bot),
                 temporal=cast("TemporalClient", temporal or UnavailableTemporal()),
-                phoenix=cast("PhoenixClient", engine.phoenix),
-                prompts=cast("PromptClient", engine.prompts),
-                runner=cast("RunnerClient", engine.runner),
+                phoenix=cast("PhoenixClient", engine.config.phoenix),
+                prompts=cast("PromptClient", engine.config.prompts),
+                runner=cast("RunnerClient", engine.config.runner),
                 provider=cast("ProviderClient", services[3]),
             ),
         )
@@ -170,7 +170,7 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.get("/v1/phoenix/events")
     async def events() -> list[dict[str, object]]:
-        return engine.phoenix.records
+        return engine.config.phoenix.records
 
     def replay_authorized(x_replay_token: str | None) -> None:
         expected = os.getenv("WISEMAN_REPLAY_TOKEN", token)
@@ -182,7 +182,7 @@ def create_app(  # noqa: C901, PLR0915
         audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
     ) -> dict[str, object]:
         replay_authorized(x_replay_token)
-        value = engine.phoenix.audit(audit_id)
+        value = engine.config.phoenix.audit(audit_id)
         if value is None:
             raise HTTPException(404, "Phoenix admission audit was not found")
         return value
@@ -251,7 +251,7 @@ def create_app(  # noqa: C901, PLR0915
                         if stream_started or attempt + 1 >= UPSTREAM_RETRY_ATTEMPTS:
                             raise
                         await asyncio.sleep(0.5 * (attempt + 1))
-            await engine.phoenix.record(
+            await engine.config.phoenix.record(
                 trace,
                 "provider",
                 request=payload,
@@ -283,7 +283,7 @@ def create_app(  # noqa: C901, PLR0915
             payload.get("thread_id")
             or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}"
         )
-        await engine.phoenix.record(trace, "vision_tool", **result)
+        await engine.config.phoenix.record(trace, "vision_tool", **result)
         return result
 
     def tool_authorized(authorization: str | None) -> None:
@@ -372,7 +372,7 @@ def create_app(  # noqa: C901, PLR0915
         audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
     ) -> dict[str, object]:
         replay_authorized(x_replay_token)
-        artifact = engine.phoenix.audit(audit_id)
+        artifact = engine.config.phoenix.audit(audit_id)
         if artifact is None:
             raise HTTPException(404, "Phoenix admission audit was not found")
         payload = artifact.get("raw_request")

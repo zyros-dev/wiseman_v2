@@ -15,8 +15,9 @@ from app.clients.mock_clients import (
     MockRunner,
     MockState,
 )
-from app.engine import Engine
+from app.engine import Engine, EngineConfig
 from app.models import Event, Message
+from app.phoenix import PromptHub
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -249,7 +250,13 @@ class EngineLifecycleMachine(RuleBasedStateMachine):
         )
 
     def _new_engine(self) -> Engine:
-        engine = Engine(cast("Phoenix", MockPhoenix(self.state)), cast("Runner", self.runner))
+        engine = Engine(
+            EngineConfig(
+                cast("Phoenix", MockPhoenix(self.state)),
+                cast("Runner", self.runner),
+                PromptHub(),
+            )
+        )
         engine.reaction_user = cast("discord.User", object())
         return engine
 

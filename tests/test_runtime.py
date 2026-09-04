@@ -32,7 +32,7 @@ from temporalio.converter import JSONPlainPayloadConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.admission import ContextConfig, context, image_tool_instruction, normalize_event
-from app.engine import Engine
+from app.engine import Engine, EngineConfig
 from app.gateway import Gateway, _history, mention_ids
 from app.http_api import create_app
 from app.models import Event, State
@@ -46,7 +46,7 @@ from app.presentation import (
     split_discord_content,
     thread_name,
 )
-from app.runner import FakeRunner, HttpRunner
+from app.runner import FakeRunner, HttpRunner, Runner
 from app.temporal_runtime import (
     TRANSPORT_RETRY_POLICY,
     TemporalRuntime,
@@ -100,6 +100,10 @@ def discord_message(
     }
 
 
+def configured_engine(phoenix: Phoenix | None = None, runner: Runner | None = None) -> Engine:
+    return Engine(EngineConfig(phoenix or Phoenix(), runner or FakeRunner(), PromptHub()))
+
+
 def test_temporal_payload_round_trip_preserves_nested_event() -> None:
     payload = {
         "event": {"trigger": {"id": "message", "channel_id": "channel"}},
@@ -113,7 +117,7 @@ def test_temporal_payload_round_trip_preserves_nested_event() -> None:
 
 
 def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     app = create_app(engine)
     client = TestClient(app)
     headers = {"x-replay-token": ""}
@@ -142,7 +146,7 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert {"123", "124", "2"}.issubset(second.json()["selected_ids"])
     context = cast(
         "dict[str, object]",
-        [item for item in engine.phoenix.records if item["node"] == "context"][-1],
+        [item for item in engine.config.phoenix.records if item["node"] == "context"][-1],
     )
     normalized = cast("dict[str, object]", context["normalized"])
     ancestors = cast("list[dict[str, object]]", normalized["reply_ancestors"])
@@ -155,24 +159,24 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert duplicate.json()["state"]["turn"] == 2
     grammar = cast(
         "dict[str, object]",
-        next(item for item in engine.phoenix.records if item["node"] == "grammar"),
+        next(item for item in engine.config.phoenix.records if item["node"] == "grammar"),
     )
     assert {"source", "raw", "normalized", "rendered", "version"} <= grammar.keys()
     assert cast("dict[str, object]", grammar["parsed"])["schema"] == "wiseman.context.grammar.v2"
-    codex = [item for item in engine.phoenix.records if item["node"] == "codex"]
+    codex = [item for item in engine.config.phoenix.records if item["node"] == "codex"]
     assert codex[0]["model"] == "local-fake"
     assert "old-" in str(codex[0]["input"])
     assert "new-parent" in str(codex[1]["input"])
     assert "old-" not in str(codex[1]["input"])
     first_prompt = json.loads(str(codex[0]["input"]))
     assert json.loads(first_prompt["context"])["messages"]
-    assert not cast("Phoenix", engine.phoenix).roots
-    assert len(engine.phoenix.records) >= 8
+    assert not cast("Phoenix", engine.config.phoenix).roots
+    assert len(engine.config.phoenix.records) >= 8
 
 
 @pytest.mark.asyncio
 async def test_image_turn_makes_agent_tool_call_explicit() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     event = normalize_event(
         {
             "trigger": {
@@ -203,7 +207,7 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
         }
     )
     await engine.handle(event)
-    codex = next(item for item in engine.phoenix.records if item["node"] == "codex")
+    codex = next(item for item in engine.config.phoenix.records if item["node"] == "codex")
     prompt = json.loads(str(codex["input"]))
     assert "/usr/local/bin/wiseman-discord describe-image" in str(codex["input"])
     assert "https://cdn.example/photo.png" in str(codex["input"])
@@ -352,7 +356,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
 
 
 def test_reaction_state_is_idempotent() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     assert engine._react("message", "👀")  # noqa: SLF001
     assert not engine._react("message", "👀")  # noqa: SLF001
     assert engine.reactions["message"] == ["👀"]
@@ -409,7 +413,7 @@ async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> Non
         return {"text": "description", "attachments": ["image"], "question": question or None}
 
     monkeypatch.setattr("app.http_api.describe_images", describe)
-    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+    response = TestClient(create_app(configured_engine())).post(
         "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
     )
     assert response.status_code == 200
@@ -417,7 +421,7 @@ async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> Non
 
 
 def test_reaction_configuration_changes_future_turns() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     assert engine.set_reaction_emojis({"processing": "🔵", "success": "🟩", "failure": "🟥"}) == {
         "processing": "🔵",
         "success": "🟩",
@@ -448,7 +452,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
     monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
     monkeypatch.setattr("app.gateway.discord.Thread", Thread)
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     app = create_app(engine, token="secret")
     app.state.gateway._connection.user = User()  # noqa: SLF001
 
@@ -503,7 +507,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
 
 
 def test_discord_tools_require_authentication() -> None:
-    client = TestClient(create_app(Engine(Phoenix(), FakeRunner()), token="secret"))
+    client = TestClient(create_app(configured_engine(), token="secret"))
     assert client.post("/v1/tools/set-reactions", json={"success": "🎉"}).status_code == 401
     assert client.post("/v1/tools/send-file", json={}).status_code == 401
 
@@ -711,7 +715,7 @@ async def test_reply_to_active_delivery_is_steering_not_a_second_turn() -> None:
             steers.append(prompt)
             return True
 
-    engine = Engine(Phoenix(), Runner())
+    engine = configured_engine(runner=Runner())
     task = asyncio.create_task(
         engine.handle(
             normalize_event(discord_message("trigger", "hello", thread="t")),
@@ -784,11 +788,11 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
             del thread, prompt, user, workspace, progress
             raise RuntimeError("runner down")  # noqa: TRY003
 
-    engine = Engine(Phoenix(), FailingRunner())
+    engine = configured_engine(runner=FailingRunner())
     result = await engine.handle(normalize_event(discord_message("failure", "hello", thread="t")))
     assert result["error"] == "runner down"
     assert result["reactions"] == ["❌"]
-    assert any(item["node"] == "failure" for item in engine.phoenix.records)
+    assert any(item["node"] == "failure" for item in engine.config.phoenix.records)
 
 
 @pytest.mark.asyncio
@@ -813,7 +817,7 @@ async def test_discord_reaction_failures_do_not_abort_terminal_delivery() -> Non
             del emoji, member
             raise discord.DiscordException
 
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     engine.reaction_user = object()
     result = await engine.handle(
         normalize_event(discord_message("reaction-failure", "hello", thread="t")),
@@ -830,14 +834,14 @@ async def test_discord_delivery_failure_does_not_fail_turn() -> None:
             del content, kwargs
             raise discord.DiscordException
 
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     result = await engine.handle(
         normalize_event(discord_message("delivery-failure", "hello", thread="t")),
         delivery_channel=Channel(),
     )
     assert result["output"].startswith("Codex received: ")
     assert result["reactions"] == ["✅"]
-    assert any(item["node"] == "delivery" for item in engine.phoenix.records)
+    assert any(item["node"] == "delivery" for item in engine.config.phoenix.records)
 
 
 @pytest.mark.asyncio
@@ -883,7 +887,7 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
             return Delivery()
 
     channel = Channel()
-    engine = Engine(Phoenix(), Runner())
+    engine = configured_engine(runner=Runner())
     event = normalize_event(discord_message("retry-delivery", "hello", thread="t"))
     with pytest.raises(RuntimeError, match="disconnected"):
         await engine.handle(event, delivery_channel=channel, state_data={}, retry_transport=True)
@@ -914,7 +918,7 @@ async def test_same_thread_turns_are_serialized() -> None:
             active -= 1
             return thread or "codex", "answer", {}
 
-    engine = Engine(Phoenix(), Runner())
+    engine = configured_engine(runner=Runner())
     events = [
         normalize_event(discord_message(str(index), "hello", thread="same")) for index in (1, 2)
     ]
@@ -943,7 +947,7 @@ async def test_new_turn_recovers_after_previous_failure() -> None:
                 raise RuntimeError("temporary runner failure")  # noqa: TRY003
             return thread or "codex", "recovered", {}
 
-    engine = Engine(Phoenix(), Runner())
+    engine = configured_engine(runner=Runner())
     first = await engine.handle(
         normalize_event(discord_message("failed", "hello", thread="recover"))
     )
@@ -957,7 +961,7 @@ async def test_new_turn_recovers_after_previous_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_closed_thread_rejects_new_work() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     engine.states["t"] = State(closed=True)
     result = await engine.handle(normalize_event(discord_message("closed", "hello", thread="t")))
     assert result["error"] == "thread is closed"
@@ -965,7 +969,7 @@ async def test_closed_thread_rejects_new_work() -> None:
 
 @pytest.mark.asyncio
 async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
     result = cast(
         "EngineResult",
@@ -1103,7 +1107,7 @@ async def test_live_delivery_sendsbanner_progress_and_answer(monkeypatch) -> Non
             self.reactions.remove(emoji)
 
     live = Live()
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     engine.reaction_user = object()
     result = await engine.handle(
         normalize_event(discord_message("live", "hello", thread="t")),
@@ -1164,7 +1168,7 @@ async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None
             return thread or "codex", "answer", {}
 
     live = Live()
-    engine = Engine(Phoenix(), ProgressRunner("http://runner"))
+    engine = configured_engine(runner=ProgressRunner("http://runner"))
     engine.reaction_user = object()
     result = await engine.handle(
         normalize_event(discord_message("progress", "hello", thread="t")),
@@ -1208,7 +1212,7 @@ async def test_history_normalizes_discord_fields() -> None:
 
 
 def test_app_health_and_replay_authentication() -> None:
-    client = TestClient(create_app(Engine(Phoenix(), FakeRunner()), token="secret"))
+    client = TestClient(create_app(configured_engine(), token="secret"))
     assert client.get("/healthz").json() == {"status": "ok"}
     assert client.get("/readyz").json() == {"status": "ready"}
     assert client.get("/v1/phoenix/events").json() == []
@@ -1226,16 +1230,14 @@ def test_app_starts_discord_with_discord_token_not_replay_token(monkeypatch) -> 
         received.append(token)
 
     monkeypatch.setattr(Gateway, "run_forever", fake_run)
-    with TestClient(
-        create_app(Engine(Phoenix(), FakeRunner()), token="replay", discord_token="discord")
-    ):
+    with TestClient(create_app(configured_engine(), token="replay", discord_token="discord")):
         pass
     assert received == ["discord"]
 
 
 @pytest.mark.asyncio
 async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
-    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    bot = Gateway(configured_engine(), {1})
     calls = 0
 
     async def fake_start(_token: str, **kwargs: object) -> None:
@@ -1257,7 +1259,7 @@ async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
 
 
 def test_gateway_requests_only_enabled_discord_intents() -> None:
-    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    bot = Gateway(configured_engine(), {1})
     assert bot.intents.message_content
     assert not bot.intents.members
     assert not bot.intents.presences
@@ -1268,9 +1270,9 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
     tmp_path, monkeypatch
 ) -> None:
     activity_file = tmp_path / "activity.json"
-    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
+    bot = Gateway(configured_engine(), {1}, activity_file)
     bot._touch_thread("123", timestamp=0)  # noqa: SLF001
-    restored = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
+    restored = Gateway(configured_engine(), {1}, activity_file)
     assert restored.thread_activity == {"123": 0.0}
     restored.thread_activity["123"] = 7_200.0
 
@@ -1292,7 +1294,7 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
 
 @pytest.mark.asyncio
 async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> None:
-    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    bot = Gateway(configured_engine(), {1})
     bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=42))  # noqa: SLF001
 
     class Thread:
@@ -1314,7 +1316,7 @@ async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> Non
 
 
 def test_gateway_does_not_track_unmanaged_threads() -> None:
-    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    bot = Gateway(configured_engine(), {1})
     assert bot.thread_activity == {}
 
 
@@ -1350,10 +1352,10 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     response = TestClient(create_app(engine)).post("/v1/responses", json={"model": "requested"})
     assert response.status_code == 200
-    provider = engine.phoenix.records[-1]
+    provider = engine.config.phoenix.records[-1]
     assert provider["served_model"] == "served"
     assert provider["cost"] == 0.4
     assert provider["request"] == {"model": "requested"}
@@ -1393,7 +1395,7 @@ def test_provider_relay_retries_disconnect_before_response(monkeypatch) -> None:
     client = Client()
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: client)
-    response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
+    response = TestClient(create_app(configured_engine())).post(
         "/v1/responses", json={"model": "requested"}
     )
     assert response.status_code == 200
@@ -1501,7 +1503,9 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
     class Engine:
         runner = Runner()
 
-    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", Engine())
+    engine = Engine()
+    engine.config = engine  # type: ignore[attr-defined]
+    monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
     payload = {
         "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
     }
@@ -1533,7 +1537,7 @@ async def test_engine_preflight_reuses_progress_delivery() -> None:
             return self.delivery
 
     channel = Channel()
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
 
     async def lookup(_event: Event) -> Channel:
         return channel
@@ -1746,7 +1750,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
 
     parent = Channel()
     bot_user = User()
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     monkeypatch.setattr("app.gateway.discord.Thread", Thread)
     bot = Gateway(engine, {1})
     bot._connection.user = cast("discord.ClientUser", bot_user)  # noqa: SLF001
@@ -1781,16 +1785,16 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_gateway_persists_gurt_thread_sequence(tmp_path) -> None:
     sequence = tmp_path / "thread-sequence.json"
-    first = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    first = Gateway(configured_engine(), {1}, sequence_path=sequence)
     assert first._next_thread_name() == "Gurt 1"  # noqa: SLF001
     assert first._next_thread_name() == "Gurt 2"  # noqa: SLF001
 
-    restored = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    restored = Gateway(configured_engine(), {1}, sequence_path=sequence)
     assert restored._next_thread_name() == "Gurt 3"  # noqa: SLF001
 
 
 def test_replay_accepts_discord_message_json() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     client = TestClient(create_app(engine))
     payload = {
         "id": "discord-1",
@@ -1806,13 +1810,13 @@ def test_replay_accepts_discord_message_json() -> None:
     }
     response = client.post("/v1/discord/events", json=payload)
     assert response.status_code == 200
-    context = next(item for item in engine.phoenix.records if item["node"] == "context")
+    context = next(item for item in engine.config.phoenix.records if item["node"] == "context")
     assert "file" in str(context["raw"])
     assert "username" in str(context["raw"])
 
 
 def test_admission_audit_is_exact_and_replayable() -> None:
-    engine = Engine(Phoenix(), FakeRunner())
+    engine = configured_engine()
     client = TestClient(create_app(engine, token="replay-secret"))
     payload = {
         "t": "MESSAGE_CREATE",
@@ -1869,7 +1873,7 @@ def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
         "parent_messages": [],
     }
     first = Phoenix(audit_dir=tmp_path)
-    first_client = TestClient(create_app(Engine(first, FakeRunner()), token="secret"))
+    first_client = TestClient(create_app(configured_engine(phoenix=first), token="secret"))
     assert (
         first_client.post(
             "/v1/replay/discord", headers={"x-replay-token": "secret"}, json=payload
@@ -1878,7 +1882,7 @@ def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
     )
 
     restarted = Phoenix(audit_dir=tmp_path)
-    client = TestClient(create_app(Engine(restarted, FakeRunner()), token="secret"))
+    client = TestClient(create_app(configured_engine(phoenix=restarted), token="secret"))
     audit = client.get(
         "/v1/phoenix/audits/discord-persisted-audit-1",
         headers={"x-replay-token": "secret"},
