@@ -8,7 +8,7 @@ container with per-user workspaces.
 ## Layout
 
 ```text
-src/app/main.py             canonical Discord/raw-event turn path and Phoenix evidence
+src/app/http_api.py         canonical Discord/raw-event turn path and Phoenix evidence
 sandbox/src/runner/api.py   authenticated warm runner and workspace materialization
 contracts/                  context schema plus startup/follow-up grammar sources
 docs/                       design and observability contracts

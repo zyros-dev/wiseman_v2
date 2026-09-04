@@ -274,7 +274,6 @@ class Gateway(discord.Client):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
             delivery_channel = channel
             self._touch_thread(thread_id)
-            old = self.engine.states[thread_id]
             thread_messages = await _history(channel, 100)
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
@@ -285,7 +284,6 @@ class Gateway(discord.Client):
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
             delivery_channel = thread
             self._touch_thread(thread_id)
-            old = self.engine.states[thread_id]
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
         trigger = Message(
             id=str(message.id),
@@ -313,7 +311,7 @@ class Gateway(discord.Client):
             kind=kind,
             parent_messages=parent_messages,
             thread_messages=thread_messages,
-            seen_ids=list(old.seen),
+            seen_ids=[],
             raw_payload={
                 "trigger": trigger.model_dump(mode="json"),
                 "kind": kind,

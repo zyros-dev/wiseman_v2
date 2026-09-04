@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict, cast
 
@@ -264,8 +265,8 @@ class Engine:
         )
         processing_emoji = self.reaction_emojis["processing"]
         self.working_reactions[trigger.id] = processing_emoji
-        if self._react(trigger.id, processing_emoji) and live is not None:
-            await live.add_reaction(processing_emoji)
+        self._react(trigger.id, processing_emoji)
+        await self._ensure_live_reaction(live, processing_emoji)
         await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
         current = context(event, self.context_config)
         state.seen.update(cast("list[str]", current["selected_ids"]))
@@ -348,8 +349,7 @@ class Engine:
         await self.phoenix.record(lifecycle.trace, "failure", error=str(error))
         failure_emoji = self.reaction_emojis["failure"]
         if self._react(trigger.id, failure_emoji):
-            if lifecycle.live is not None:
-                await lifecycle.live.add_reaction(failure_emoji)
+            await self._ensure_live_reaction(lifecycle.live, failure_emoji)
             if lifecycle.channel is not None:
                 await deliver_content(
                     lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}"
@@ -389,8 +389,7 @@ class Engine:
             await deliver_content(lifecycle.progress_message, lifecycle.channel, result.output)
         success_emoji = self.reaction_emojis["success"]
         if self._react(trigger.id, success_emoji):
-            if lifecycle.live is not None:
-                await lifecycle.live.add_reaction(success_emoji)
+            await self._ensure_live_reaction(lifecycle.live, success_emoji)
             await self._remove_working_reaction(trigger.id, lifecycle.live)
         await self.phoenix.record(
             lifecycle.trace,
@@ -454,7 +453,14 @@ class Engine:
             return
         self.reactions[message_id].remove(emoji)
         if live is not None and self.reaction_user is not None:
-            await live.remove_reaction(emoji, cast("discord.User", self.reaction_user))
+            with suppress(discord.DiscordException):
+                await live.remove_reaction(emoji, cast("discord.User", self.reaction_user))
+
+    @staticmethod
+    async def _ensure_live_reaction(live: discord.Message | None, emoji: str) -> None:
+        if live is not None:
+            with suppress(discord.DiscordException):
+                await live.add_reaction(emoji)
 
 
 def _state_data(state: State) -> StateData:

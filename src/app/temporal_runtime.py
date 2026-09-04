@@ -106,7 +106,6 @@ class ThreadWorkflow:
         self.pending: list[dict[str, object]] = []
         self.state: dict[str, object] = {}
         self.result: EngineResult = {}
-        self.started = False
 
     @workflow.signal
     async def submit(self, event: Mapping[str, object]) -> None:
@@ -121,7 +120,7 @@ class ThreadWorkflow:
             processed = self.state.get("processed", [])
             if message_id and message_id in _sequence(processed):
                 continue
-            if not self.started:
+            if not self.state.get("codex_thread"):
                 await workflow.execute_activity(
                     provision_workspace,
                     {"event": event, "state": self.state},
@@ -135,7 +134,6 @@ class ThreadWorkflow:
                     retry_policy=TRANSPORT_RETRY_POLICY,
                 )
                 self.state = _object_map(started.get("state", self.state))
-                self.started = True
             self.result = await workflow.execute_child_workflow(
                 TurnWorkflow.run,
                 {"event": event, "state": self.state},
@@ -204,7 +202,7 @@ def _activity_attempt() -> int:
 
 
 def _retry_prompt() -> str:
-    path = Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.txt"
+    path = Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2"
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
