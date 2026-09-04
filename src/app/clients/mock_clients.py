@@ -130,7 +130,7 @@ class MockDiscord(DiscordClient):
             raise ValueError("fake time cannot move backwards")  # noqa: TRY003
         self.state.fake_time += seconds
         for thread_id, touched in self.state.thread_activity.items():
-            if thread_id not in self.state.archived and self.state.fake_time - touched >= 60 * 60:
+            if self.state.fake_time - touched >= 60 * 60:
                 self.state.archived.add(thread_id)
                 self.state.locked.add(thread_id)
 
