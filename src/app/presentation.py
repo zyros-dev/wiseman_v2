@@ -12,7 +12,7 @@ import discord
 import httpx
 from jinja2 import Environment, StrictUndefined
 
-from app.models import THREAD_AUTO_ARCHIVE_MINUTES
+from app.models import THREAD_AUTO_ARCHIVE_MINUTES, is_image_attachment
 from app.phoenix import route_info
 
 if TYPE_CHECKING:
@@ -71,10 +71,9 @@ async def describe_images(
     for message in messages:
         for value in _sequence(message.get("attachments")):
             attachment = _mapping(value)
-            content_type = str(attachment.get("content_type") or "")
             url = str(attachment.get("url") or attachment.get("proxy_url") or "")
             attachment_id = str(attachment.get("id") or url)
-            if content_type.startswith("image/") and url and attachment_id not in seen:
+            if is_image_attachment(attachment) and url and attachment_id not in seen:
                 images.append({"id": attachment_id, "url": url})
                 seen.add(attachment_id)
     if not images:

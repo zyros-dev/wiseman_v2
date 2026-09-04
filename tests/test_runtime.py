@@ -328,7 +328,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
         [
             {
                 "attachments": [
-                    {"id": "image-1", "content_type": "image/jpeg", "url": "https://cdn/image.jpg"}
+                    {"id": "image-1", "filename": "image.jpg", "url": "https://cdn/image.jpg"}
                 ]
             }
         ],
@@ -348,7 +348,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
         [
             {
                 "attachments": [
-                    {"id": "image-1", "content_type": "image/jpeg", "url": "https://cdn/image.jpg"}
+                    {"id": "image-1", "filename": "image.jpg", "url": "https://cdn/image.jpg"}
                 ]
             }
         ]

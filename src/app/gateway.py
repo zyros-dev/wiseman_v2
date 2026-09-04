@@ -41,7 +41,13 @@ class Gateway(discord.Client):
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
-        self.sequence_path = Path(sequence_path) if sequence_path else self._default_sequence_path()
+        self.sequence_path = (
+            Path(sequence_path)
+            if sequence_path
+            else self.activity_path.with_name("thread-sequence.json")
+            if self.activity_path
+            else None
+        )
         self.thread_sequence = self._load_thread_sequence()
         self.thread_activity = self._load_thread_activity()
         self._load_profile()
@@ -55,9 +61,6 @@ class Gateway(discord.Client):
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
         await self._discover_managed_threads()
-
-    async def on_disconnect(self) -> None:
-        DISCORD_CONNECTED.set(0)
 
     def _load_thread_activity(self) -> dict[str, float]:
         if self.activity_path is None or not self.activity_path.exists():
@@ -79,9 +82,6 @@ class Gateway(discord.Client):
             temporary.replace(self.activity_path)
         except OSError:
             LOGGER.exception("Could not persist Wiseman thread activity state")
-
-    def _default_sequence_path(self) -> Path | None:
-        return self.activity_path.with_name("thread-sequence.json") if self.activity_path else None
 
     def _load_thread_sequence(self) -> int:
         if self.sequence_path is None or not self.sequence_path.exists():

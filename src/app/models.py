@@ -7,6 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.types import JsonObject
 
 THREAD_AUTO_ARCHIVE_MINUTES = 60
+IMAGE_SUFFIXES = (".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")  # fmt: skip  # noqa: E501
+
+
+def is_image_attachment(value: object) -> bool:
+    return isinstance(value, dict) and (str(value.get("content_type") or "").startswith("image/") or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES))  # fmt: skip  # noqa: E501
 
 
 class Message(BaseModel):

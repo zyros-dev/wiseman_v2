@@ -454,12 +454,8 @@ def _state_data(state: State) -> StateData:
 
 
 def _strings(value: object) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {str(item) for item in value}
+    return set() if not isinstance(value, list) else {str(item) for item in value}
 
 
 def _transport_error(error: Exception) -> bool:
-    return isinstance(error, RunnerError) or any(
-        marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5")
-    )
+    return isinstance(error, RunnerError) or any(marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5"))  # fmt: skip  # noqa: E501

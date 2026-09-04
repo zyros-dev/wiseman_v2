@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, cast
 from jinja2 import Environment, StrictUndefined, TemplateError
 from jsonschema import validate
 
-from app.models import Event, Message
+from app.models import Event, Message, is_image_attachment
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -194,7 +194,7 @@ def image_tool_instruction(
             message
             for message in reversed(reply_ancestors or [])
             if any(
-                str(_mapping(attachment).get("content_type") or "").startswith("image/")
+                is_image_attachment(_mapping(attachment))
                 for attachment in _sequence(_mapping(message).get("attachments"))
             )
         )
@@ -204,9 +204,8 @@ def image_tool_instruction(
     for message in messages:
         for value in _sequence(message.get("attachments")):
             attachment = _mapping(value)
-            content_type = str(attachment.get("content_type") or "")
             url = str(attachment.get("url") or attachment.get("proxy_url") or "")
-            if content_type.startswith("image/") and url and url not in seen:
+            if is_image_attachment(attachment) and url and url not in seen:
                 images.append(url)
                 seen.add(url)
     if not images:
