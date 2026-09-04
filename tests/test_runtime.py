@@ -1693,6 +1693,8 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     bot = Gateway(engine, {1})
     bot._connection.user = cast("discord.ClientUser", bot_user)  # noqa: SLF001
     startup = Message("start", parent, "hello")
+    startup.author.bot = True
+    startup.author.id = 8
     await bot.on_message(cast("discord.Message", startup))
     assert parent.thread is not None
     followup = Message("follow", parent.thread, "next")
