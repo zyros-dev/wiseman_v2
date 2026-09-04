@@ -24,11 +24,6 @@ if TYPE_CHECKING:
 type Failure = str
 
 
-class MockClientError(RuntimeError):
-    def __init__(self, operation: str) -> None:
-        super().__init__(f"mock failure: {operation}")
-
-
 @dataclass(frozen=True, slots=True)
 class MockCall:
     client: str
@@ -59,7 +54,7 @@ class MockState:
         if self.failures and self.failures[0] == f"{client}.{operation}":
             self.failures.pop(0)
             failed_operation = f"{client}.{operation}"
-            raise MockClientError(failed_operation)
+            raise RuntimeError(failed_operation)
 
 
 class MockDiscord(DiscordClient):
@@ -167,8 +162,7 @@ class MockPhoenix(PhoenixClient):
             self.state.audits[trace] = {"trace": trace, "node": node}
 
     def audit(self, audit_id: str) -> dict[str, object] | None:
-        self.state.call("phoenix", "audit", audit_id)
-        return self.state.audits.get(audit_id)
+        return self.state.call("phoenix", "audit", audit_id) or self.state.audits.get(audit_id)
 
 
 class MockPrompts(PromptClient):

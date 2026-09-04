@@ -28,10 +28,12 @@ if TYPE_CHECKING:
         RunnerClient,
         TemporalClient,
     )
+    from app.models import Event
+    from app.types import JsonObject
 
 from app.admission import normalize_event
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
-from app.clients.real_clients import RealDependencies, UnavailableTemporal, real_services
+from app.clients.real_clients import RealDependencies, real_services
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
 from app.phoenix import json_text, provider_values
@@ -127,7 +129,7 @@ def create_app(  # noqa: C901, PLR0915
             settings,
             RealDependencies(
                 discord=cast("DiscordClient", bot),
-                temporal=cast("TemporalClient", temporal or UnavailableTemporal()),
+                temporal=cast("TemporalClient", temporal),
                 phoenix=cast("PhoenixClient", engine.config.phoenix),
                 prompts=cast("PromptClient", engine.config.prompts),
                 runner=cast("RunnerClient", engine.config.runner),
@@ -137,6 +139,14 @@ def create_app(  # noqa: C901, PLR0915
     engine.bind_clients(clients)
     app.state.clients = clients
     task: asyncio.Task[None] | None = None
+    replay_state: dict[str, JsonObject] = {}
+
+    async def replay_locally(event: Event) -> dict[str, object]:
+        key = event.trigger.thread_id or event.trigger.channel_id
+        result = dict(await engine.handle(event, state_data=replay_state.get(key, {})))
+        if isinstance(result.get("state"), dict):
+            replay_state[key] = cast("JsonObject", result["state"])
+        return result
 
     @app.on_event("startup")
     async def start_discord() -> None:
@@ -365,7 +375,7 @@ def create_app(  # noqa: C901, PLR0915
         if temporal is not None:
             await temporal.submit(event.model_dump(mode="json"))
             return {"status": "queued", "message_id": event.trigger.id}
-        return dict(await engine.handle(event))
+        return await replay_locally(event)
 
     @app.post("/v1/replay/phoenix/{audit_id}")
     async def replay_audit(
@@ -385,8 +395,7 @@ def create_app(  # noqa: C901, PLR0915
         if temporal is not None:
             await temporal.submit(event.model_dump(mode="json"))
             return {"status": "queued", "message_id": event.trigger.id, "audit_id": audit_id}
-        result = await engine.handle(event)
-        return {**result, "audit_id": audit_id}
+        return {**(await replay_locally(event)), "audit_id": audit_id}
 
     app.add_api_route("/v1/discord/events", replay, methods=["POST"])
 
