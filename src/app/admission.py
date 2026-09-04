@@ -154,7 +154,10 @@ def context(event: Event, config: ContextConfig | None = None) -> dict[str, obje
         parent = item.reply_to
     selected = list({m.id: m for m in (*ancestors[::-1], *pool, trigger)}.values())
     selected.sort(key=lambda item: (item.timestamp, item.id))
-    messages = [item.model_dump(mode="json") for item in selected]
+    messages = [
+        item.model_dump(mode="json", exclude={"attachments": {"__all__": {"url", "proxy_url"}}})
+        for item in selected
+    ]
     result = {
         "schema": "wiseman.discord_context.v2",
         "trigger": trigger.model_dump(mode="json"),

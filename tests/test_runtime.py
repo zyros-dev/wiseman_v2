@@ -221,7 +221,7 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
     prompt = json.loads(str(codex["input"]))
     assert "/usr/local/bin/wiseman-image" in str(codex["input"])
     assert "https://cdn.example/photo.png" in str(codex["input"])
-    assert "https://cdn.example/old.png" in prompt["context"]
+    assert "https://cdn.example/old.png" not in prompt["context"]
     assert "https://cdn.example/old.png" not in prompt["user"]
 
 

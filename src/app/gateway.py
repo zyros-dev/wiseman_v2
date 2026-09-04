@@ -235,7 +235,6 @@ class Gateway(discord.Client):
             channel = await self.fetch_channel(int(channel_id))
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 return channel
-            return None  # noqa: TRY300
         except (discord.DiscordException, ValueError):
             return None
 

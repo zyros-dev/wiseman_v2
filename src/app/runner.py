@@ -175,11 +175,9 @@ class HttpRunner:
 
 
 class FakeRunner:
-    async def acquire(self, user: str, workspace: str) -> None:
-        del user, workspace
+    async def acquire(self, user: str, workspace: str) -> None: ...
 
-    async def start(self, thread: str, user: str, workspace: str = "") -> str:
-        del workspace
+    async def start(self, thread: str, user: str, _workspace: str = "") -> str:
         return thread or f"codex-{user}"
 
     async def run(
