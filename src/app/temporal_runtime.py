@@ -11,6 +11,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
+from app.runner import LifecycleRunner
 from app.types import JsonObject  # noqa: TC001 - Temporal resolves wire annotations
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
     from temporalio.client import Client
 
     from app.engine import Engine
-    from app.runner import LifecycleRunner
 
 
 class _ActivityRuntime:
@@ -60,7 +60,9 @@ async def run_turn(payload: dict) -> dict:
 async def provision_workspace(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
+    await cast(LifecycleRunner, _engine().runner).acquire(  # noqa: TC006
+        event.trigger.author_id, workspace
+    )
     return {"workspace": workspace}
 
 
@@ -69,7 +71,7 @@ async def start_codex(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await cast("LifecycleRunner", _engine().runner).start(
+    thread = await cast(LifecycleRunner, _engine().runner).start(  # noqa: TC006
         str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
     )
     state["codex_thread"] = thread
