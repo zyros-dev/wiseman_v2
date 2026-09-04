@@ -462,7 +462,7 @@ def create_app() -> FastAPI:
             raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 
     @app.get("/progress/{thread_id}")
-    async def progress(thread_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, str]:
+    async def progress(thread_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
         return {
             "message": codex.progress.get(thread_id, "🤖 Codex starting..."),

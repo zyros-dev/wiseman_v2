@@ -2352,6 +2352,10 @@ async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monk
     assert first[0] == second[0] == "codex-thread"
     assert "one" in first[1]
     assert "two" in second[1]
+    async with client_type(transport=transport, base_url="http://sandbox") as probe:
+        progress = await probe.get("/progress/t", headers={"authorization": "Bearer secret"})
+    assert progress.status_code == 200
+    assert isinstance(progress.json()["steps"], list)
     assert (tmp_path / "users/u/shared/AGENTS.md").exists()
     assert (tmp_path / "users/u/threads/t/.codex").is_dir()
 
