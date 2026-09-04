@@ -1462,6 +1462,7 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1}}
     assert activities == [provision_workspace, start_codex]
