@@ -226,7 +226,6 @@ class Gateway(discord.Client):
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 self.engine.reaction_user = self.user
                 return await channel.fetch_message(int(event.trigger.id))
-            return None  # noqa: TRY300
         except (discord.DiscordException, ValueError):
             return None
 
@@ -249,6 +248,7 @@ class Gateway(discord.Client):
             self._touch_thread(str(message.channel.id))
         if message.author.bot:
             return
+        LOGGER.info("Discord message received id=%s channel=%s", message.id, message.channel.id)
         channel = message.channel
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
         if self.allowlist and guild_id not in self.allowlist:
