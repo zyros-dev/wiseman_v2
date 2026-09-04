@@ -54,7 +54,6 @@ class State:
     seen: set[str] = field(default_factory=set)
     processed: set[str] = field(default_factory=set)
     turn: int = 0
-    last_activity: float = 0.0
     closed: bool = False
 
 
