@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from typing import TYPE_CHECKING, TypeVar, cast
 
+import pytest
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
+from app.admission import normalize_event
 from app.clients.mock_clients import (
     MockClientError,
     MockDiscord,
@@ -16,7 +20,7 @@ from app.clients.mock_clients import (
     MockState,
 )
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message
+from app.models import ActiveTurn, Event, Message
 from app.phoenix import PromptHub
 
 if TYPE_CHECKING:
@@ -169,6 +173,99 @@ class DiscordClientMachine(RuleBasedStateMachine):
 
 
 TestDiscordClientMachine = DiscordClientMachine.TestCase
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "discord.create_thread",
+        "discord.send",
+        "discord.edit",
+        "discord.add_reaction",
+        "discord.remove_reaction",
+        "discord.archive_thread",
+        "discord.lock_thread",
+        "discord.send_file",
+        "discord.set_profile",
+        "discord.set_reactions",
+    ],
+)
+def test_failed_discord_mutation_is_atomic(operation: str) -> None:
+    state = MockState()
+    client = MockDiscord(state)
+    thread = run(client.create_thread("channel", "Gurt 1", 60))
+    message = run(client.send(thread, "before"))
+    actions: dict[str, Callable[[], Awaitable[object]]] = {
+        "discord.create_thread": lambda: client.create_thread("channel", "Gurt 2", 60),
+        "discord.send": lambda: client.send(thread, "new"),
+        "discord.edit": lambda: client.edit(message, "new"),
+        "discord.add_reaction": lambda: client.add_reaction(message, "👀"),
+        "discord.remove_reaction": lambda: client.remove_reaction(message, "👀"),
+        "discord.archive_thread": lambda: client.archive_thread(thread),
+        "discord.lock_thread": lambda: client.lock_thread(thread),
+        "discord.send_file": lambda: client.send_file(thread, "artifact.bin"),
+        "discord.set_profile": lambda: client.set_profile("Wise Man", "avatar.png"),
+        "discord.set_reactions": lambda: client.set_reactions({"success": "✅"}),
+    }
+    before = _discord_snapshot(state, client)
+    state.failures.append(operation)
+    with pytest.raises(MockClientError):
+        run(actions[operation]())
+    assert _discord_snapshot(state, client) == before
+
+
+def _discord_snapshot(state: MockState, client: MockDiscord) -> tuple[object, ...]:
+    return (
+        deepcopy(state.messages),
+        deepcopy(state.reactions),
+        deepcopy(state.threads),
+        deepcopy(state.thread_activity),
+        deepcopy(state.archived),
+        deepcopy(state.locked),
+        deepcopy(state.channel_history),
+        deepcopy(state.profile),
+        deepcopy(state.files),
+        client.next_id,
+    )
+
+
+@given(
+    content=st.text(max_size=4000),
+    timestamp=st.text(max_size=40),
+    mentions=st.lists(st.text(min_size=1, max_size=24), max_size=4),
+    attachment_name=st.one_of(st.none(), st.text(max_size=24)),
+)
+@settings(max_examples=60, deadline=None)
+def test_raw_discord_message_create_normalizes_deterministically(
+    content: str,
+    timestamp: str,
+    mentions: list[str],
+    attachment_name: str | None,
+) -> None:
+    attachments = (
+        [{"id": "attachment", "filename": attachment_name, "content_type": "image/png"}]
+        if attachment_name is not None
+        else []
+    )
+    payload = {
+        "op": 0,
+        "t": "MESSAGE_CREATE",
+        "d": {
+            "id": "message",
+            "author": {"id": "user", "username": "user"},
+            "content": content,
+            "timestamp": timestamp,
+            "channel_id": "channel",
+            "mentions": [{"id": item} for item in mentions],
+            "attachments": attachments,
+        },
+    }
+    first = normalize_event(payload)
+    second = normalize_event(payload)
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+    assert first.trigger.content == content
+    assert first.trigger.mentions == mentions
+    assert first.raw_payload == payload
 
 
 class _LiveMessage:
@@ -324,6 +421,15 @@ class EngineLifecycleMachine(RuleBasedStateMachine):
         result = self._submit(self._event("followup", message_id))
         assert result.get("status") == "duplicate"
         assert len(self.state.calls) == calls_before
+
+    @rule()
+    def steers_only_the_active_delivery(self) -> None:
+        before = sum(call.operation == "steer" for call in self.state.calls)
+        self.engine.active_turns["thread"] = ActiveTurn("active", "delivery")
+        assert run(self.engine.steer_if_active("thread", "delivery", "redirect", "user"))
+        assert not run(self.engine.steer_if_active("thread", "other", "queue", "user"))
+        assert not run(self.engine.steer_if_active("other", "delivery", "queue", "user"))
+        assert sum(call.operation == "steer" for call in self.state.calls) == before + 1
 
     @rule()
     def restarts_from_durable_state(self) -> None:
