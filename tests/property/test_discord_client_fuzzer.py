@@ -4,15 +4,29 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
-from app.clients.mock_clients import MockClientError, MockDiscord, MockState
+from app.clients.mock_clients import (
+    MockClientError,
+    MockDiscord,
+    MockPhoenix,
+    MockRunner,
+    MockState,
+)
+from app.engine import Engine
+from app.models import Event, Message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+    import discord
+
+    from app.phoenix import Phoenix
+    from app.runner import Runner
+    from app.types import JsonObject
 
 
 async def _resolve[Result](awaitable: Awaitable[Result]) -> Result:
@@ -158,3 +172,172 @@ class DiscordClientMachine(RuleBasedStateMachine):
 
 
 TestDiscordClientMachine = DiscordClientMachine.TestCase
+
+
+class _LiveMessage:
+    def __init__(self, client: MockDiscord, message_id: str) -> None:
+        self.client, self.id = client, message_id
+
+    async def edit(self, *, content: str) -> None:
+        await self.client.edit(self.id, content)
+
+    async def add_reaction(self, emoji: str) -> None:
+        await self.client.add_reaction(self.id, emoji)
+
+    async def remove_reaction(self, emoji: str, _user: object) -> None:
+        await self.client.remove_reaction(self.id, emoji)
+
+
+class _DeliveryChannel:
+    def __init__(self, client: MockDiscord, channel_id: str) -> None:
+        self.client, self.channel_id = client, channel_id
+
+    async def send(self, content: str = "", *, embed: object | None = None) -> _LiveMessage:
+        message_id = await self.client.send(
+            self.channel_id, content, embed=cast("JsonObject | None", embed)
+        )
+        return _LiveMessage(self.client, message_id)
+
+
+class _EngineRunner:
+    def __init__(self, state: MockState) -> None:
+        self.client = MockRunner(state)
+
+    async def acquire(self, user: str, workspace: str) -> None:
+        await self.client.acquire(user, workspace)
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        return await self.client.start(thread, user, workspace)
+
+    async def run(
+        self, thread: str, prompt: str, user: str, workspace: str = ""
+    ) -> tuple[str, str, dict[str, object]]:
+        result = await self.client.run(thread, prompt, user, workspace)
+        return result.thread_id, result.output, cast("dict[str, object]", result.billing)
+
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
+        return await self.client.steer(thread, prompt, user, workspace)
+
+
+class EngineLifecycleMachine(RuleBasedStateMachine):
+    """Fuzz accepted turns through the application boundary and restart state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = MockState()
+        self.discord = MockDiscord(self.state)
+        self.runner = _EngineRunner(self.state)
+        self.channel = _DeliveryChannel(self.discord, "thread")
+        self.engine = self._new_engine()
+        self.started = False
+        self.next_message = 0
+        self.accepted: list[str] = []
+        self.durable: JsonObject = {}
+
+    def _event(self, kind: str, message_id: str) -> Event:
+        return Event(
+            trigger=Message(
+                id=message_id,
+                author_id="user",
+                author_name="user",
+                content=f"request {message_id}",
+                channel_id="parent",
+                thread_id="thread",
+                timestamp=message_id,
+            ),
+            kind=kind,
+            parent_messages=[],
+            thread_messages=[],
+        )
+
+    def _new_engine(self) -> Engine:
+        engine = Engine(cast("Phoenix", MockPhoenix(self.state)), cast("Runner", self.runner))
+        engine.reaction_user = cast("discord.User", object())
+        return engine
+
+    def _submit(self, event: Event) -> dict[str, object]:
+        result = cast(
+            "dict[str, object]",
+            run(
+                self.engine.handle(
+                    event,
+                    cast("discord.Message", _LiveMessage(self.discord, event.trigger.id)),
+                    self.channel,
+                    self.durable,
+                )
+            ),
+        )
+        if isinstance(result.get("state"), dict):
+            self.durable = cast("JsonObject", result["state"])
+        return result
+
+    @initialize()
+    def starts_without_turns(self) -> None:
+        assert self.durable == {}
+        assert self.accepted == []
+
+    @rule()
+    def starts_thread_once(self) -> None:
+        if self.started:
+            return
+        message_id = self._new_message()
+        result = self._submit(self._event("startup", message_id))
+        assert result.get("output")
+        self.started = True
+        self.accepted.append(message_id)
+        self._assert_terminal(message_id, "✅")
+        assert self.durable.get("turn") == 1
+
+    @rule()
+    def submits_followup(self) -> None:
+        if not self.started:
+            return
+        message_id = self._new_message()
+        result = self._submit(self._event("followup", message_id))
+        if "output" in result:
+            self.accepted.append(message_id)
+            self._assert_terminal(message_id, "✅")
+            assert self.durable.get("turn") == len(self.accepted)
+
+    @rule()
+    def handles_runner_failure_without_advancing_turn(self) -> None:
+        if not self.started:
+            return
+        message_id = self._new_message()
+        self.state.failures.append("runner.run")
+        result = self._submit(self._event("followup", message_id))
+        assert "error" in result
+        self._assert_terminal(message_id, "❌")
+        assert self.durable.get("turn") == len(self.accepted)
+
+    @rule()
+    def repeats_a_delivery(self) -> None:
+        if not self.accepted:
+            return
+        message_id = self.accepted[-1]
+        calls_before = len(self.state.calls)
+        result = self._submit(self._event("followup", message_id))
+        assert result.get("status") == "duplicate"
+        assert len(self.state.calls) == calls_before
+
+    @rule()
+    def restarts_from_durable_state(self) -> None:
+        self.engine = self._new_engine()
+
+    @invariant()
+    def accepted_turns_have_one_terminal_reaction(self) -> None:
+        assert all(len(self.state.reactions[mid]) == 1 for mid in self.accepted)
+
+    @invariant()
+    def durable_turn_matches_successes(self) -> None:
+        assert self.durable.get("turn", 0) == len(self.accepted)
+
+    def _new_message(self) -> str:
+        self.next_message += 1
+        return f"turn-{self.next_message}"
+
+    def _assert_terminal(self, message_id: str, emoji: str) -> None:
+        assert self.state.reactions.get(message_id) == [emoji]
+
+
+TestEngineLifecycleMachine = EngineLifecycleMachine.TestCase
