@@ -196,7 +196,8 @@ async def deliver_content(message: object | None, channel: Messageable, content:
     if message is not None:
         with suppress(discord.DiscordException):
             edited = await edit_delivery(message, chunks[0])
-    if not edited:
-        await channel.send(chunks[0])
-    for chunk in chunks[1:]:
-        await channel.send(chunk)
+    with suppress(discord.DiscordException):
+        if not edited:
+            await channel.send(chunks[0])
+        for chunk in chunks[1:]:
+            await channel.send(chunk)

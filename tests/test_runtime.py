@@ -814,6 +814,23 @@ async def test_discord_reaction_failures_do_not_abort_terminal_delivery() -> Non
 
 
 @pytest.mark.asyncio
+async def test_discord_delivery_failure_does_not_fail_turn() -> None:
+    class Channel:
+        async def send(self, content: str = "", **kwargs: object) -> object:
+            del content, kwargs
+            raise discord.DiscordException
+
+    engine = Engine(Phoenix(), FakeRunner())
+    result = await engine.handle(
+        normalize_event(discord_message("delivery-failure", "hello", thread="t")),
+        delivery_channel=Channel(),
+    )
+    assert result["output"].startswith("Codex received: ")
+    assert result["reactions"] == ["✅"]
+    assert any(item["node"] == "delivery" for item in engine.phoenix.records)
+
+
+@pytest.mark.asyncio
 async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
     class Runner:
         attempts = 0

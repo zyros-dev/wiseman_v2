@@ -290,20 +290,19 @@ class Engine:
         await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
         progress_message = self.deliveries.get(trigger.id)
         if channel is not None and kind == "startup" and not self.progress[trigger.id]:
-            await cast("EmbedMessageable", channel).send(embed=startup_embed())
+            with suppress(discord.DiscordException):
+                await cast("EmbedMessageable", channel).send(embed=startup_embed())
         phase = "codex starting" if kind == "startup" else "working"
         progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
             self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if progress_message is None and channel is not None:
-            progress_message = await channel.send(render_progress([progress], state.turn + 1))
+            with suppress(discord.DiscordException):
+                progress_message = await channel.send(render_progress([progress], state.turn + 1))
             self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
-        self.active_turns[key] = ActiveTurn(
-            trigger_id=trigger.id,
-            delivery_id=str(getattr(progress_message, "id", "")) or None,
-        )
+        self.active_turns[key] = ActiveTurn(trigger.id, str(getattr(progress_message, "id", "")) or None)  # fmt: skip  # noqa: E501
         return _Prepared(prompt, current, progress_message, processing_emoji)
 
     async def _run_codex(
