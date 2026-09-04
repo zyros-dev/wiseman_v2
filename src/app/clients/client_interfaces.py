@@ -17,11 +17,6 @@ class ClientMode(StrEnum):
     REAL = "real"
 
 
-class ClientContainerError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("client container has not been configured")
-
-
 @dataclass(frozen=True, slots=True)
 class ClientSettings:
     discord_token: str = ""
@@ -126,7 +121,7 @@ class ClientContainer:
     @classmethod
     def current(cls) -> ClientContainer:
         if cls._installed is None:
-            raise ClientContainerError
+            raise RuntimeError("client container has not been configured")
         return cls._installed
 
     @classmethod
