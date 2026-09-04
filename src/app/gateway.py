@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import discord
-from prometheus_client import Gauge
+from prometheus_client import Counter, Gauge
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -22,7 +22,7 @@ from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SEC
 
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
-DISCORD_MESSAGES = Gauge("wiseman_discord_messages_received", "Non-bot Discord messages received")
+DISCORD_MESSAGES = Counter("wiseman_discord_messages_received", "Non-bot Discord messages received")
 
 
 class Gateway(discord.Client):
@@ -246,7 +246,7 @@ class Gateway(discord.Client):
         if message.author.bot:
             return
         DISCORD_MESSAGES.inc()
-        LOGGER.info("Discord message received id=%s channel=%s", message.id, message.channel.id)
+        LOGGER.warning("Discord message received id=%s channel=%s", message.id, message.channel.id)
         channel = message.channel
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
         if self.allowlist and guild_id not in self.allowlist:
