@@ -214,7 +214,8 @@ class Engine:
             if lifecycle.progress_message is not None:
                 try:
                     await _edit_delivery(
-                        lifecycle.progress_message, _render_progress(self.progress[trigger.id])
+                        lifecycle.progress_message,
+                        _render_progress(self.progress[trigger.id], state.turn + 1),
                     )
                 except discord.DiscordException:
                     LOGGER.warning("Could not update progress message for %s", trigger.id)
@@ -330,7 +331,7 @@ class Engine:
             self.progress[trigger.id].append(phase)
         await self.phoenix.record(trace, "progress", phase=phase)
         if progress_message is None and channel is not None:
-            progress_message = await channel.send(_render_progress([progress]))
+            progress_message = await channel.send(_render_progress([progress], state.turn + 1))
             self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(
@@ -386,7 +387,7 @@ class Engine:
         trigger = lifecycle.trigger
         state = lifecycle.state
         state.turn += 1
-        self.progress[trigger.id].append("finalizing")
+        self.progress[trigger.id].append("✍️ Writing response...")
         await self.phoenix.record(lifecycle.trace, "progress", phase="finalizing")
         await self.phoenix.record(
             lifecycle.trace,
