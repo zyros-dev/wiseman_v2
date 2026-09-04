@@ -239,7 +239,7 @@ class Gateway(discord.Client):
     async def on_message(self, message: discord.Message) -> None:  # noqa: PLR0912
         if (
             isinstance(message.channel, discord.Thread)
-            and not message.author.bot
+            and str(message.author.id) != str(getattr(self.user, "id", ""))
             and str(message.channel.id) in self.thread_activity
         ):
             self._touch_thread(str(message.channel.id))
