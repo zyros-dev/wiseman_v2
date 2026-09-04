@@ -22,6 +22,7 @@ from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SEC
 
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
+DISCORD_MESSAGES = Gauge("wiseman_discord_messages_received", "Non-bot Discord messages received")
 
 
 class Gateway(discord.Client):
@@ -57,9 +58,6 @@ class Gateway(discord.Client):
 
     async def on_disconnect(self) -> None:
         DISCORD_CONNECTED.set(0)
-
-    async def on_resumed(self) -> None:
-        DISCORD_CONNECTED.set(1)
 
     def _load_thread_activity(self) -> dict[str, float]:
         if self.activity_path is None or not self.activity_path.exists():
@@ -247,6 +245,7 @@ class Gateway(discord.Client):
             self._touch_thread(str(message.channel.id))
         if message.author.bot:
             return
+        DISCORD_MESSAGES.inc()
         LOGGER.info("Discord message received id=%s channel=%s", message.id, message.channel.id)
         channel = message.channel
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
