@@ -410,7 +410,7 @@ class Engine:
             "kind": lifecycle.kind,
             "error": str(error),
             "reactions": self.reactions[trigger.id],
-            "state": _state_data(lifecycle.state),
+            "state": _state_data(lifecycle.state, finished=True),
         }
 
     async def _success(self, result: _Success) -> EngineResult:
@@ -448,7 +448,7 @@ class Engine:
             "selected_ids": cast("list[str]", result.current["selected_ids"]),
             "reactions": self.reactions[trigger.id],
             "progress": state.progress,
-            "state": _state_data(state),
+            "state": _state_data(state, finished=True),
         }
 
     async def steer_if_active(self, thread_id: str, message_id: str, prompt: str, user: str) -> bool:
@@ -503,15 +503,15 @@ class Engine:
                 await live.add_reaction(emoji)
 
 
-def _state_data(state: State) -> StateData:
+def _state_data(state: State, *, finished: bool = False) -> StateData:
     return {
         "codex_thread": state.codex_thread,
         "seen": sorted(state.seen),
         "processed": sorted(state.processed),
         "turn": state.turn,
-        "delivery_id": state.delivery_id,
+        "delivery_id": None if finished else state.delivery_id,
         "banner_sent": state.banner_sent,
-        "progress": state.progress,
+        "progress": [] if finished else state.progress,
     }
 
 
