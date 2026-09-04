@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
@@ -147,7 +146,6 @@ class Engine:
         TURN_TOTAL.inc()
         if state.closed:
             return {"trace": f"discord-{trigger.id}", "error": "thread is closed"}
-        state.last_activity = time.time()
         event.seen_ids = sorted(set(event.seen_ids) | state.seen)
         kind = event.kind or ("followup" if state.turn else "startup")
         trace = f"discord-{trigger.id}"
@@ -238,56 +236,58 @@ class Engine:
             with suppress(discord.DiscordException):
                 await edit_delivery(message, content)
 
+    async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> EngineResult:  # fmt: skip  # noqa: E501
+        key = event.trigger.thread_id or event.trigger.channel_id
+        live = await self.lookup(event) if self.lookup is not None else None
+        channel = await self.lookup_channel(event) if self.lookup_channel is not None else None
+        lifecycle = _Lifecycle(event.trigger, live, channel, self.deliveries.get(event.trigger.id), self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]), f"discord-{event.trigger.id}", event.kind or "startup", self._state(key, state_data))  # fmt: skip  # noqa: E501
+        return await self._failure(lifecycle, RuntimeError(error))
+
     async def _prepare(self, request: _Preparation) -> _Prepared:
-        event = request.event
-        live = request.live
-        channel = request.channel
-        state = request.state
-        kind = request.kind
-        trace = request.trace
-        trigger = event.trigger
-        raw = event.raw_payload or event_data(event)
+        r = request
+        trigger = r.event.trigger
+        raw = r.event.raw_payload or event_data(r.event)
         await self.phoenix.record(
-            trace,
+            r.trace,
             "admission",
-            audit_id=trace,
+            audit_id=r.trace,
             raw_request=raw,
-            normalized_request=event_data(event),
+            normalized_request=event_data(r.event),
             normalizer="normalize_event:v2",
         )
         await self.phoenix.record(
-            trace,
+            r.trace,
             "turn",
             thread_id=trigger.thread_id,
             message_id=trigger.id,
-            kind=kind,
+            kind=r.kind,
             route=route_info(),
             input=raw,
         )
         processing_emoji = self.reaction_emojis["processing"]
         self.working_reactions[trigger.id] = processing_emoji
         self._react(trigger.id, processing_emoji)
-        await self._ensure_live_reaction(live, processing_emoji)
-        await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
-        current = context(event, self.context_config)
-        state.seen.update(cast("list[str]", current["selected_ids"]))
+        await self._ensure_live_reaction(r.live, processing_emoji)
+        await self.phoenix.record(r.trace, "reaction", operations=[f"add:{processing_emoji}"])
+        current = context(r.event, self.context_config)
+        r.state.seen.update(cast("list[str]", current["selected_ids"]))
         await self.phoenix.record(
-            trace,
+            r.trace,
             "context",
             raw=json_text(raw),
             normalized=current,
             selected_ids=current["selected_ids"],
         )
-        grammar_name = "startup-context" if kind == "startup" else "followup-context"
+        grammar_name = "startup-context" if r.kind == "startup" else "followup-context"
         source = await self.prompts.source(grammar_name)
         grammar = render_grammar(
             grammar_name,
             source,
             raw,
-            mode=kind,
+            mode=r.kind,
             messages=cast("list[dict[str, object]]", current["messages"]),
         )
-        await self.phoenix.record(trace, "grammar", **grammar)
+        await self.phoenix.record(r.trace, "grammar", **grammar)
         parts = {
             "soul": await self.prompts.source("wiseman-soul"),
             "runtime": await self.prompts.source("wiseman-runtime"),
@@ -306,19 +306,19 @@ class Engine:
             ),
         }
         prompt = json_text(parts)
-        await self.phoenix.record(trace, "prompt", parts=parts, final_input=prompt)
+        await self.phoenix.record(r.trace, "prompt", parts=parts, final_input=prompt)
         progress_message = self.deliveries.get(trigger.id)
-        if channel is not None and kind == "startup" and not self.progress[trigger.id]:
+        if r.channel is not None and r.kind == "startup" and not self.progress[trigger.id]:
             with suppress(discord.DiscordException):
-                await cast("EmbedMessageable", channel).send(embed=startup_embed())
-        phase = "codex starting" if kind == "startup" else "working"
-        progress = "🤖 Codex starting..." if kind == "startup" else "⏳ Working..."
+                await cast("EmbedMessageable", r.channel).send(embed=startup_embed())
+        phase = "codex starting" if r.kind == "startup" else "working"
+        progress = "🤖 Codex starting..." if r.kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
             self.progress[trigger.id].append(phase)
-        await self.phoenix.record(trace, "progress", phase=phase)
-        if progress_message is None and channel is not None:
+        await self.phoenix.record(r.trace, "progress", phase=phase)
+        if progress_message is None and r.channel is not None:
             with suppress(discord.DiscordException):
-                progress_message = await channel.send(render_progress([progress], state.turn + 1))
+                progress_message = await r.channel.send(render_progress([progress], r.state.turn + 1))  # fmt: skip  # noqa: E501
             self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(trigger.id, str(getattr(progress_message, "id", "")) or None)  # fmt: skip  # noqa: E501

@@ -53,7 +53,7 @@ from app.temporal_runtime import (
     TemporalRuntime,
     ThreadWorkflow,
     TurnWorkflow,
-    _retryable_turn_result,
+    fail_turn,
     provision_workspace,
     publish_progress,
     run_turn,
@@ -1009,12 +1009,6 @@ def test_temporal_retry_policy_is_bounded() -> None:
     assert TRANSPORT_RETRY_POLICY.maximum_interval == timedelta(seconds=30)
 
 
-def test_temporal_retries_disconnected_runner_result() -> None:
-    assert _retryable_turn_result({"error": "Server disconnected without sending a response."})
-    assert _retryable_turn_result({"error": "runner returned HTTP 503: unavailable"})
-    assert not _retryable_turn_result({"error": "thread is closed"})
-
-
 @pytest.mark.asyncio
 async def test_temporal_final_transport_attempt_returns_failure(monkeypatch) -> None:
     class Engine:
@@ -1531,6 +1525,32 @@ async def test_engine_preflight_reuses_progress_delivery() -> None:
     assert channel.sends[0][1] is not None
     assert channel.delivery.content.startswith("⏳ Working · Gurt 3")
     assert channel.delivery.content.endswith("🤖 Codex starting...")
+    failed = await engine.fail(event, "runner unavailable", {"turn": 2})
+    assert failed["error"] == "runner unavailable"
+    assert channel.delivery.content == "Codex failed: runner unavailable"
+
+
+@pytest.mark.asyncio
+async def test_temporal_setup_failure_uses_failure_activity(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        if args[0] is provision_workspace:
+            raise RuntimeError("runner unavailable")  # noqa: TRY003
+        return {"error": "runner unavailable", "state": {}}
+
+    async def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    result = await workflow.run({"event": {"id": "failed"}})
+    assert result["error"] == "runner unavailable"
+    assert activities == [publish_progress, provision_workspace, fail_turn]
 
 
 @pytest.mark.asyncio

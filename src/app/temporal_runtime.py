@@ -41,14 +41,6 @@ def _engine() -> Engine:
     return _activity_runtime.engine
 
 
-def _retryable_turn_result(result: JsonObject) -> bool:
-    error = result.get("error")
-    return isinstance(error, str) and any(
-        marker in error.lower()
-        for marker in ("runner returned http 5", "disconnected", "transport error")
-    )
-
-
 @activity.defn(name="wiseman.turn")
 async def run_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
@@ -57,11 +49,9 @@ async def run_turn(payload: dict) -> dict:
     state = _object_map(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
     retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
-    result = cast(
-        "JsonObject",
-        await _engine().handle(event, state_data=state, retry_transport=retry_transport),
-    )
-    if _retryable_turn_result(result) and retry_transport:
+    result = cast("JsonObject", await _engine().handle(event, state_data=state, retry_transport=retry_transport))  # fmt: skip  # noqa: E501
+    error = result.get("error")
+    if retry_transport and isinstance(error, str) and any(marker in error.lower() for marker in ("runner returned http 5", "disconnected", "transport error")):  # fmt: skip  # noqa: E501
         raise ApplicationError(str(result["error"]), type="runner_transport")
     return result
 
@@ -94,6 +84,12 @@ async def publish_progress(payload: dict) -> dict:
     return {"phase": phase}
 
 
+@activity.defn(name="wiseman.failure")
+async def fail_turn(payload: dict) -> dict:
+    event = Event.model_validate(payload["event"])
+    return cast("dict", await _engine().fail(event, str(payload.get("error", "unknown failure")), _object_map(payload.get("state"))))  # fmt: skip  # noqa: E501
+
+
 async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:  # fmt: skip  # noqa: E501
     return await workflow.execute_activity(fn, payload, start_to_close_timeout=duration, retry_policy=TRANSPORT_RETRY_POLICY)  # fmt: skip  # noqa: E501
 
@@ -123,14 +119,17 @@ class ThreadWorkflow:
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
-            if not self.state.get("codex_thread"):
-                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🛠️ Workspace provisioning..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                await _activity(provision_workspace, {"event": event, "state": self.state}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex starting..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                started = await _activity(start_codex, {"event": event, "state": self.state}, timedelta(seconds=90))  # fmt: skip  # noqa: E501
-                self.state = _object_map(started.get("state", self.state))
-            await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-            self.result = await workflow.execute_child_workflow(TurnWorkflow.run, {"event": event, "state": self.state}, id=f"wiseman-turn-{message_id or len(self.pending)}")  # fmt: skip  # noqa: E501
+            try:
+                if not self.state.get("codex_thread"):
+                    await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🛠️ Workspace provisioning..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                    await _activity(provision_workspace, {"event": event, "state": self.state}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                    await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex starting..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                    started = await _activity(start_codex, {"event": event, "state": self.state}, timedelta(seconds=90))  # fmt: skip  # noqa: E501
+                    self.state = _object_map(started.get("state", self.state))
+                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                self.result = await workflow.execute_child_workflow(TurnWorkflow.run, {"event": event, "state": self.state}, id=f"wiseman-turn-{message_id or len(self.pending)}")  # fmt: skip  # noqa: E501
+            except Exception as exc:  # noqa: BLE001 - activity failures need Discord delivery
+                self.result = await _activity(fail_turn, {"event": event, "state": self.state, "error": str(exc)}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
             self.state = _object_map(self.result.get("state", self.state))
             try:
                 await workflow.wait_condition(
@@ -160,7 +159,7 @@ class TemporalRuntime:
             cast("Client", self.client),
             task_queue=self.queue,
             workflows=[ThreadWorkflow, TurnWorkflow],
-            activities=[provision_workspace, start_codex, publish_progress, run_turn],
+            activities=[provision_workspace, start_codex, publish_progress, fail_turn, run_turn],
         ):
             await asyncio.Event().wait()
 
