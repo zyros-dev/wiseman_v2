@@ -11,8 +11,8 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
-from app.engine import Engine, EngineResult  # noqa: TC001 - Temporal resolves the annotation
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
+from app.types import EngineResult  # noqa: TC001 - activity registration resolves this type
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -25,6 +25,7 @@ RETRY_MARKERS = ("runner returned http 5", "disconnected", "transport error")
 if TYPE_CHECKING:
     from temporalio.client import Client
 
+    from app.engine import Engine
     from app.runner import LifecycleRunner
     from app.types import JsonObject
 
@@ -200,9 +201,10 @@ def _activity_attempt() -> int:
 
 
 def _retry_prompt() -> str:
-    path = Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2"
     try:
-        return path.read_text(encoding="utf-8")
+        return (Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2").read_text(
+            encoding="utf-8"
+        )
     except OSError:
         return ""
 
