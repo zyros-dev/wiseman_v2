@@ -177,7 +177,7 @@ def split_discord_content(content: str) -> list[str]:
 
 def render_progress(steps: list[str], turn_number: int | None = None) -> str:
     count = turn_number if turn_number is not None else 0
-    visible = steps[-8:]
+    visible = "\n".join(steps).splitlines()[-8:]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])
 

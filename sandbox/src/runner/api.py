@@ -10,9 +10,10 @@ import pwd
 import shutil
 import subprocess
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, Header, HTTPException
@@ -27,6 +28,8 @@ from openai_codex.generated.v2_all import (
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+from runner.jobs import Jobs
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -36,7 +39,7 @@ CODEX_TEXT_ONLY_OVERRIDES = (
     "features.view_image=false",
     "features.image_generation=false",
 )
-PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", "/app/contracts"))
+PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", str(Path(__file__).parents[3] / "contracts")))
 
 
 class Turn(BaseModel):
@@ -45,6 +48,7 @@ class Turn(BaseModel):
     user_id: str = Field(min_length=1)
     input: str = Field(max_length=100_000)
     turn_number: int = Field(default=0, ge=0)
+    message_id: str = ""
 
 
 class WorkspaceError(ValueError):
@@ -55,6 +59,7 @@ class WorkspaceError(ValueError):
 class Workspace:
     def __init__(self, root: str = "/workspaces") -> None:
         self.root = Path(root).resolve()
+        self.lock = Lock()
 
     @staticmethod
     def username(user: str) -> str:
@@ -111,6 +116,10 @@ class Workspace:
             return
 
     def thread(self, user: str, thread: str) -> Path:
+        with self.lock:
+            return self._materialize(user, thread)
+
+    def _materialize(self, user: str, thread: str) -> Path:
         users = (self.root / "users").resolve()
         users.mkdir(parents=True, exist_ok=True)
         base = (users / user).resolve()
@@ -203,12 +212,12 @@ class CodexRunner:
 
     async def start(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
-        async with self.capacity, lock:
+        async with lock, self.capacity:
             return await self._start_locked(turn, path, account)
 
     async def _start_locked(self, turn: Turn, path: Path, account: str) -> dict[str, object]:
         existing = self.threads.get(turn.thread_id)
-        if not turn.codex_thread_id and existing is not None:
+        if existing is not None and (not turn.codex_thread_id or getattr(existing, "id", None) == turn.codex_thread_id):
             return {"thread_id": getattr(existing, "id", "")}
         client = self._client(turn, path, account)
         if turn.codex_thread_id:
@@ -225,7 +234,7 @@ class CodexRunner:
                 approval_mode=ApprovalMode.deny_all,
                 sandbox=Sandbox.full_access,
                 cwd=str(path),
-                developer_instructions=self._developer_instructions(),
+                developer_instructions=(PROMPT_ROOT / "sandbox-developer-instructions.j2").read_text(encoding="utf-8"),
                 model=os.getenv("WISEMAN_MODEL") or None,
                 model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
             )
@@ -252,17 +261,12 @@ class CodexRunner:
             )
         return self.codex[key]
 
-    @staticmethod
-    def _developer_instructions() -> str:
-        return _prompt("sandbox-developer-instructions.j2")
-
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
-        async with self.capacity, lock:
-            thread = await self._thread(turn, path, account)
+        async with lock, self.capacity:
+            await self._start_locked(turn, path, account)
+            thread = self.threads[turn.thread_id]
             self.progress_steps[turn.thread_id] = []
-            prefix = f"Gurt {turn.turn_number}: " if turn.turn_number else ""
-            self._set_progress(turn.thread_id, f"🤖 {prefix}Codex turn started...")
             return await self._run_thread(thread, turn, path)
 
     def _set_progress(self, thread_id: str, message: str) -> None:
@@ -271,44 +275,7 @@ class CodexRunner:
         if not steps or steps[-1] != message:
             steps.append(message)
 
-    async def _thread(self, turn: Turn, path: Path, account: str) -> object:
-        # A client owns its cwd and Codex session environment, so it is private
-        # to a Discord thread even when the user has many threads.
-        key = turn.thread_id
-        client = self._client(turn, path, account)
-        thread = self.threads.get(key)
-        if thread is None or (turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id):
-            if not turn.codex_thread_id:
-                started = await self._start_locked(turn, path, account)
-                thread = self.threads[key]
-                assert started["thread_id"] == thread.id
-            else:
-                thread = await client.thread_resume(
-                    turn.codex_thread_id,
-                    approval_mode=ApprovalMode.deny_all,
-                    sandbox=Sandbox.full_access,
-                    cwd=str(path),
-                    model=os.getenv("WISEMAN_MODEL") or None,
-                    model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
-                )
-                self.threads[key] = thread
-        assert thread is not None
-        return thread
-
     async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
-        if not hasattr(thread, "turn"):
-            result = await thread.run(
-                turn.input,
-                approval_mode=ApprovalMode.deny_all,
-                sandbox=Sandbox.full_access,
-                cwd=str(path),
-            )
-            return {
-                "thread_id": thread.id,
-                "output": result.final_response or "",
-                "model": os.getenv("WISEMAN_MODEL", "codex"),
-                "usage": result.usage.model_dump(mode="json") if result.usage else None,
-            }
         turn_number = turn.turn_number or self.turn_counts.get(turn.thread_id, 0) + 1
         self.turn_counts[turn.thread_id] = turn_number
         self._set_progress(turn.thread_id, f"🤖 Gurt {turn_number}: Codex turn started...")
@@ -334,6 +301,12 @@ class CodexRunner:
                 elif isinstance(payload, TurnCompletedNotification):
                     completed = payload
         finally:
+            if completed is None:
+                with suppress(Exception):
+                    async with asyncio.timeout(5):
+                        await active_turn.interrupt()
+                await self.codex.pop(turn.thread_id).close()
+                self.threads.pop(turn.thread_id, None)
             self.active_turns.pop(turn.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")
@@ -354,16 +327,6 @@ class CodexRunner:
             return False
         await active.steer(turn.input)
         return True
-
-
-def _prompt(name: str) -> str:
-    for root in (PROMPT_ROOT, Path(__file__).parents[3] / "contracts"):
-        for candidate in (name, name.removesuffix(".txt") + ".j2"):
-            try:
-                return (root / candidate).read_text(encoding="utf-8")
-            except OSError:
-                continue
-    return os.getenv("WISEMAN_DEVELOPER_INSTRUCTIONS", "")
 
 
 def _final_response(items: list[object]) -> str:
@@ -407,11 +370,12 @@ def create_app() -> FastAPI:
     )
     workspaces = Workspace(root)
     codex = CodexRunner()
+    jobs = Jobs(Path(root) / ".runner-jobs")
     app = FastAPI(
         title="wiseman-sandbox",
         docs_url=None,
         redoc_url=None,
-        lifespan=partial(_lifespan, workspaces),
+        lifespan=partial(_lifespan, workspaces, jobs, codex),
     )
 
     @app.get("/healthz")
@@ -430,13 +394,13 @@ def create_app() -> FastAPI:
     @app.post("/acquire")
     async def acquire(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
-        path = workspaces.thread(turn.user_id, turn.thread_id)
+        path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         return {"thread_id": turn.thread_id, "path": str(path), "shared": str(path / "shared")}
 
     @app.post("/start")
     async def start(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
-        path = workspaces.thread(turn.user_id, turn.thread_id)
+        path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         try:
             return await codex.start(turn, path, workspaces.username(turn.user_id))
         except Exception as exc:
@@ -445,17 +409,31 @@ def create_app() -> FastAPI:
     @app.post("/turn")
     async def run(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
-        path = workspaces.thread(turn.user_id, turn.thread_id)
+
+        async def execute() -> dict[str, object]:
+            path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
+            return await codex.run(turn, path, workspaces.username(turn.user_id))
+
         try:
-            data = await codex.run(turn, path, workspaces.username(turn.user_id))
+            if turn.message_id:
+                return jobs.submit(turn.message_id, f"{turn.user_id}/{turn.thread_id}", execute).model_dump()
+            return await execute()
         except Exception as exc:
             raise HTTPException(503, f"codex unavailable: {exc}") from exc
-        return data
+
+    @app.get("/jobs/{message_id}")
+    async def job(message_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
+        _auth(authorization, secret)
+        try:
+            receipt = jobs.get(message_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "unknown runner job") from exc
+        return {**receipt.model_dump(), "steps": codex.progress_steps.get(receipt.workspace.split("/", 1)[1], [])}
 
     @app.post("/steer")
     async def steer(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
         _auth(authorization, secret)
-        path = workspaces.thread(turn.user_id, turn.thread_id)
+        path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         try:
             return {"steered": await codex.steer(turn, path, workspaces.username(turn.user_id))}
         except Exception as exc:
@@ -473,10 +451,10 @@ def create_app() -> FastAPI:
 
 
 @asynccontextmanager
-async def _lifespan(workspaces: Workspace, _app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(workspaces: Workspace, jobs: Jobs, codex: CodexRunner, _app: FastAPI) -> AsyncIterator[None]:
     async def sweep() -> None:
         while True:
-            workspaces.cleanup()
+            await asyncio.to_thread(workspaces.cleanup)
             await asyncio.sleep(3600)
 
     cleaner = asyncio.create_task(sweep())
@@ -485,3 +463,5 @@ async def _lifespan(workspaces: Workspace, _app: FastAPI) -> AsyncIterator[None]
     finally:
         cleaner.cancel()
         await asyncio.gather(cleaner, return_exceptions=True)
+        await jobs.close()
+        await asyncio.gather(*(client.close() for client in codex.codex.values()), return_exceptions=True)
