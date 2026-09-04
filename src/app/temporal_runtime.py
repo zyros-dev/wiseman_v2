@@ -11,8 +11,6 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
-from app.runner import LifecycleRunner
-from app.types import JsonObject  # noqa: TC001 - Temporal resolves wire annotations
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 
@@ -22,6 +20,8 @@ if TYPE_CHECKING:
     from temporalio.client import Client
 
     from app.engine import Engine
+    from app.runner import LifecycleRunner
+    from app.types import JsonObject
 
 
 class _ActivityRuntime:
@@ -37,7 +37,7 @@ def configure_engine(engine: Engine) -> None:
 
 def _engine() -> Engine:
     if _activity_runtime.engine is None:
-        raise RuntimeError("Temporal Activities are not configured")  # noqa: TRY003
+        raise RuntimeError("Temporal Activities are not configured")
     return _activity_runtime.engine
 
 
@@ -49,9 +49,13 @@ async def run_turn(payload: dict) -> dict:
     state = _object_map(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
     retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
-    result = cast("JsonObject", await _engine().handle(event, state_data=state, retry_transport=retry_transport))  # fmt: skip  # noqa: E501
+    result = cast(
+        "JsonObject",
+        await _engine().handle(event, state_data=state, retry_transport=retry_transport),
+    )
     error = result.get("error")
-    if retry_transport and isinstance(error, str) and any(marker in error.lower() for marker in ("runner returned http 5", "disconnected", "transport error")):  # fmt: skip  # noqa: E501
+    retry_markers = ("runner returned http 5", "disconnected", "transport error")
+    if retry_transport and isinstance(error, str) and any(marker in error.lower() for marker in retry_markers):
         raise ApplicationError(str(result["error"]), type="runner_transport")
     return result
 
@@ -60,9 +64,7 @@ async def run_turn(payload: dict) -> dict:
 async def provision_workspace(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    await cast(LifecycleRunner, _engine().config.runner).acquire(  # noqa: TC006
-        event.trigger.author_id, workspace
-    )
+    await cast("LifecycleRunner", _engine().config.runner).acquire(event.trigger.author_id, workspace)
     return {"workspace": workspace}
 
 
@@ -71,7 +73,7 @@ async def start_codex(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await cast(LifecycleRunner, _engine().config.runner).start(  # noqa: TC006
+    thread = await cast("LifecycleRunner", _engine().config.runner).start(
         str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
     )
     state["codex_thread"] = thread
@@ -89,11 +91,19 @@ async def publish_progress(payload: dict) -> dict:
 @activity.defn(name="wiseman.failure")
 async def fail_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
-    return cast("dict", await _engine().fail(event, str(payload.get("error", "unknown failure")), _object_map(payload.get("state"))))  # fmt: skip  # noqa: E501
+    return cast(
+        "dict",
+        await _engine().fail(event, str(payload.get("error", "unknown failure")), _object_map(payload.get("state"))),
+    )
 
 
-async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:  # fmt: skip  # noqa: E501
-    return await workflow.execute_activity(fn, payload, start_to_close_timeout=duration, retry_policy=TRANSPORT_RETRY_POLICY)  # fmt: skip  # noqa: E501
+async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:
+    return await workflow.execute_activity(
+        fn,
+        payload,
+        start_to_close_timeout=duration,
+        retry_policy=TRANSPORT_RETRY_POLICY,
+    )
 
 
 @workflow.defn(name="wiseman.turn")
@@ -125,12 +135,12 @@ class ThreadWorkflow:
                 continue
             try:
                 if not self.state.get("codex_thread"):
-                    await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🛠️ Workspace provisioning..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                    await _activity(provision_workspace, {"event": event, "state": self.state}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                    await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex starting..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                    started = await _activity(start_codex, {"event": event, "state": self.state}, timedelta(seconds=90))  # fmt: skip  # noqa: E501
-                    self.state = _object_map(started.get("state", self.state))
-                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                    self.state = await _setup(event, self.state)
+                await _activity(
+                    publish_progress,
+                    {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."},
+                    timedelta(seconds=30),
+                )
                 if child_workflow:
                     self.result = await workflow.execute_child_workflow(
                         TurnWorkflow.run,
@@ -141,8 +151,12 @@ class ThreadWorkflow:
                     self.result = await _activity(
                         run_turn, {"event": event, "state": self.state}, timedelta(minutes=10)
                     )
-            except Exception as exc:  # noqa: BLE001 - activity failures need Discord delivery
-                self.result = await _activity(fail_turn, {"event": event, "state": self.state, "error": str(exc)}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+            except Exception as exc:
+                self.result = await _activity(
+                    fail_turn,
+                    {"event": event, "state": self.state, "error": str(exc)},
+                    timedelta(seconds=30),
+                )
             self.state = _object_map(self.result.get("state", self.state))
             try:
                 await workflow.wait_condition(
@@ -153,6 +167,17 @@ class ThreadWorkflow:
                 return self.result
 
 
+async def _setup(event: dict, state: JsonObject) -> JsonObject:
+    for fn, phase, duration in (
+        (provision_workspace, "🛠️ Workspace provisioning...", timedelta(seconds=30)),
+        (start_codex, "🤖 Codex starting...", timedelta(seconds=90)),
+    ):
+        await _activity(publish_progress, {"event": event, "state": state, "phase": phase}, duration)
+        result = await _activity(fn, {"event": event, "state": state}, duration)
+        state = _object_map(result.get("state", state))
+    return state
+
+
 class TemporalRuntime:
     def __init__(self, address: str, queue: str) -> None:
         self.address, self.queue = address, queue
@@ -160,13 +185,13 @@ class TemporalRuntime:
         self.worker_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        from temporalio.client import Client  # noqa: PLC0415 - optional runtime dependency
+        from temporalio.client import Client
 
         self.client = await Client.connect(self.address)
         self.worker_task = asyncio.create_task(self._serve())
 
     async def _serve(self) -> None:
-        from temporalio.worker import Worker  # noqa: PLC0415 - optional runtime dependency
+        from temporalio.worker import Worker
 
         async with Worker(
             cast("Client", self.client),
@@ -178,7 +203,7 @@ class TemporalRuntime:
 
     async def submit(self, event: dict) -> None:
         if self.client is None:
-            raise RuntimeError("Temporal is not connected")  # noqa: TRY003
+            raise RuntimeError("Temporal is not connected")
         trigger = _object_map(event["trigger"])
         thread_id = trigger.get("thread_id") or trigger["channel_id"]
         workflow_id = f"wiseman-{thread_id}"

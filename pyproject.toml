@@ -47,7 +47,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"
-line-length = 100
+line-length = 120
 src = ["src", "sandbox/src", "tests"]
 
 [tool.ruff.lint]
@@ -60,6 +60,7 @@ ignore = [
   "ISC001",  # conflicts with formatter
   "S101",    # assertions are appropriate in tests
   "TD003",   # TODO issue links are not required in local code
+  "TRY003",  # boundary errors carry concise operational details
 ]
 
 [tool.ruff.lint.mccabe]
@@ -73,7 +74,11 @@ max-returns = 6
 max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["ANN", "ARG", "B018", "N802", "PLC2701", "PLR2004", "S106"]
+"sandbox/src/runner/api.py" = ["S603"]
+"src/app/temporal_runtime.py" = ["BLE001", "PLC0415"]
+"tests/**/*.py" = [
+  "ANN", "ARG", "B018", "N802", "PLC2701", "PLR2004", "S106", "SLF001"
+]
 
 [tool.coverage.run]
 branch = true

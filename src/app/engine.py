@@ -16,9 +16,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient
-    from app.types import JsonObject
+    from app.types import EngineResult, JsonObject, StateData
 
-from app.admission import ContextConfig, context, event_data, image_tool_instruction, render_grammar
+from app.admission import ContextConfig, context, image_tool_instruction, render_grammar
 from app.models import ActiveTurn, Event, Message, Messageable, State
 from app.phoenix import json_text, route_info
 from app.presentation import (
@@ -30,7 +30,6 @@ from app.presentation import (
     startup_embed,
 )
 from app.runner import TURN_NUMBER, Runner, RunnerError
-from app.types import EngineResult, StateData  # noqa: TC001 - public result types are re-exported
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
@@ -93,10 +92,10 @@ class Engine:
     ) -> None:
         if clients is not None:
             if config is not None:
-                raise ValueError("choose config or clients")  # noqa: TRY003
+                raise ValueError("choose config or clients")
             config = EngineConfig(clients.phoenix, clients.runner, clients.prompts)
         if config is None:
-            raise ValueError("engine config is required")  # noqa: TRY003
+            raise ValueError("engine config is required")
         self.config = config
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
@@ -110,9 +109,7 @@ class Engine:
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
 
     def bind_clients(self, clients: ClientContainer) -> None:
-        self.config = EngineConfig(
-            clients.phoenix, clients.runner, clients.prompts, self.config.context
-        )
+        self.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, self.config.context)
 
     async def handle(
         self,
@@ -233,7 +230,7 @@ class Engine:
             closed=bool(data.get("closed", False)),
         )
 
-    async def preflight(self, event: Event, phase: str, state_data: JsonObject | None = None) -> None:  # fmt: skip  # noqa: E501
+    async def preflight(self, event: Event, phase: str, state_data: JsonObject | None = None) -> None:
         trigger = event.trigger
         if self.lookup_channel is None or (channel := await self.lookup_channel(event)) is None:
             return
@@ -243,7 +240,7 @@ class Engine:
                 await cast("Callable[..., Awaitable[object]]", channel.send)(embed=startup_embed())
         steps.extend(() if phase in steps else (phase,))
         message = self.deliveries.get(trigger.id)
-        content = render_progress(steps, self._state(state_data).turn + 1)  # fmt: skip  # noqa: E501
+        content = render_progress(steps, self._state(state_data).turn + 1)
         if message is None:
             with suppress(discord.DiscordException):
                 message = await channel.send(content)
@@ -252,22 +249,32 @@ class Engine:
             with suppress(discord.DiscordException):
                 await edit_delivery(message, content)
 
-    async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> EngineResult:  # fmt: skip  # noqa: E501
+    async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> EngineResult:
         live = await self.lookup(event) if self.lookup is not None else None
         channel = await self.lookup_channel(event) if self.lookup_channel is not None else None
-        lifecycle = _Lifecycle(event.trigger, live, channel, self.deliveries.get(event.trigger.id), self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]), f"discord-{event.trigger.id}", event.kind or "startup", self._state(state_data))  # fmt: skip  # noqa: E501
+        lifecycle = _Lifecycle(
+            event.trigger,
+            live,
+            channel,
+            self.deliveries.get(event.trigger.id),
+            self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]),
+            f"discord-{event.trigger.id}",
+            event.kind or "startup",
+            self._state(state_data),
+        )
         return await self._failure(lifecycle, RuntimeError(error))
 
     async def _prepare(self, request: _Preparation) -> _Prepared:
         r = request
         trigger = r.event.trigger
-        raw = r.event.raw_payload or event_data(r.event)
+        normalized = cast("JsonObject", r.event.model_dump(mode="json", exclude={"raw_payload"}))
+        raw = r.event.raw_payload or normalized
         await self.config.phoenix.record(
             r.trace,
             "admission",
             audit_id=r.trace,
             raw_request=raw,
-            normalized_request=event_data(r.event),
+            normalized_request=normalized,
             normalizer="normalize_event:v2",
         )
         await self.config.phoenix.record(
@@ -283,9 +290,7 @@ class Engine:
         self.working_reactions[trigger.id] = processing_emoji
         self._react(trigger.id, processing_emoji)
         await self._ensure_live_reaction(r.live, processing_emoji)
-        await self.config.phoenix.record(
-            r.trace, "reaction", operations=[f"add:{processing_emoji}"]
-        )
+        await self.config.phoenix.record(r.trace, "reaction", operations=[f"add:{processing_emoji}"])
         current = context(r.event, self.config.context)
         r.state.seen.update(cast("list[str]", current["selected_ids"]))
         await self.config.phoenix.record(
@@ -327,9 +332,7 @@ class Engine:
         progress_message = self.deliveries.get(trigger.id)
         if r.channel is not None and r.kind == "startup" and not self.progress[trigger.id]:
             with suppress(discord.DiscordException):
-                await cast("Callable[..., Awaitable[object]]", r.channel.send)(
-                    embed=startup_embed()
-                )
+                await cast("Callable[..., Awaitable[object]]", r.channel.send)(embed=startup_embed())
         phase = "codex starting" if r.kind == "startup" else "working"
         progress = "🤖 Codex starting..." if r.kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
@@ -337,10 +340,10 @@ class Engine:
         await self.config.phoenix.record(r.trace, "progress", phase=phase)
         if progress_message is None and r.channel is not None:
             with suppress(discord.DiscordException):
-                progress_message = await r.channel.send(render_progress([progress], r.state.turn + 1))  # fmt: skip  # noqa: E501
+                progress_message = await r.channel.send(render_progress([progress], r.state.turn + 1))
             self.deliveries[trigger.id] = progress_message
         key = trigger.thread_id or trigger.channel_id
-        self.active_turns[key] = ActiveTurn(trigger.id, str(getattr(progress_message, "id", "")) or None)  # fmt: skip  # noqa: E501
+        self.active_turns[key] = ActiveTurn(trigger.id, str(getattr(progress_message, "id", "")) or None)
         return _Prepared(prompt, current, progress_message, processing_emoji)
 
     async def _run_codex(
@@ -368,9 +371,7 @@ class Engine:
         if self._react(trigger.id, failure_emoji):
             await self._ensure_live_reaction(lifecycle.live, failure_emoji)
             if lifecycle.channel is not None:
-                await deliver_content(
-                    lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}"
-                )
+                await deliver_content(lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}")
             await self._remove_working_reaction(trigger.id, lifecycle.live)
         await self.config.phoenix.record(
             lifecycle.trace,
@@ -424,18 +425,14 @@ class Engine:
             "state": _state_data(state),
         }
 
-    async def steer_if_active(
-        self, thread_id: str, message_id: str, prompt: str, user: str
-    ) -> bool:
+    async def steer_if_active(self, thread_id: str, message_id: str, prompt: str, user: str) -> bool:
         active = self.active_turns.get(thread_id)
         if active is None or active.delivery_id != message_id:
             return False
         steer = getattr(self.config.runner, "steer", None)
         if not callable(steer):
             return False
-        accepted = await cast("Callable[..., Awaitable[bool]]", steer)(
-            "", prompt, user, workspace=thread_id
-        )
+        accepted = await cast("Callable[..., Awaitable[bool]]", steer)("", prompt, user, workspace=thread_id)
         if accepted:
             await self.config.phoenix.record(
                 f"discord-{message_id}",
@@ -494,4 +491,6 @@ def _strings(value: object) -> set[str]:
 
 
 def _transport_error(error: Exception) -> bool:
-    return isinstance(error, RunnerError) or any(marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5"))  # fmt: skip  # noqa: E501
+    return isinstance(error, RunnerError) or any(
+        marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5")
+    )

@@ -47,14 +47,12 @@ def banner() -> str:
     ):
         if key in info:
             details.append(f"{label}: `{info[key]}`")
-    return (
-        "⚡ **Wiseman thread startup**\n" + line + ("\n" + " · ".join(details) if details else "")
-    )
+    return "⚡ **Wiseman thread startup**\n" + line + ("\n" + " · ".join(details) if details else "")
 
 
 def thread_name(number: int) -> str:
     if number < 1:
-        raise ValueError("thread number must be positive")  # noqa: TRY003
+        raise ValueError("thread number must be positive")
     return f"Gurt {number}"[:THREAD_NAME_LIMIT]
 
 
@@ -63,9 +61,7 @@ def startup_embed() -> discord.Embed:
     return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
 
 
-async def describe_images(
-    messages: Sequence[Mapping[str, object]], question: str = ""
-) -> dict[str, object]:
+async def describe_images(messages: Sequence[Mapping[str, object]], question: str = "") -> dict[str, object]:
     images: list[dict[str, str]] = []
     seen: set[str] = set()
     for message in messages:
@@ -133,9 +129,7 @@ def _contract(name: str) -> str:
 
 
 def _vision_question(question: str) -> str:
-    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(
-        _contract("vision-question.j2")
-    )
+    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(_contract("vision-question.j2"))
     return template.render(question=question)
 
 

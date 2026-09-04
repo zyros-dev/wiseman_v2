@@ -7,11 +7,25 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.types import JsonObject
 
 THREAD_AUTO_ARCHIVE_MINUTES = 60
-IMAGE_SUFFIXES = (".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")  # fmt: skip  # noqa: E501
+IMAGE_SUFFIXES = (
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+)
 
 
 def is_image_attachment(value: object) -> bool:
-    return isinstance(value, dict) and (str(value.get("content_type") or "").startswith("image/") or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES))  # fmt: skip  # noqa: E501
+    return isinstance(value, dict) and (
+        str(value.get("content_type") or "").startswith("image/")
+        or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES)
+    )
 
 
 class Message(BaseModel):
@@ -42,10 +56,6 @@ class Event(BaseModel):
 
 class Messageable(Protocol):
     async def send(self, content: str = "") -> object: ...
-
-
-class EmbedMessageable(Protocol):
-    async def send(self, content: str = "", *, embed: object | None = None) -> object: ...
 
 
 @dataclass

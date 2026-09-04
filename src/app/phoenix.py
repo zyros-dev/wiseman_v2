@@ -26,9 +26,7 @@ def json_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def provider_values(
-    body: JsonObject, usage: object, cost: object, model: object
-) -> tuple[object, object, object]:
+def provider_values(body: JsonObject, usage: object, cost: object, model: object) -> tuple[object, object, object]:
     nested = body.get("response") or body.get("data") or body
     if not isinstance(nested, dict):
         return usage, cost, model
@@ -54,17 +52,13 @@ class Phoenix:
         self.roots: dict[str, Span] = {}
         self.contexts: dict[str, Context] = {}
         self.provider = TracerProvider(
-            resource=Resource.create(
-                {"service.name": "wiseman-v2", "openinference.project.name": project}
-            )
+            resource=Resource.create({"service.name": "wiseman-v2", "openinference.project.name": project})
         )
         if endpoint:
             headers = {"Authorization": f"Bearer {key}"} if key else {}
             if project:
                 headers["x-project-name"] = project
-            self.provider.add_span_processor(
-                BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, headers=headers))
-            )
+            self.provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, headers=headers)))
         self.tracer = self.provider.get_tracer("wiseman-v2")
 
     async def record(self, trace: str, node: str, **data: object) -> None:
@@ -88,9 +82,7 @@ class Phoenix:
         with self.tracer.start_as_current_span(node, context=self.contexts[trace]) as span:
             span.set_attribute("openinference.session.id", trace)
             for key, value in item.items():
-                span.set_attribute(
-                    f"wiseman.{key}", json_text(value) if not isinstance(value, str) else value
-                )
+                span.set_attribute(f"wiseman.{key}", json_text(value) if not isinstance(value, str) else value)
         terminal = node in {"failure", "provider", "vision_tool"} or (
             node == "reaction" and "✅" in json_text(data.get("operations", []))
         )
@@ -162,9 +154,7 @@ class PromptHub:
                     if isinstance(data.get("source"), str):
                         return data["source"][:100_000]
                     if data.get("template") is not None:
-                        return json_text(
-                            {"model": data.get("model_name"), "template": data["template"]}
-                        )[:100_000]
+                        return json_text({"model": data.get("model_name"), "template": data["template"]})[:100_000]
                 return default
         except (httpx.HTTPError, ValueError, AttributeError):
             return default
@@ -187,6 +177,6 @@ def route_info() -> dict[str, object]:
         "cached_price": os.getenv("WISEMAN_CACHED_PRICE"),
         "vision_assist_model": os.getenv("WISEMAN_VISION_MODEL"),
     }
-    return {
-        key: info.get(key, value) for key, value in defaults.items() if info.get(key, value)
-    } | {key: value for key, value in info.items() if value not in (None, "")}
+    return {key: info.get(key, value) for key, value in defaults.items() if info.get(key, value)} | {
+        key: value for key, value in info.items() if value not in (None, "")
+    }
