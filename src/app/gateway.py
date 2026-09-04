@@ -22,7 +22,7 @@ from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SEC
 
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
-DISCORD_MESSAGES = Counter("wiseman_discord_messages_received", "Non-bot Discord messages received")
+DISCORD_MESSAGES = Counter("wiseman_discord_messages_received", "Discord messages received")
 
 
 class Gateway(discord.Client):
@@ -243,7 +243,7 @@ class Gateway(discord.Client):
             and str(message.channel.id) in self.thread_activity
         ):
             self._touch_thread(str(message.channel.id))
-        if message.author.bot:
+        if message.author.bot and str(message.author.id) == str(getattr(self.user, "id", "")):
             return
         DISCORD_MESSAGES.inc()
         LOGGER.warning("Discord message received id=%s channel=%s mentions=%s bot=%s", message.id, message.channel.id, mention_ids(message), getattr(self.user, "id", ""))  # fmt: skip  # noqa: E501
