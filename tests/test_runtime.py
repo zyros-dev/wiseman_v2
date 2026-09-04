@@ -927,6 +927,49 @@ async def test_same_thread_turns_are_serialized() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_followup_preserves_previous_answer(failed):
+    messages = {}
+
+    class Delivery:
+        def __init__(self, identifier):
+            self.id = identifier
+
+        async def edit(self, *, content):
+            messages[self.id] = content
+
+    class Channel:
+        async def send(self, content="", **kwargs):
+            identifier = str(len(messages))
+            messages[identifier] = content
+            return Delivery(identifier)
+
+    engine = configured_engine()
+    channel = Channel()
+
+    async def restore(event, identifier):
+        return Delivery(identifier)
+
+    async def lookup_channel(event):
+        return channel
+
+    engine.lookup_delivery = restore
+    engine.lookup_channel = lookup_channel
+    first = normalize_event(discord_message("first", "one", thread="t"))
+    state = await engine.preflight(first, "working")
+    if failed:
+        result = await engine.fail(first, "test failure", cast("JsonObject", state))
+    else:
+        result = await engine.handle(first, delivery_channel=channel, state_data=cast("JsonObject", state))
+    assert result["state"]["delivery_id"] is None
+    assert result["state"]["progress"] == []
+    previous = dict(messages)
+    second = normalize_event(discord_message("second", "two", thread="t"))
+    await engine.handle(second, delivery_channel=channel, state_data=cast("JsonObject", result["state"]))
+    assert all(messages[key] == content for key, content in previous.items())
+
+
+@pytest.mark.asyncio
 async def test_new_turn_recovers_after_previous_failure() -> None:
     attempts = 0
 
