@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -13,12 +12,13 @@ import discord
 from prometheus_client import Counter
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient
     from app.types import EngineResult, JsonObject, StateData
 
-from app.admission import ContextConfig, context, image_tool_instruction, render_grammar
+from app.admission import ContextConfig, context, render_grammar
+from app.engine_support import PromptRequest, build_prompt
 from app.models import ActiveTurn, Event, Message, Messageable, State
 from app.phoenix import json_text, route_info
 from app.presentation import (
@@ -98,7 +98,6 @@ class Engine:
             raise ValueError("engine config is required")
         self.config = config
         self.reactions: dict[str, list[str]] = defaultdict(list)
-        self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
         self.reaction_user: object | None = None
         self.reaction_emojis = dict(DEFAULT_REACTION_EMOJIS)
@@ -107,9 +106,7 @@ class Engine:
         self.deliveries: dict[str, object] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
-
-    def bind_clients(self, clients: ClientContainer) -> None:
-        self.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, self.config.context)
+        self.lookup_delivery: Callable[[Event, str], Awaitable[object | None]] | None = None
 
     async def handle(
         self,
@@ -184,15 +181,15 @@ class Engine:
         )
 
         async def report(message: str) -> None:
-            if self.progress[trigger.id] and self.progress[trigger.id][-1] == message:
+            if state.progress and state.progress[-1] == message:
                 return
-            self.progress[trigger.id].append(message)
+            state.progress.append(message)
             await self.config.phoenix.record(trace, "progress", phase=message)
             if lifecycle.progress_message is not None:
                 try:
                     await edit_delivery(
                         lifecycle.progress_message,
-                        render_progress(self.progress[trigger.id], state.turn + 1),
+                        render_progress(state.progress, state.turn + 1),
                     )
                 except discord.DiscordException:
                     LOGGER.warning("Could not update progress message for %s", trigger.id)
@@ -220,7 +217,7 @@ class Engine:
             )
         )
 
-    def _state(self, data: JsonObject | None) -> State:
+    def _state(self, data: Mapping[str, object] | None) -> State:
         data = data or {}
         return State(
             codex_thread=cast("str | None", data.get("codex_thread")),
@@ -228,26 +225,58 @@ class Engine:
             processed=_strings(data.get("processed", [])),
             turn=int(cast("int", data.get("turn", 0))),
             closed=bool(data.get("closed", False)),
+            delivery_id=cast("str | None", data.get("delivery_id")),
+            banner_sent=bool(data.get("banner_sent", False)),
+            progress=[item for item in cast("list[object]", data.get("progress", [])) if isinstance(item, str)],
         )
 
-    async def preflight(self, event: Event, phase: str, state_data: JsonObject | None = None) -> None:
+    async def preflight(self, event: Event, phase: str, state_data: Mapping[str, object] | None = None) -> StateData:
         trigger = event.trigger
         if self.lookup_channel is None or (channel := await self.lookup_channel(event)) is None:
-            return
-        steps = self.progress[trigger.id]
-        if event.kind == "startup" and not steps:
-            with suppress(discord.DiscordException):
-                await cast("Callable[..., Awaitable[object]]", channel.send)(embed=startup_embed())
+            return _state_data(self._state(state_data))
+        state = self._state(state_data)
+        steps = state.progress
+        await self._ensure_banner(event.kind or "startup", channel, state)
         steps.extend(() if phase in steps else (phase,))
+        state.progress = list(steps)
         message = self.deliveries.get(trigger.id)
-        content = render_progress(steps, self._state(state_data).turn + 1)
+        if message is None and state.delivery_id and self.lookup_delivery is not None:
+            message = await self._restore_delivery(event, state.delivery_id)
+            if message is not None:
+                self.deliveries[trigger.id] = message
+        content = render_progress(steps, state.turn + 1)
         if message is None:
-            with suppress(discord.DiscordException):
-                message = await channel.send(content)
-            self.deliveries[trigger.id] = message
+            message = await self._send_progress(channel, content)
+            if message is not None:
+                self.deliveries[trigger.id] = message
+                state.delivery_id = str(getattr(message, "id", "")) or state.delivery_id
         else:
             with suppress(discord.DiscordException):
                 await edit_delivery(message, content)
+        return _state_data(state)
+
+    async def _ensure_banner(self, kind: str, channel: Messageable, state: State) -> None:
+        if kind != "startup" or state.banner_sent:
+            return
+        try:
+            await cast("Callable[..., Awaitable[object]]", channel.send)(embed=startup_embed())
+        except discord.DiscordException:
+            return
+        state.banner_sent = True
+
+    async def _restore_delivery(self, event: Event, delivery_id: str) -> object | None:
+        if self.lookup_delivery is None:
+            return None
+        with suppress(discord.DiscordException):
+            return await self.lookup_delivery(event, delivery_id)
+        return None
+
+    @staticmethod
+    async def _send_progress(channel: Messageable, content: str) -> object | None:
+        try:
+            return await cast("Callable[..., Awaitable[object]]", channel.send)(content)
+        except discord.DiscordException:
+            return None
 
     async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> EngineResult:
         live = await self.lookup(event) if self.lookup is not None else None
@@ -310,41 +339,36 @@ class Engine:
             messages=cast("list[dict[str, object]]", current["messages"]),
         )
         await self.config.phoenix.record(r.trace, "grammar", **grammar)
-        parts = {
-            "soul": await self.config.prompts.source("wiseman-soul"),
-            "runtime": await self.config.prompts.source("wiseman-runtime"),
-            "memories": os.getenv("WISEMAN_MEMORIES", ""),
-            "context": cast("str", grammar["rendered"]),
-            "user": "\n\n".join(
-                part
-                for part in (
-                    trigger.content,
-                    image_tool_instruction(
-                        trigger.model_dump(mode="json"),
-                        cast("list[dict[str, object]]", current["reply_ancestors"]),
-                    ),
-                )
-                if part
-            ),
-        }
-        prompt = json_text(parts)
-        await self.config.phoenix.record(r.trace, "prompt", parts=parts, final_input=prompt)
-        progress_message = self.deliveries.get(trigger.id)
-        if r.channel is not None and r.kind == "startup" and not self.progress[trigger.id]:
-            with suppress(discord.DiscordException):
-                await cast("Callable[..., Awaitable[object]]", r.channel.send)(embed=startup_embed())
+        prompt = await build_prompt(
+            PromptRequest(self.config.phoenix, self.config.prompts, r.trace, trigger, current, grammar)
+        )
+        progress_message = await self._prepare_delivery(r, trigger)
         phase = "codex starting" if r.kind == "startup" else "working"
-        progress = "🤖 Codex starting..." if r.kind == "startup" else "⏳ Working..."
-        if not self.progress[trigger.id]:
-            self.progress[trigger.id].append(phase)
+        if phase not in r.state.progress:
+            r.state.progress.append(phase)
         await self.config.phoenix.record(r.trace, "progress", phase=phase)
         if progress_message is None and r.channel is not None:
-            with suppress(discord.DiscordException):
-                progress_message = await r.channel.send(render_progress([progress], r.state.turn + 1))
-            self.deliveries[trigger.id] = progress_message
+            progress_message = await self._send_progress(r.channel, render_progress(r.state.progress, r.state.turn + 1))
+            if progress_message is not None:
+                self.deliveries[trigger.id] = progress_message
+                r.state.delivery_id = str(getattr(progress_message, "id", "")) or r.state.delivery_id
         key = trigger.thread_id or trigger.channel_id
         self.active_turns[key] = ActiveTurn(trigger.id, str(getattr(progress_message, "id", "")) or None)
         return _Prepared(prompt, current, progress_message, processing_emoji)
+
+    async def _prepare_delivery(self, request: _Preparation, trigger: Message) -> object | None:
+        message = self.deliveries.get(trigger.id)
+        if request.state.progress or message is not None:
+            request.state.banner_sent = True
+        if message is None and request.state.delivery_id:
+            message = await self._restore_delivery(request.event, request.state.delivery_id)
+            if message is not None:
+                self.deliveries[trigger.id] = message
+        if message is not None and not request.state.delivery_id:
+            request.state.delivery_id = str(getattr(message, "id", "")) or None
+        if request.channel is not None:
+            await self._ensure_banner(request.kind, request.channel, request.state)
+        return message
 
     async def _run_codex(
         self,
@@ -392,7 +416,7 @@ class Engine:
         trigger = lifecycle.trigger
         state = lifecycle.state
         state.turn += 1
-        self.progress[trigger.id].append("✍️ Writing response...")
+        state.progress.append("✍️ Writing response...")
         await self.config.phoenix.record(lifecycle.trace, "progress", phase="finalizing")
         await self.config.phoenix.record(
             lifecycle.trace,
@@ -421,7 +445,7 @@ class Engine:
             "output": result.output,
             "selected_ids": cast("list[str]", result.current["selected_ids"]),
             "reactions": self.reactions[trigger.id],
-            "progress": self.progress[trigger.id],
+            "progress": state.progress,
             "state": _state_data(state),
         }
 
@@ -483,6 +507,9 @@ def _state_data(state: State) -> StateData:
         "seen": sorted(state.seen),
         "processed": sorted(state.processed),
         "turn": state.turn,
+        "delivery_id": state.delivery_id,
+        "banner_sent": state.banner_sent,
+        "progress": state.progress,
     }
 
 

@@ -132,7 +132,7 @@ def _context(engine: Engine | None, token: str, discord_token: str, clients: Cli
                 runner=cast("RunnerClient", engine.config.runner),
             ),
         )
-    engine.bind_clients(clients)
+    engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context)
     assert clients is not None
     return _Context(engine, bot, clients, temporal, token, discord_token)
 

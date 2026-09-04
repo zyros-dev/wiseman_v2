@@ -65,6 +65,9 @@ class State:
     processed: set[str] = field(default_factory=set)
     turn: int = 0
     closed: bool = False
+    delivery_id: str | None = None
+    banner_sent: bool = False
+    progress: list[str] = field(default_factory=list)
 
 
 @dataclass
