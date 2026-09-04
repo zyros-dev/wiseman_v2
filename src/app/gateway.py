@@ -179,7 +179,7 @@ class Gateway(discord.Client):
                 self.thread_activity.setdefault(thread_id, _last_message_time(thread))
                 edit = getattr(thread, "edit", None)
                 try:
-                    if callable(edit):
+                    if callable(edit) and getattr(thread, "auto_archive_duration", None) != THREAD_AUTO_ARCHIVE_MINUTES:  # fmt: skip  # noqa: E501
                         await cast("Callable[..., Awaitable[object]]", edit)(
                             auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
                         )
