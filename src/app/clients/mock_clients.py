@@ -77,7 +77,6 @@ class MockDiscord(DiscordClient):
         thread_id = f"thread-{self.next_id}"
         self.next_id += 1
         self.state.threads[thread_id] = name
-        self.state.thread_archive_minutes[thread_id] = auto_archive_minutes
         self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
