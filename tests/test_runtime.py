@@ -7,12 +7,13 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Self, cast
 
 import discord
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai_codex import CodexConfig
 from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
@@ -139,20 +140,24 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert "1" in second.json()["selected_ids"]
     assert {"123", "124", "2"}.issubset(second.json()["selected_ids"])
     context = cast(
-        "dict[str, Any]",
+        "dict[str, object]",
         [item for item in engine.phoenix.records if item["node"] == "context"][-1],
     )
-    assert context["normalized"]["reply_ancestors"][0]["id"] == "1"
-    assert "1" not in {item["id"] for item in context["normalized"]["surrounding"]}
+    normalized = cast("dict[str, object]", context["normalized"])
+    ancestors = cast("list[dict[str, object]]", normalized["reply_ancestors"])
+    surrounding = cast("list[dict[str, object]]", normalized["surrounding"])
+    assert ancestors[0]["id"] == "1"
+    assert "1" not in {item["id"] for item in surrounding}
     assert engine.reactions["1"] == ["✅"]
     duplicate = client.post("/v1/discord/events", headers=headers, json=startup)
     assert duplicate.json()["status"] == "duplicate"
     assert duplicate.json()["state"]["turn"] == 2
     grammar = cast(
-        "dict[str, Any]", next(item for item in engine.phoenix.records if item["node"] == "grammar")
+        "dict[str, object]",
+        next(item for item in engine.phoenix.records if item["node"] == "grammar"),
     )
     assert {"source", "raw", "normalized", "rendered", "version"} <= grammar.keys()
-    assert grammar["parsed"]["schema"] == "wiseman.context.grammar.v2"
+    assert cast("dict[str, object]", grammar["parsed"])["schema"] == "wiseman.context.grammar.v2"
     codex = [item for item in engine.phoenix.records if item["node"] == "codex"]
     assert codex[0]["model"] == "local-fake"
     assert "old-" in str(codex[0]["input"])
@@ -262,13 +267,13 @@ def test_normalize_discord_gateway_message_create_envelope() -> None:
 
 @pytest.mark.asyncio
 async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
-    requests: list[dict[str, Any]] = []
+    requests: list[dict[str, object]] = []
 
     class Response:
         def raise_for_status(self) -> None:
             return None
 
-        def json(self) -> dict[str, Any]:
+        def json(self) -> dict[str, object]:
             return {
                 "model": "z-ai/glm-5.3-flash",
                 "choices": [{"message": {"content": "Three black office chairs."}}],
@@ -304,12 +309,13 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     assert result["text"] == "Three black office chairs."
     assert result["attachments"] == ["image-1"]
     assert result["question"] == "How many chairs are visible?"
-    assert requests[0]["json"]["model"] == "z-ai/glm-5.3-flash"
-    assert "How many chairs" in requests[0]["json"]["messages"][0]["content"][0]["text"]
-    assert (
-        requests[0]["json"]["messages"][0]["content"][1]["image_url"]["url"]
-        == "https://cdn/image.jpg"
-    )
+    request = cast("dict[str, object]", requests[0]["json"])
+    messages = cast("list[dict[str, object]]", request["messages"])
+    content = cast("list[dict[str, object]]", messages[0]["content"])
+    prompt = cast("str", content[0]["text"])
+    assert request["model"] == "z-ai/glm-5.3-flash"
+    assert "How many chairs" in prompt
+    assert cast("dict[str, object]", content[1]["image_url"])["url"] == "https://cdn/image.jpg"
     generic = await _describe_images(
         [
             {
@@ -321,10 +327,11 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     )
     assert generic["text"] == result["text"]
     assert generic["question"] is None
-    assert (
-        "Please describe this image generally"
-        in requests[1]["json"]["messages"][0]["content"][0]["text"]
-    )
+    generic_request = cast("dict[str, object]", requests[1]["json"])
+    generic_messages = cast("list[dict[str, object]]", generic_request["messages"])
+    generic_content = cast("list[dict[str, object]]", generic_messages[0]["content"])
+    generic_prompt = cast("str", generic_content[0]["text"])
+    assert "Please describe this image generally" in generic_prompt
     phoenix = Phoenix()
     await phoenix.record("vision-tool", "vision_tool", **generic)
     assert not phoenix.roots
@@ -382,8 +389,9 @@ async def test_long_delivery_edits_first_chunk_and_sends_overflow() -> None:
 async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> None:
     seen: list[str] = []
 
-    async def describe(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
-        seen.append(str(messages[0]["attachments"][0]["url"]))
+    async def describe(messages: list[dict[str, object]], question: str = "") -> dict[str, object]:
+        attachments = cast("list[dict[str, object]]", messages[0]["attachments"])
+        seen.append(str(attachments[0]["url"]))
         return {"text": "description", "attachments": ["image"], "question": question or None}
 
     monkeypatch.setattr("app.http_api.describe_images", describe)
@@ -1040,18 +1048,19 @@ async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> No
             del member
             self.reactions.remove(emoji)
 
-    live: Any = Live()
+    live = Live()
     engine = Engine(Phoenix(), FakeRunner())
     engine.reaction_user = object()
     result = await engine.handle(
-        normalize_event(discord_message("live", "hello", thread="t")), live
+        normalize_event(discord_message("live", "hello", thread="t")),
+        cast("discord.Message", live),
     )
     assert result["reactions"] == ["✅"]
     assert live.reactions == ["✅"]
     assert live.channel.sent[0] == ""
     assert live.channel.sent[1].startswith("Codex received: ")
     assert live.channel.embeds[0] is not None
-    assert live.channel.embeds[0].title == "⚡ Wiseman thread startup"
+    assert cast("discord.Embed", live.channel.embeds[0]).title == "⚡ Wiseman thread startup"
 
 
 @pytest.mark.asyncio
@@ -1100,11 +1109,12 @@ async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None
             await progress("✍️ Writing response...")
             return thread or "codex", "answer", {}
 
-    live: Any = Live()
+    live = Live()
     engine = Engine(Phoenix(), ProgressRunner("http://runner"))
     engine.reaction_user = object()
     result = await engine.handle(
-        normalize_event(discord_message("progress", "hello", thread="t")), live
+        normalize_event(discord_message("progress", "hello", thread="t")),
+        cast("discord.Message", live),
     )
     assert result["output"] == "answer"
     assert live.channel.sent[-1] == "answer"
@@ -1480,7 +1490,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             self.embeds.append(kwargs.get("embed"))
             return object()
 
-    class Thread:
+    class Thread(Channel):
         parent_id = 1
 
         def __init__(self, parent: Channel) -> None:
@@ -1508,7 +1518,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             del kwargs
 
     class Message:
-        def __init__(self, mid: str, channel: Any, content: str) -> None:
+        def __init__(self, mid: str, channel: Channel, content: str) -> None:
             self.id, self.channel, self.content = mid, channel, content
             self.author, self.mentions = User(), [bot_user]
             self.created_at = datetime.now(UTC)
@@ -1528,7 +1538,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             del member
             self.reactions.remove(emoji)
 
-    def raw_message(mid: str, channel: Any) -> Any:
+    def raw_message(mid: str, channel: Channel) -> Message:
         item = Message(mid, channel, "context")
         item.mentions = []
         return item
@@ -1541,19 +1551,19 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     bot._connection.user = cast("discord.ClientUser", bot_user)  # noqa: SLF001
     startup = Message("start", parent, "hello")
     await bot.on_message(cast("discord.Message", startup))
+    assert parent.thread is not None
     followup = Message("follow", parent.thread, "next")
     await bot.on_message(cast("discord.Message", followup))
     assert engine.states["2"].turn == 2
     assert startup.reactions == ["✅"]
     assert followup.reactions == ["✅"]
-    assert parent.thread is not None
     assert len(parent.thread.sent) == 3
     assert parent.thread.sent[0] == ""
     assert parent.thread.sent[1].startswith("Codex received: ")
     assert parent.thread.sent[2].startswith("Codex received: ")
     assert not parent.sent
     assert parent.thread.embeds[0] is not None
-    assert cast("Any", parent.thread.embeds[0]).title == "⚡ Wiseman thread startup"
+    assert cast("discord.Embed", parent.thread.embeds[0]).title == "⚡ Wiseman thread startup"
     assert parent.thread.sent[-1].startswith("Codex received: ")
 
     rejected = Channel()
@@ -1760,7 +1770,7 @@ async def test_prompt_hub_reads_phoenix_latest_version(monkeypatch) -> None:
 
 def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     calls: list[dict[str, object]] = []
-    configs: list[Any] = []
+    configs: list[CodexConfig] = []
 
     class Result:
         usage = None
@@ -1775,7 +1785,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
             return Result(prompt)
 
     class Codex:
-        def __init__(self, config: object) -> None:
+        def __init__(self, config: CodexConfig) -> None:
             configs.append(config)
             self.starts = 0
             self.resumes = 0
