@@ -11,7 +11,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
-from app.types import JsonObject  # noqa: TC001 - Temporal resolves JSON payload annotations
+from app.types import JsonObject  # noqa: TC001 - Temporal resolves wire annotations
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -52,11 +52,11 @@ def _retryable_turn_result(result: JsonObject) -> bool:
 
 
 @activity.defn(name="wiseman.turn")
-async def run_turn(payload: JsonObject) -> JsonObject:
+async def run_turn(payload: dict) -> JsonObject:
     event = Event.model_validate(payload["event"])
     if _activity_attempt() > 1:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
-    state = _json_object(payload.get("state"))
+    state = _object_map(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
     retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
     result = cast(
@@ -69,16 +69,16 @@ async def run_turn(payload: JsonObject) -> JsonObject:
 
 
 @activity.defn(name="wiseman.workspace")
-async def provision_workspace(payload: JsonObject) -> None:
+async def provision_workspace(payload: dict) -> None:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
     await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
 
 
 @activity.defn(name="wiseman.codex_start")
-async def start_codex(payload: JsonObject) -> JsonObject:
+async def start_codex(payload: dict) -> JsonObject:
     event = Event.model_validate(payload["event"])
-    state = _json_object(payload.get("state"))
+    state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
     thread = await cast("LifecycleRunner", _engine().runner).start(
         str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
@@ -90,7 +90,7 @@ async def start_codex(payload: JsonObject) -> JsonObject:
 @workflow.defn(name="wiseman.turn")
 class TurnWorkflow:
     @workflow.run
-    async def run(self, payload: JsonObject) -> JsonObject:
+    async def run(self, payload: dict) -> JsonObject:
         return await workflow.execute_activity(
             run_turn,
             payload,
@@ -102,16 +102,16 @@ class TurnWorkflow:
 @workflow.defn(name="wiseman.thread")
 class ThreadWorkflow:
     def __init__(self) -> None:
-        self.pending: list[JsonObject] = []
+        self.pending: list[dict] = []
         self.state: JsonObject = {}
         self.result: JsonObject = {}
 
     @workflow.signal
-    async def submit(self, event: JsonObject) -> None:
+    async def submit(self, event: dict) -> None:
         self.pending.append(dict(event))
 
     @workflow.run
-    async def run(self, first: JsonObject) -> JsonObject:
+    async def run(self, first: dict) -> JsonObject:
         self.pending.append(_object_map(first["event"]))
         while True:
             event = self.pending.pop(0)
@@ -171,7 +171,7 @@ class TemporalRuntime:
         ):
             await asyncio.Event().wait()
 
-    async def submit(self, event: JsonObject) -> None:
+    async def submit(self, event: dict) -> None:
         if self.client is None:
             raise RuntimeError("Temporal is not connected")  # noqa: TRY003
         trigger = _object_map(event["trigger"])
@@ -208,10 +208,6 @@ def _retry_prompt() -> str:
         )
     except OSError:
         return ""
-
-
-def _json_object(value: object) -> JsonObject:
-    return cast("JsonObject", value) if isinstance(value, dict) else {}
 
 
 def _object_map(value: object) -> JsonObject:

@@ -28,6 +28,7 @@ from openai_codex.generated.v2_all import (
     Turn as CodexTurn,
 )
 from openai_codex.models import Notification
+from temporalio.converter import JSONPlainPayloadConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.admission import ContextConfig, context, normalize_event
@@ -110,6 +111,18 @@ def discord_message(
         "mentions": [],
         "attachments": [],
     }
+
+
+def test_temporal_payload_round_trip_preserves_nested_event() -> None:
+    payload = {
+        "event": {"trigger": {"id": "message", "channel_id": "channel"}},
+        "state": {},
+    }
+    converter = JSONPlainPayloadConverter()
+    encoded = converter.to_payload(payload)
+    assert encoded is not None
+    decoded = converter.from_payload(encoded, dict)
+    assert decoded == payload
 
 
 def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
