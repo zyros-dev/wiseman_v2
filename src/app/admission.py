@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -18,7 +20,24 @@ from app.models import Event, Message
 if TYPE_CHECKING:
     from app.types import JsonObject
 
-MAX_ANCESTORS = 12
+
+@dataclass(frozen=True, slots=True)
+class ContextConfig:
+    """Bound the context window at the application configuration boundary."""
+
+    max_ancestors: int = 12
+
+    def __post_init__(self) -> None:
+        if self.max_ancestors < 0:
+            raise ValueError
+
+    @classmethod
+    def from_env(cls) -> ContextConfig:
+        value = os.getenv("WISEMAN_MAX_ANCESTORS", "12")
+        try:
+            return cls(int(value))
+        except ValueError as exc:
+            raise ValueError from exc
 
 
 def _message(value: Mapping[str, object], thread_id: str | None = None) -> Message:
@@ -122,8 +141,9 @@ def render_grammar(name: str, source: str, raw: object, **values: object) -> dic
     )
 
 
-def context(event: Event) -> dict[str, object]:
+def context(event: Event, config: ContextConfig | None = None) -> dict[str, object]:
     """Select startup history or only unseen follow-up history, capped at 100 messages."""
+    config = config or ContextConfig.from_env()
     trigger = event.trigger
     startup = event.kind in (None, "startup")
     pool = event.parent_messages if startup else event.parent_messages + event.thread_messages
@@ -134,7 +154,7 @@ def context(event: Event) -> dict[str, object]:
     by_id = {m.id: m for m in (*event.parent_messages, *event.thread_messages, trigger)}
     ancestors: list[Message] = []
     parent = trigger.reply_to
-    while parent and parent in by_id and len(ancestors) < MAX_ANCESTORS:
+    while parent and parent in by_id and len(ancestors) < config.max_ancestors:
         if parent in {m.id for m in ancestors}:
             break
         item = by_id[parent]
