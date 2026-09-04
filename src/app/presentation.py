@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -189,9 +188,9 @@ def split_discord_content(content: str) -> list[str]:
     return chunks
 
 
-def render_progress(steps: list[str]) -> str:
-    turns = [int(match) for step in steps for match in re.findall(r"\bGurt (\d+)\b", step)]
-    count = max(turns, default=0)
+def render_progress(steps: list[str], turn_number: int | None = None) -> str:
+    """Render bounded progress with the durable turn number supplied by the caller."""
+    count = turn_number if turn_number is not None else 0
     visible = steps[-8:]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])

@@ -14,7 +14,7 @@ import discord
 from prometheus_client import Gauge
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
@@ -57,6 +57,7 @@ class Gateway(discord.Client):
 
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
+        await self._discover_managed_threads()
         LOGGER.info("Discord gateway ready as %s", self.user)
 
     async def on_disconnect(self) -> None:
@@ -172,8 +173,38 @@ class Gateway(discord.Client):
             await asyncio.sleep(60)
             await self._expire_once()
 
+    async def _discover_managed_threads(self) -> None:
+        """Recover active Wiseman threads after a gateway restart."""
+        for guild in self.guilds:
+            fetch = getattr(guild, "fetch_active_threads", None)
+            if not callable(fetch):
+                continue
+            try:
+                result = await cast("Callable[[], Awaitable[object]]", fetch)()
+            except discord.DiscordException:
+                LOGGER.warning("Could not discover active threads in guild %s", guild.id)
+                continue
+            threads = getattr(result, "threads", result)
+            iterable = cast("list[object]", threads) if isinstance(threads, (list, tuple)) else []
+            for thread in iterable:
+                if not _managed_thread(thread):
+                    continue
+                thread_id = str(getattr(thread, "id", ""))
+                if not thread_id:
+                    continue
+                self.thread_activity.setdefault(thread_id, _last_message_time(thread))
+                edit = getattr(thread, "edit", None)
+                try:
+                    if callable(edit):
+                        await cast("Callable[..., Awaitable[object]]", edit)(
+                            auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
+                        )
+                except discord.DiscordException:
+                    LOGGER.warning("Could not set one-hour archive on thread %s", thread_id)
+        self._persist_thread_activity()
+
     async def _expire_once(self, now: float | None = None) -> None:
-        """Archive and lock managed threads after two hours without human activity."""
+        """Archive and lock managed threads after one hour without human activity."""
         cutoff = (time.time() if now is None else now) - THREAD_CLOSE_AFTER_SECONDS
         for thread_id, last_activity in list(self.thread_activity.items()):
             if last_activity > cutoff:
@@ -351,3 +382,16 @@ async def _history(
         )
         async for item in history
     ]
+
+
+def _managed_thread(thread: object) -> bool:
+    name = str(getattr(thread, "name", ""))
+    return name.startswith(("Gurt ", "wiseman"))
+
+
+def _last_message_time(thread: object) -> float:
+    value = getattr(thread, "last_message_id", None) or getattr(thread, "id", 0)
+    try:
+        return discord.utils.snowflake_time(int(value)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return time.time()

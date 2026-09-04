@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
-from app.clients.mock_clients import MockState, mock_container
+from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
 
 
@@ -33,6 +35,21 @@ async def test_mock_container_records_complete_discord_lifecycle() -> None:
         "remove_reaction",
         "remove_reaction",
     ]
+
+
+@pytest.mark.asyncio
+async def test_mock_discord_models_history_files_and_one_hour_closure() -> None:
+    container = mock_container()
+    discord = cast("MockDiscord", container.discord)
+    thread = await discord.create_thread("channel", "Gurt 1", 60)
+    message = await discord.send(thread, "hello")
+    assert (await discord.history(thread, 10))[0]["id"] == message
+    assert await discord.send_file(thread, "image.png") == "file-3"
+
+    discord.advance(3_600)
+    state = discord.state  # type: ignore[attr-defined]
+    assert thread in state.archived
+    assert thread in state.locked
 
 
 def test_mock_containers_are_isolated_and_installed_explicitly() -> None:

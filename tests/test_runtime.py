@@ -626,12 +626,12 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
 
 
 def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
-    rendered = _render_progress(["🤖 Gurt 1: Codex turn started...", "⚙️ Running command..."])
+    rendered = _render_progress(["🤖 Codex turn started...", "⚙️ Running command..."], 1)
     assert rendered.startswith("⏳ Working · Gurt 1\n")
-    assert rendered.count("Gurt 1") == 2
+    assert rendered.count("Gurt 1") == 1
 
     bounded = _render_progress(
-        ["🤖 Gurt 1: Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)]
+        ["🤖 Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)], 1
     )
     assert bounded.startswith("⏳ Working · Gurt 1\n")
     assert bounded.count("\n") == 8
