@@ -1548,6 +1548,7 @@ async def test_temporal_setup_failure_uses_failure_activity(monkeypatch) -> None
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "failed"}})
     assert result["error"] == "runner unavailable"
     assert activities == [publish_progress, provision_workspace, fail_turn]
