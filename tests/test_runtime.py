@@ -58,7 +58,7 @@ from app.temporal_runtime import (
     run_turn,
     start_codex,
 )
-from app.types import EngineResult, JsonObject
+from app.types import EngineResult, JsonObject, StateData
 from runner.api import (
     CODEX_TEXT_ONLY_OVERRIDES,
     ApprovalMode,
@@ -1480,6 +1480,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
 async def test_engine_preflight_reuses_progress_delivery() -> None:
     class Delivery:
         def __init__(self) -> None:
+            self.id = "delivery"
             self.content = ""
 
         async def edit(self, *, content: str) -> None:
@@ -1505,12 +1506,28 @@ async def test_engine_preflight_reuses_progress_delivery() -> None:
         trigger=message("preflight", "hello", thread="thread"),
         kind="startup",
     )
-    await engine.preflight(event, "🛠️ Workspace provisioning...", {"turn": 2})
-    await engine.preflight(event, "🤖 Codex starting...", {"turn": 2})
+    persisted = await engine.preflight(event, "🛠️ Workspace provisioning...", {"turn": 2})
+    persisted = cast("StateData", persisted)
+    persisted = await engine.preflight(event, "🤖 Codex starting...", persisted)
     assert len(channel.sends) == 2
     assert channel.sends[0][1] is not None
     assert channel.delivery.content.startswith("⏳ Working · Gurt 3")
     assert channel.delivery.content.endswith("🤖 Codex starting...")
+    assert persisted["delivery_id"] == "delivery"
+    assert persisted["banner_sent"] is True
+
+    restored = configured_engine()
+    restored.lookup_channel = lookup
+
+    async def lookup_delivery(_event: Event, delivery_id: str) -> Delivery:
+        assert delivery_id == "delivery"
+        return channel.delivery
+
+    restored.lookup_delivery = lookup_delivery
+    resumed = await restored.preflight(event, "resumed", persisted)
+    assert resumed["delivery_id"] == "delivery"
+    assert len(channel.sends) == 2
+    assert channel.delivery.content.endswith("resumed")
     failed = await engine.fail(event, "runner unavailable", {"turn": 2})
     assert failed["error"] == "runner unavailable"
     assert channel.delivery.content == "Codex failed: runner unavailable"

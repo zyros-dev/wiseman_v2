@@ -64,6 +64,7 @@ class Gateway(discord.Client):
         self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
         engine.lookup_channel = self.resolve_channel
+        engine.lookup_delivery = self.resolve_delivery
 
     async def setup_hook(self) -> None:
         self.expiry_task = asyncio.create_task(self._expire_threads())
@@ -231,6 +232,17 @@ class Gateway(discord.Client):
         except (discord.DiscordException, ValueError):
             return None
 
+    async def resolve_delivery(self, event: Event, delivery_id: str) -> discord.Message | None:
+        channel = await self.resolve_channel(event)
+        fetch = getattr(channel, "fetch_message", None)
+        if not callable(fetch):
+            return None
+        try:
+            value = await cast("Callable[[int], Awaitable[object]]", fetch)(int(delivery_id))
+        except (discord.DiscordException, ValueError):
+            return None
+        return value if isinstance(value, discord.Message) else None
+
     async def on_message(self, message: discord.Message) -> None:
         DISCORD_MESSAGES.inc()
         LOGGER.warning(
@@ -314,7 +326,7 @@ class Gateway(discord.Client):
             delivery_channel = thread
             self._touch_thread(thread_id)
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
-        trigger = _trigger(message, parent_id, thread_id)
+        trigger = _message(message, parent_id, thread_id)
         event = Event(
             trigger=trigger,
             kind=kind,
@@ -345,10 +357,6 @@ async def _history(
     channel_id = str(getattr(channel, "parent_id", getattr(channel, "id", "")))
     history = history_method(limit=limit, before=before) if before is not None else history_method(limit=limit)
     return [_message(item, channel_id, thread_id) async for item in history]
-
-
-def _trigger(message: discord.Message, parent_id: str, thread_id: str) -> Message:
-    return _message(message, parent_id, thread_id)
 
 
 def _message(item: discord.Message, channel_id: str, thread_id: str | None) -> Message:

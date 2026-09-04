@@ -84,8 +84,8 @@ async def start_codex(payload: dict) -> dict:
 async def publish_progress(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     phase = str(payload.get("phase", "⏳ Working..."))
-    await _engine().preflight(event, phase, _object_map(payload.get("state")))
-    return {"phase": phase}
+    state = await _engine().preflight(event, phase, _object_map(payload.get("state")))
+    return {"phase": phase, "state": state}
 
 
 @activity.defn(name="wiseman.failure")
@@ -172,7 +172,8 @@ async def _setup(event: dict, state: JsonObject) -> JsonObject:
         (provision_workspace, "🛠️ Workspace provisioning...", timedelta(seconds=30)),
         (start_codex, "🤖 Codex starting...", timedelta(seconds=90)),
     ):
-        await _activity(publish_progress, {"event": event, "state": state, "phase": phase}, duration)
+        progress = await _activity(publish_progress, {"event": event, "state": state, "phase": phase}, duration)
+        state = _object_map(progress.get("state", state))
         result = await _activity(fn, {"event": event, "state": state}, duration)
         state = _object_map(result.get("state", state))
     return state
