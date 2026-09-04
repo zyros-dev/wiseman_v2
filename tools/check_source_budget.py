@@ -10,7 +10,6 @@ SOURCE_ROOTS = (Path("src"), Path("sandbox/src"))
 SCRIPT_FILES = (
     Path("sandbox/codex-as-user"),
     Path("sandbox/wiseman-discord"),
-    Path("sandbox/wiseman-image"),
 )
 
 

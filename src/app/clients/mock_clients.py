@@ -10,14 +10,16 @@ from app.clients.client_interfaces import (
     ClientSettings,
     DiscordClient,
     PhoenixClient,
+    PromptClient,
     ProviderClient,
     RunnerClient,
-    RunnerResult,
     TemporalClient,
 )
 
 if TYPE_CHECKING:
-    from app.types import JsonObject, JsonValue
+    from collections.abc import Awaitable, Callable
+
+    from app.types import JsonObject
 
 type Failure = str
 
@@ -41,14 +43,17 @@ class MockState:
     messages: dict[str, str] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
     threads: dict[str, str] = field(default_factory=dict)
+    thread_archive_minutes: dict[str, int] = field(default_factory=dict)
     thread_activity: dict[str, float] = field(default_factory=dict)
     archived: set[str] = field(default_factory=set)
     locked: set[str] = field(default_factory=set)
     channel_history: dict[str, list[JsonObject]] = field(default_factory=dict)
     fake_time: float = 0
-    records: list[JsonObject] = field(default_factory=list)
-    audits: dict[str, JsonObject] = field(default_factory=dict)
+    records: list[dict[str, object]] = field(default_factory=list)
+    audits: dict[str, dict[str, object]] = field(default_factory=dict)
     turn_ids: dict[str, str] = field(default_factory=dict)
+    profile: dict[str, str] = field(default_factory=dict)
+    files: dict[str, str] = field(default_factory=dict)
 
     def call(self, client: str, operation: str, *values: str) -> None:
         self.calls.append(MockCall(client, operation, tuple(values)))
@@ -72,6 +77,7 @@ class MockDiscord(DiscordClient):
         thread_id = f"thread-{self.next_id}"
         self.next_id += 1
         self.state.threads[thread_id] = name
+        self.state.thread_archive_minutes[thread_id] = auto_archive_minutes
         self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
@@ -116,6 +122,7 @@ class MockDiscord(DiscordClient):
         self.state.call("discord", "send_file", channel_id, path, caption)
         message_id = f"file-{self.next_id}"
         self.next_id += 1
+        self.state.files[message_id] = path
         return message_id
 
     def advance(self, seconds: float) -> None:
@@ -129,6 +136,10 @@ class MockDiscord(DiscordClient):
 
     async def set_profile(self, username: str | None, avatar: str | None) -> None:
         self.state.call("discord", "set_profile", username or "", avatar or "")
+        if username is not None:
+            self.state.profile["username"] = username
+        if avatar is not None:
+            self.state.profile["avatar"] = avatar
 
     async def set_reactions(self, values: dict[str, str]) -> None:
         self.state.call("discord", "set_reactions", *sorted(values.values()))
@@ -148,17 +159,26 @@ class MockTemporal(TemporalClient):
 class MockPhoenix(PhoenixClient):
     def __init__(self, state: MockState) -> None:
         self.state = state
+        self.records = state.records
 
-    async def record(self, trace: str, node: str, **data: JsonValue) -> None:
+    async def record(self, trace: str, node: str, **data: object) -> None:
         del data
         self.state.call("phoenix", "record", trace, node)
         self.state.records.append({"trace": trace, "node": node})
         if node == "admission":
             self.state.audits[trace] = {"trace": trace, "node": node}
 
-    def audit(self, audit_id: str) -> JsonObject | None:
+    def audit(self, audit_id: str) -> dict[str, object] | None:
         self.state.call("phoenix", "audit", audit_id)
         return self.state.audits.get(audit_id)
+
+
+class MockPrompts(PromptClient):
+    async def source(self, kind: str) -> str:
+        self_kind = {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)
+        if self_kind in {"startup-context", "followup-context"}:
+            return '{"schema":"mock","mode":"{{ mode }}","messages":{{ messages | tojson }}}'
+        return f"mock prompt: {self_kind}"
 
 
 class MockRunner(RunnerClient):
@@ -174,10 +194,20 @@ class MockRunner(RunnerClient):
         self.state.turn_ids[workspace or thread_id] = thread_id
         return thread_id
 
-    async def run(self, thread: str, prompt: str, user: str, workspace: str = "") -> RunnerResult:
+    async def run(
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
         self.state.call("runner", "run", thread, user, workspace)
         thread_id = thread or self.state.turn_ids.get(workspace, f"codex-{user}")
-        return RunnerResult(thread_id, f"mock response: {prompt[:80]}", {"model": "mock"})
+        if progress is not None:
+            await progress("🤖 Codex turn started...")
+            await progress("✍️ Writing response...")
+        return thread_id, f"mock response: {prompt[:80]}", {"model": "mock"}
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
         self.state.call("runner", "steer", thread, user, workspace)
@@ -200,6 +230,7 @@ def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
         discord=MockDiscord(state),
         temporal=MockTemporal(state),
         phoenix=MockPhoenix(state),
+        prompts=MockPrompts(),
         runner=MockRunner(state),
         provider=MockProvider(state),
         settings=settings or ClientSettings(),

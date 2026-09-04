@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from app.clients.client_interfaces import (
         DiscordClient,
         PhoenixClient,
+        PromptClient,
         ProviderClient,
         RunnerClient,
         TemporalClient,
@@ -30,10 +31,10 @@ if TYPE_CHECKING:
 
 from app.admission import normalize_event
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
-from app.clients.real_clients import HttpProvider, RealDependencies, UnavailableTemporal
+from app.clients.real_clients import RealDependencies, UnavailableTemporal, real_services
 from app.engine import Engine
 from app.gateway import Gateway
-from app.phoenix import Phoenix, PromptHub, json_text, provider_values
+from app.phoenix import json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
@@ -42,7 +43,6 @@ from app.presentation import (
     describe_images,
     normalize_image_url,
 )
-from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import TemporalRuntime, configure_engine
 
 UPSTREAM_RETRY_ATTEMPTS = 3
@@ -95,18 +95,13 @@ def create_app(  # noqa: C901, PLR0915
     settings = clients.settings if clients is not None else ClientSettings.from_env()
     token = token or settings.runner_token
     discord_token = discord_token or settings.discord_token
-    engine = engine or Engine(
-        Phoenix(
-            settings.phoenix_endpoint,
-            settings.phoenix_key,
-            settings.phoenix_project,
-            os.getenv("WISEMAN_AUDIT_DIR"),
-        ),
-        HttpRunner(settings.runner_url, settings.runner_token)
-        if settings.runner_url
-        else FakeRunner(),
-        PromptHub(settings.prompt_hub_url, settings.phoenix_key),
-    )
+    services = real_services(settings) if clients is None else None
+    if engine is None:
+        if clients is not None:
+            engine = Engine(clients=clients)
+        else:
+            assert services is not None
+            engine = Engine(phoenix=services[0], runner=services[2], prompts=services[1])
     configure_engine(engine)
     app = FastAPI(title="wiseman-v2", docs_url=None, redoc_url=None)
     allowlist = {
@@ -125,6 +120,8 @@ def create_app(  # noqa: C901, PLR0915
     )
     bot.temporal = temporal
     if clients is None:
+        if services is None:
+            services = real_services(settings)
         clients = build_clients(
             ClientMode.REAL,
             settings,
@@ -132,12 +129,12 @@ def create_app(  # noqa: C901, PLR0915
                 discord=cast("DiscordClient", bot),
                 temporal=cast("TemporalClient", temporal or UnavailableTemporal()),
                 phoenix=cast("PhoenixClient", engine.phoenix),
+                prompts=cast("PromptClient", engine.prompts),
                 runner=cast("RunnerClient", engine.runner),
-                provider=cast(
-                    "ProviderClient", HttpProvider(settings.provider_url, settings.provider_token)
-                ),
+                provider=cast("ProviderClient", services[3]),
             ),
         )
+    engine.bind_clients(clients)
     app.state.clients = clients
     task: asyncio.Task[None] | None = None
 

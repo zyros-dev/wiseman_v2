@@ -93,7 +93,8 @@ until those dependencies are available.
   lifecycle reactions, and changing the bot username/avatar.
 - Gateway contract tests cover authentication, bounded avatar decoding,
   reaction configuration, profile mutation, and thread file delivery.
-- The sandbox image includes `/usr/local/bin/wiseman-discord`; deployment
+- The sandbox image includes `/usr/local/bin/wiseman-discord`, including its
+  `describe-image` command; deployment
   enables profile edits and persists reaction configuration at
   `/var/lib/wiseman/profile.json`.
 

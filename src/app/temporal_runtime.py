@@ -114,23 +114,31 @@ class ThreadWorkflow:
     @workflow.run
     async def run(self, first: dict) -> dict:
         self.pending.append(_object_map(first["event"]))
+        workflow.patched("split-startup-activities")
+        child_workflow = workflow.patched("child-turn-workflow")
         while True:
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
             try:
-                if not self.state.get("codex_thread") and (
-                    workflow.patched("split-startup-activities")
-                    or not self.state.get("codex_thread")
-                ):
+                if not self.state.get("codex_thread"):
                     await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🛠️ Workspace provisioning..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
                     await _activity(provision_workspace, {"event": event, "state": self.state}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
                     await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex starting..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
                     started = await _activity(start_codex, {"event": event, "state": self.state}, timedelta(seconds=90))  # fmt: skip  # noqa: E501
                     self.state = _object_map(started.get("state", self.state))
                 await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
-                self.result = await workflow.execute_child_workflow(TurnWorkflow.run, {"event": event, "state": self.state}, id=f"wiseman-turn-{message_id or len(self.pending)}")  # fmt: skip  # noqa: E501
+                if child_workflow:
+                    self.result = await workflow.execute_child_workflow(
+                        TurnWorkflow.run,
+                        {"event": event, "state": self.state},
+                        id=f"wiseman-turn-{message_id or len(self.pending)}",
+                    )
+                else:
+                    self.result = await _activity(
+                        run_turn, {"event": event, "state": self.state}, timedelta(minutes=10)
+                    )
             except Exception as exc:  # noqa: BLE001 - activity failures need Discord delivery
                 self.result = await _activity(fail_turn, {"event": event, "state": self.state, "error": str(exc)}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
             self.state = _object_map(self.result.get("state", self.state))

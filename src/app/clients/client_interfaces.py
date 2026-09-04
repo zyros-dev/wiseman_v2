@@ -7,7 +7,9 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 if TYPE_CHECKING:
-    from app.types import JsonObject, JsonValue
+    from collections.abc import Awaitable, Callable
+
+    from app.types import JsonObject
 
 
 class ClientMode(StrEnum):
@@ -84,16 +86,15 @@ class TemporalClient(Protocol):
 
 
 class PhoenixClient(Protocol):
-    async def record(self, trace: str, node: str, **data: JsonValue) -> None: ...
+    records: list[dict[str, object]]
 
-    def audit(self, audit_id: str) -> JsonObject | None: ...
+    async def record(self, trace: str, node: str, **data: object) -> None: ...
+
+    def audit(self, audit_id: str) -> dict[str, object] | None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class RunnerResult:
-    thread_id: str
-    output: str
-    billing: JsonObject
+class PromptClient(Protocol):
+    async def source(self, kind: str) -> str: ...
 
 
 class RunnerClient(Protocol):
@@ -102,8 +103,13 @@ class RunnerClient(Protocol):
     async def start(self, thread: str, user: str, workspace: str = "") -> str: ...
 
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
-    ) -> RunnerResult: ...
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, str, dict[str, object]]: ...
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
 
@@ -118,6 +124,7 @@ class ClientContainer:
     discord: DiscordClient
     temporal: TemporalClient
     phoenix: PhoenixClient
+    prompts: PromptClient
     runner: RunnerClient
     provider: ProviderClient
     settings: ClientSettings = field(default_factory=ClientSettings)
@@ -138,7 +145,3 @@ class ClientContainer:
     @classmethod
     def reset(cls) -> None:
         cls._installed = None
-
-
-def current_clients() -> ClientContainer:
-    return ClientContainer.current()

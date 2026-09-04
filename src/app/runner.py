@@ -21,6 +21,7 @@ class Runner(Protocol):
         prompt: str,
         user: str,
         workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]: ...
 
 

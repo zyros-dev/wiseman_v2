@@ -10,6 +10,8 @@ import pytest
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
 from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
+from app.engine import Engine
+from app.models import Event, Message
 
 
 @pytest.mark.asyncio
@@ -52,6 +54,52 @@ async def test_mock_discord_models_history_files_and_one_hour_closure() -> None:
     assert thread in state.locked
 
 
+@pytest.mark.asyncio
+async def test_mock_clients_model_progress_profile_and_files() -> None:
+    container = mock_container()
+    discord = cast("MockDiscord", container.discord)
+    thread = await discord.create_thread("channel", "Gurt 1", 60)
+    file_message = await discord.send_file(thread, "artifact.bin", "result")
+    await discord.set_profile("Wise Man", "avatar.png")
+    progress: list[str] = []
+
+    async def record(message: str) -> None:
+        progress.append(message)
+
+    await container.runner.run("codex-1", "hello", "user", thread, progress=record)
+
+    state = cast("MockState", discord.state)  # type: ignore[attr-defined]
+    assert state.files[file_message] == "artifact.bin"
+    assert state.profile == {"username": "Wise Man", "avatar": "avatar.png"}
+    assert progress == ["🤖 Codex turn started...", "✍️ Writing response..."]
+
+
+@pytest.mark.asyncio
+async def test_engine_uses_the_injected_client_container() -> None:
+    container = mock_container()
+    engine = Engine(clients=container)
+    event = Event(
+        trigger=Message(
+            id="message-1",
+            author_id="user-1",
+            author_name="user",
+            content="hello",
+            channel_id="channel-1",
+            thread_id="thread-1",
+            timestamp="2026-09-04T00:00:00+00:00",
+        ),
+        kind="startup",
+    )
+
+    result = await engine.handle(event)
+
+    assert str(result["output"]).startswith('mock response: {"context":')
+    state = cast("MockState", container.discord.state)  # type: ignore[attr-defined]
+    assert any(call.client == "runner" and call.operation == "run" for call in state.calls)
+    assert any(call.client == "phoenix" and call.operation == "record" for call in state.calls)
+    assert state.records
+
+
 def test_mock_containers_are_isolated_and_installed_explicitly() -> None:
     first = mock_container()
     second = mock_container()
@@ -80,6 +128,7 @@ def test_real_mode_requires_explicit_adapters_and_never_falls_back() -> None:
             discord=mock.discord,
             temporal=mock.temporal,
             phoenix=mock.phoenix,
+            prompts=mock.prompts,
             runner=mock.runner,
             provider=mock.provider,
         ),
