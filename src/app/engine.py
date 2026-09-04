@@ -9,7 +9,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import discord
 from prometheus_client import Counter
@@ -17,7 +17,7 @@ from prometheus_client import Counter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-from app.admission import context
+from app.admission import ContextConfig, context
 from app.admission import event_data as _event_data
 from app.admission import image_tool_instruction as _image_tool_instruction
 from app.admission import render_grammar as _grammar
@@ -90,11 +90,37 @@ class _Success:
     billing: dict[str, object]
 
 
+class StateData(TypedDict):
+    codex_thread: str | None
+    seen: list[str]
+    processed: list[str]
+    turn: int
+
+
+class EngineResult(TypedDict, total=False):
+    trace: str
+    status: str
+    kind: str
+    error: str
+    output: str
+    selected_ids: list[str]
+    reactions: list[str]
+    progress: list[str]
+    state: StateData
+
+
 class Engine:
     """One turn state machine; production adapters can place each method in a Temporal Activity."""
 
-    def __init__(self, phoenix: Phoenix, runner: Runner, prompts: PromptHub | None = None) -> None:
+    def __init__(
+        self,
+        phoenix: Phoenix,
+        runner: Runner,
+        prompts: PromptHub | None = None,
+        context_config: ContextConfig | None = None,
+    ) -> None:
         self.phoenix, self.runner, self.prompts = phoenix, runner, prompts or PromptHub()
+        self.context_config = context_config or ContextConfig.from_env()
         self.states: dict[str, State] = defaultdict(State)
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
@@ -112,7 +138,7 @@ class Engine:
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
         state_data: JsonObject | None = None,
-    ) -> dict[str, Any]:
+    ) -> EngineResult:
         key = event.trigger.thread_id or event.trigger.channel_id
         async with self.locks.setdefault(key, asyncio.Lock()):
             if live is None and self.lookup is not None:
@@ -130,7 +156,7 @@ class Engine:
         live: discord.Message | None = None,
         delivery_channel: Messageable | None = None,
         state_data: JsonObject | None = None,
-    ) -> dict[str, Any]:
+    ) -> EngineResult:
         trigger = event.trigger
         key = trigger.thread_id or trigger.channel_id
         state = self._state(key, state_data)
@@ -244,7 +270,7 @@ class Engine:
         if self._react(trigger.id, processing_emoji) and live is not None:
             await live.add_reaction(processing_emoji)
         await self.phoenix.record(trace, "reaction", operations=[f"add:{processing_emoji}"])
-        current = context(event)
+        current = context(event, self.context_config)
         state.seen.update(cast("list[str]", current["selected_ids"]))
         await self.phoenix.record(
             trace,
@@ -313,7 +339,7 @@ class Engine:
             )
         return await self.runner.run(state.codex_thread or "", prompt, trigger.author_id, workspace)
 
-    async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> dict[str, Any]:
+    async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
         trigger = lifecycle.trigger
         TURN_FAILURES.inc()
         await self.phoenix.record(lifecycle.trace, "failure", error=str(error))
@@ -339,7 +365,7 @@ class Engine:
             "state": _state_data(lifecycle.state),
         }
 
-    async def _success(self, result: _Success) -> dict[str, Any]:
+    async def _success(self, result: _Success) -> EngineResult:
         lifecycle = result.lifecycle
         trigger = lifecycle.trigger
         state = lifecycle.state
@@ -371,7 +397,7 @@ class Engine:
             "trace": lifecycle.trace,
             "kind": lifecycle.kind,
             "output": result.output,
-            "selected_ids": result.current["selected_ids"],
+            "selected_ids": cast("list[str]", result.current["selected_ids"]),
             "reactions": self.reactions[trigger.id],
             "progress": self.progress[trigger.id],
             "state": _state_data(state),
@@ -428,7 +454,7 @@ class Engine:
             await live.remove_reaction(emoji, cast("discord.User", self.reaction_user))
 
 
-def _state_data(state: State) -> dict[str, Any]:
+def _state_data(state: State) -> StateData:
     return {
         "codex_thread": state.codex_thread,
         "seen": sorted(state.seen),

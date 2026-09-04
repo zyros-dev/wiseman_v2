@@ -28,8 +28,8 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from app.admission import ContextConfig, context, normalize_event
 from app.admission import image_tool_instruction as _image_tool_instruction
-from app.admission import normalize_event
 from app.engine import Engine
 from app.gateway import Gateway, _history
 from app.http_api import create_app
@@ -238,6 +238,21 @@ def test_image_tool_instruction_ignores_historical_images_for_ordinary_text() ->
         [{"attachments": [{"content_type": "image/png", "url": "https://cdn.example/old.png"}]}],
     )
     assert instruction == ""
+
+
+def test_context_uses_injected_ancestor_bound() -> None:
+    messages = [message(str(index), f"m-{index}") for index in range(4)]
+    for index in range(1, 4):
+        messages[index]["reply_to"] = str(index - 1)
+    event = Event(
+        trigger=normalize_event({**message("trigger", "question"), "reply_to": "3"}).trigger,
+        kind="followup",
+        parent_messages=[normalize_event(item).trigger for item in messages],
+    )
+    current = context(event, ContextConfig(max_ancestors=2))
+    ancestors = current["reply_ancestors"]
+    assert isinstance(ancestors, list)
+    assert [item["id"] for item in ancestors if isinstance(item, dict)] == ["2", "3"]
 
 
 def test_normalize_discord_gateway_message_create_envelope() -> None:
