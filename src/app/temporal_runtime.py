@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -12,10 +11,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
-from app.engine import (  # noqa: TC001 - Temporal resolves the TypedDict annotation
-    Engine,
-    EngineResult,
-)
+from app.engine import Engine, EngineResult  # noqa: TC001 - Temporal resolves the annotation
 from app.models import Event
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
@@ -24,18 +20,15 @@ TRANSPORT_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(seconds=30),
     maximum_attempts=2,
 )
+RETRY_MARKERS = ("runner returned http 5", "disconnected", "transport error")
 
 if TYPE_CHECKING:
     from temporalio.client import Client
 
     from app.runner import LifecycleRunner
-
-
-if TYPE_CHECKING:
     from app.types import JsonObject
 
 
-@dataclass(slots=True)
 class _ActivityRuntime:
     engine: Engine | None = None
 
@@ -55,11 +48,8 @@ def _engine() -> Engine:
 
 def _retryable_turn_result(result: Mapping[str, object]) -> bool:
     error = result.get("error")
-    return isinstance(error, str) and (
-        error.startswith("runner returned HTTP 5")
-        or "disconnected" in error.lower()
-        or "transport error" in error.lower()
-    )
+    lowered = error.lower() if isinstance(error, str) else ""
+    return any(marker in lowered for marker in RETRY_MARKERS)
 
 
 @activity.defn(name="wiseman.turn")
@@ -80,11 +70,10 @@ async def run_turn(payload: Mapping[str, object]) -> EngineResult:
 
 
 @activity.defn(name="wiseman.workspace")
-async def provision_workspace(payload: Mapping[str, object]) -> dict[str, str]:
+async def provision_workspace(payload: Mapping[str, object]) -> None:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
     await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
-    return {"workspace": workspace}
 
 
 @activity.defn(name="wiseman.codex_start")
@@ -97,6 +86,18 @@ async def start_codex(payload: Mapping[str, object]) -> dict[str, object]:
     )
     state["codex_thread"] = thread
     return {"state": state, "workspace": workspace, "codex_thread": thread}
+
+
+@workflow.defn(name="wiseman.turn")
+class TurnWorkflow:
+    @workflow.run
+    async def run(self, payload: Mapping[str, object]) -> EngineResult:
+        return await workflow.execute_activity(
+            run_turn,
+            payload,
+            start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=TRANSPORT_RETRY_POLICY,
+        )
 
 
 @workflow.defn(name="wiseman.thread")
@@ -116,6 +117,10 @@ class ThreadWorkflow:
         self.pending.append(_object_map(first["event"]))
         while True:
             event = self.pending.pop(0)
+            message_id = str(_object_map(event.get("trigger")).get("id", ""))
+            processed = self.state.get("processed", [])
+            if message_id and message_id in _sequence(processed):
+                continue
             if not self.started:
                 await workflow.execute_activity(
                     provision_workspace,
@@ -131,11 +136,10 @@ class ThreadWorkflow:
                 )
                 self.state = _object_map(started.get("state", self.state))
                 self.started = True
-            self.result = await workflow.execute_activity(
-                run_turn,
+            self.result = await workflow.execute_child_workflow(
+                TurnWorkflow.run,
                 {"event": event, "state": self.state},
-                start_to_close_timeout=timedelta(minutes=10),
-                retry_policy=TRANSPORT_RETRY_POLICY,
+                id=f"wiseman-turn-{message_id or len(self.pending)}",
             )
             self.state = _object_map(self.result.get("state", self.state))
             try:
@@ -144,11 +148,6 @@ class ThreadWorkflow:
                 )
             except TimeoutError:
                 return self.result
-
-
-class TemporalError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("Temporal is not connected")
 
 
 class TemporalRuntime:
@@ -169,14 +168,14 @@ class TemporalRuntime:
         async with Worker(
             cast("Client", self.client),
             task_queue=self.queue,
-            workflows=[ThreadWorkflow],
+            workflows=[ThreadWorkflow, TurnWorkflow],
             activities=[provision_workspace, start_codex, run_turn],
         ):
             await asyncio.Event().wait()
 
     async def submit(self, event: Mapping[str, object]) -> None:
         if self.client is None:
-            raise TemporalError
+            raise RuntimeError("Temporal is not connected")  # noqa: TRY003
         trigger = _object_map(event["trigger"])
         thread_id = trigger.get("thread_id") or trigger["channel_id"]
         workflow_id = f"wiseman-{thread_id}"

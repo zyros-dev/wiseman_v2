@@ -138,8 +138,7 @@ def create_app(  # noqa: C901, PLR0915
                 ),
             ),
         )
-    app_clients = clients
-    app.state.clients = app_clients
+    app.state.clients = clients
     task: asyncio.Task[None] | None = None
 
     @app.on_event("startup")

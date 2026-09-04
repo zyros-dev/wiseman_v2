@@ -60,9 +60,9 @@ from app.presentation import (
 from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
     TRANSPORT_RETRY_POLICY,
-    TemporalError,
     TemporalRuntime,
     ThreadWorkflow,
+    TurnWorkflow,
     _retryable_turn_result,
     provision_workspace,
     run_turn,
@@ -944,7 +944,7 @@ def test_temporal_retries_disconnected_runner_result() -> None:
 
 @pytest.mark.asyncio
 async def test_temporal_submit_without_client_is_explicit() -> None:
-    with pytest.raises(TemporalError):
+    with pytest.raises(RuntimeError):
         await TemporalRuntime("temporal", "wiseman").submit(
             {"trigger": {"id": "m", "channel_id": "c"}}
         )
@@ -1262,6 +1262,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     workflow = ThreadWorkflow()
     await workflow.submit({"id": "queued"})
     activities: list[object] = []
+    turns = 0
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
         del kwargs
@@ -1270,22 +1271,31 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
             return {"state": {"codex_thread": "codex-thread"}}
         return {"state": {"turn": 1}}
 
+    async def child(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal turns
+        del kwargs
+        turns += 1
+        activities.append(args[0])
+        return {"state": {"turn": turns}}
+
     async def timeout(*args: object, **kwargs: object) -> None:
         del args, kwargs
         raise TimeoutError
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
-    assert activities == [provision_workspace, start_codex, run_turn]
+    assert activities == [provision_workspace, start_codex, TurnWorkflow.run]
 
 
 @pytest.mark.asyncio
 async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     activities: list[object] = []
+    turns = 0
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
         del kwargs
@@ -1294,18 +1304,26 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
             return {"state": {"codex_thread": "codex-thread"}}
         return {"state": {"turn": len(activities)}}
 
+    async def child(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal turns
+        del kwargs
+        turns += 1
+        activities.append(args[0])
+        return {"state": {"turn": turns}}
+
     async def wait_for_signal(*args: object, **kwargs: object) -> None:
         del args, kwargs
         workflow.pending.append({"id": "followup"})
-        if len(activities) > 3:
+        if turns > 1:
             raise TimeoutError
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
-    assert result == {"state": {"turn": 4}}
-    assert activities == [provision_workspace, start_codex, run_turn, run_turn]
+    assert result == {"state": {"turn": 2}}
+    assert activities == [provision_workspace, start_codex, TurnWorkflow.run, TurnWorkflow.run]
 
 
 @pytest.mark.asyncio
@@ -1327,7 +1345,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
     payload = {
         "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
     }
-    assert await provision_workspace(payload) == {"workspace": "t"}
+    assert await provision_workspace(payload) is None
     assert await start_codex({**payload, "state": {"turn": 0}}) == {
         "state": {"turn": 0, "codex_thread": "codex-thread"},
         "workspace": "t",
@@ -1350,11 +1368,32 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
         del args, kwargs
         raise TimeoutError
 
+    async def child(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        return {"state": {"turn": 1}}
+
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1}}
-    assert activities == [provision_workspace, start_codex, run_turn]
+    assert activities == [provision_workspace, start_codex]
+
+
+@pytest.mark.asyncio
+async def test_temporal_turn_workflow_owns_activity_retry_policy(monkeypatch) -> None:
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append((args[0], kwargs))
+        return {"status": "ok"}
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    result = await TurnWorkflow().run({"event": {}, "state": {}})
+
+    assert result == {"status": "ok"}
+    assert calls[0][0] is run_turn
+    assert calls[0][1]["retry_policy"] is TRANSPORT_RETRY_POLICY
 
 
 @pytest.mark.asyncio
