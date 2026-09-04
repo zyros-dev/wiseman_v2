@@ -7,6 +7,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self, cast
 
 import discord
@@ -1282,6 +1283,29 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
     monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
     await restored._expire_once(now=7_201)  # noqa: SLF001
     assert restored.thread_activity == {"123": 7_200.0}
+
+
+@pytest.mark.asyncio
+async def test_gateway_rediscovery_uses_owner_not_thread_name(monkeypatch) -> None:
+    bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
+    bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=42))  # noqa: SLF001
+
+    class Thread:
+        id, owner_id, last_message_id, name = 9, 42, 9, "rust"
+
+        async def edit(self, **kwargs: object) -> None:
+            assert kwargs == {"auto_archive_duration": 60}
+
+    class OtherThread(Thread):
+        owner_id, name = 99, "wiseman"
+
+    class Guild:
+        async def fetch_active_threads(self) -> object:
+            return SimpleNamespace(threads=[Thread(), OtherThread()])
+
+    cast("dict[int, object]", bot._connection._guilds)[1] = Guild()  # noqa: SLF001
+    await bot._discover_managed_threads()  # noqa: SLF001
+    assert set(bot.thread_activity) == {"9"}
 
 
 def test_gateway_does_not_track_unmanaged_threads() -> None:
