@@ -762,6 +762,54 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
+    class Runner:
+        attempts = 0
+
+        class DisconnectionError(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("Server disconnected without sending a response")
+
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            del thread, prompt, user, workspace
+            self.attempts += 1
+            if self.attempts == 1:
+                raise self.DisconnectionError
+            return "codex", "answer", {}
+
+    class Delivery:
+        id = "progress"
+
+        async def edit(self, *, content: str) -> None:
+            del content
+
+    class Channel:
+        def __init__(self) -> None:
+            self.embeds = 0
+            self.progress = 0
+
+        async def send(self, content: str = "", **kwargs: object) -> Delivery:
+            del content
+            if kwargs.get("embed") is not None:
+                self.embeds += 1
+            else:
+                self.progress += 1
+            return Delivery()
+
+    channel = Channel()
+    engine = Engine(Phoenix(), Runner())
+    event = normalize_event(discord_message("retry-delivery", "hello", thread="t"))
+    with pytest.raises(RuntimeError, match="disconnected"):
+        await engine.handle(event, delivery_channel=channel, state_data={}, retry_transport=True)
+    result = await engine.handle(event, delivery_channel=channel, state_data={})
+    assert result["output"] == "answer"
+    assert channel.embeds == 1
+    assert channel.progress == 1
+
+
+@pytest.mark.asyncio
 async def test_same_thread_turns_are_serialized() -> None:
     active = maximum = 0
 
@@ -845,9 +893,13 @@ async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypat
 
     class Engine:
         async def handle(
-            self, event: Event, state_data: dict[str, object] | None = None
+            self,
+            event: Event,
+            state_data: dict[str, object] | None = None,
+            *,
+            retry_transport: bool = False,
         ) -> dict[str, object]:
-            del state_data
+            del state_data, retry_transport
             seen.append(event.trigger.content)
             return {"state": {"turn": 1}}
 
