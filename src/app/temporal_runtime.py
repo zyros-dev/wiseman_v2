@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -12,7 +11,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
-from app.types import EngineResult  # noqa: TC001 - activity registration resolves this type
+from app.types import JsonObject  # noqa: TC001 - Temporal resolves JSON payload annotations
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
 
     from app.engine import Engine
     from app.runner import LifecycleRunner
-    from app.types import JsonObject
 
 
 class _ActivityRuntime:
@@ -47,35 +45,38 @@ def _engine() -> Engine:
     return _activity_runtime.engine
 
 
-def _retryable_turn_result(result: Mapping[str, object]) -> bool:
+def _retryable_turn_result(result: JsonObject) -> bool:
     error = result.get("error")
     lowered = error.lower() if isinstance(error, str) else ""
     return any(marker in lowered for marker in RETRY_MARKERS)
 
 
 @activity.defn(name="wiseman.turn")
-async def run_turn(payload: Mapping[str, object]) -> EngineResult:
+async def run_turn(payload: JsonObject) -> JsonObject:
     event = Event.model_validate(payload["event"])
     if _activity_attempt() > 1:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
     state = _json_object(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
     retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
-    result = await _engine().handle(event, state_data=state, retry_transport=retry_transport)
+    result = cast(
+        "JsonObject",
+        await _engine().handle(event, state_data=state, retry_transport=retry_transport),
+    )
     if _retryable_turn_result(result) and retry_transport:
         raise ApplicationError(str(result["error"]), type="runner_transport")
     return result
 
 
 @activity.defn(name="wiseman.workspace")
-async def provision_workspace(payload: Mapping[str, object]) -> None:
+async def provision_workspace(payload: JsonObject) -> None:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
     await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
 
 
 @activity.defn(name="wiseman.codex_start")
-async def start_codex(payload: Mapping[str, object]) -> dict[str, object]:
+async def start_codex(payload: JsonObject) -> JsonObject:
     event = Event.model_validate(payload["event"])
     state = _json_object(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
@@ -89,7 +90,7 @@ async def start_codex(payload: Mapping[str, object]) -> dict[str, object]:
 @workflow.defn(name="wiseman.turn")
 class TurnWorkflow:
     @workflow.run
-    async def run(self, payload: Mapping[str, object]) -> EngineResult:
+    async def run(self, payload: JsonObject) -> JsonObject:
         return await workflow.execute_activity(
             run_turn,
             payload,
@@ -101,16 +102,16 @@ class TurnWorkflow:
 @workflow.defn(name="wiseman.thread")
 class ThreadWorkflow:
     def __init__(self) -> None:
-        self.pending: list[dict[str, object]] = []
-        self.state: dict[str, object] = {}
-        self.result: EngineResult = {}
+        self.pending: list[JsonObject] = []
+        self.state: JsonObject = {}
+        self.result: JsonObject = {}
 
     @workflow.signal
-    async def submit(self, event: Mapping[str, object]) -> None:
+    async def submit(self, event: JsonObject) -> None:
         self.pending.append(dict(event))
 
     @workflow.run
-    async def run(self, first: Mapping[str, object]) -> EngineResult:
+    async def run(self, first: JsonObject) -> JsonObject:
         self.pending.append(_object_map(first["event"]))
         while True:
             event = self.pending.pop(0)
@@ -170,7 +171,7 @@ class TemporalRuntime:
         ):
             await asyncio.Event().wait()
 
-    async def submit(self, event: Mapping[str, object]) -> None:
+    async def submit(self, event: JsonObject) -> None:
         if self.client is None:
             raise RuntimeError("Temporal is not connected")  # noqa: TRY003
         trigger = _object_map(event["trigger"])
@@ -213,8 +214,8 @@ def _json_object(value: object) -> JsonObject:
     return cast("JsonObject", value) if isinstance(value, dict) else {}
 
 
-def _object_map(value: object) -> dict[str, object]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _object_map(value: object) -> JsonObject:
+    return cast("JsonObject", value) if isinstance(value, dict) else {}
 
 
 def _sequence(value: object) -> list[object]:

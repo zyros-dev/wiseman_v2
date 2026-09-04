@@ -70,6 +70,7 @@ from app.temporal_runtime import (
     run_turn,
     start_codex,
 )
+from app.types import EngineResult, JsonObject
 from runner.api import (
     CODEX_TEXT_ONLY_OVERRIDES,
     ApprovalMode,
@@ -84,7 +85,7 @@ from runner.api import create_app as runner_app
 
 def message(
     mid: str, content: str, channel: str = "parent", thread: str | None = None
-) -> dict[str, object]:
+) -> JsonObject:
     return {
         "id": mid,
         "author_id": "u",
@@ -911,16 +912,19 @@ async def test_closed_thread_rejects_new_work() -> None:
 async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
     engine = Engine(Phoenix(), FakeRunner())
     monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
-    result = await run_turn(
-        {
-            "event": {
-                "trigger": message("activity", "hello", thread="t"),
-                "kind": "followup",
-                "parent_messages": [],
-                "thread_messages": [],
-            },
-            "state": {"seen": ["old"], "turn": 1},
-        }
+    result = cast(
+        "EngineResult",
+        await run_turn(
+            {
+                "event": {
+                    "trigger": message("activity", "hello", thread="t"),
+                    "kind": "followup",
+                    "parent_messages": [],
+                    "thread_messages": [],
+                },
+                "state": {"seen": ["old"], "turn": 1},
+            }
+        ),
     )
     assert result["state"]["turn"] == 2
 
@@ -1001,8 +1005,9 @@ async def test_temporal_final_transport_attempt_returns_failure(monkeypatch) -> 
 
     monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", Engine())
     monkeypatch.setattr("app.temporal_runtime.activity.info", activity_info)
-    result = await run_turn(
-        {"event": {"trigger": message("final", "hello", thread="t")}, "state": {}}
+    result = cast(
+        "EngineResult",
+        await run_turn({"event": {"trigger": message("final", "hello", thread="t")}, "state": {}}),
     )
     assert result["error"].startswith("Server disconnected")
 
@@ -1412,7 +1417,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
     payload = {
         "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
     }
-    assert await provision_workspace(payload) is None
+    assert await provision_workspace(cast("JsonObject", payload)) is None
     assert await start_codex({**payload, "state": {"turn": 0}}) == {
         "state": {"turn": 0, "codex_thread": "codex-thread"},
         "workspace": "t",
@@ -2156,7 +2161,7 @@ async def test_temporal_routes_followup_to_existing_thread() -> None:
     runtime = TemporalRuntime("temporal", "wiseman")
     runtime.client = Client()
     event = {"trigger": {"id": "m", "channel_id": "c", "thread_id": "t"}}
-    await runtime.submit(event)
+    await runtime.submit(cast("JsonObject", event))
     await runtime.submit({"trigger": {"id": "m2", "channel_id": "c", "thread_id": "t"}})
     assert runtime.client.handle.event is not None
     trigger = runtime.client.handle.event["trigger"]
