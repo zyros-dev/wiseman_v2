@@ -29,7 +29,7 @@ from app.presentation import (
     render_progress,
     startup_embed,
 )
-from app.runner import TURN_NUMBER, Runner, RunnerError
+from app.runner import MESSAGE_ID, TURN_NUMBER, Runner, RunnerError
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
@@ -380,12 +380,14 @@ class Engine:
     ) -> tuple[str, str, dict[str, object]]:
         workspace = trigger.thread_id or trigger.channel_id
         token = TURN_NUMBER.set(state.turn + 1)
+        message_token = MESSAGE_ID.set(trigger.id)
         try:
             return await self.config.runner.run(
                 state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
             )
         finally:
             TURN_NUMBER.reset(token)
+            MESSAGE_ID.reset(message_token)
 
     async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
         trigger = lifecycle.trigger

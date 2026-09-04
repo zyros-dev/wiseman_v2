@@ -71,6 +71,29 @@ from runner.api import (
 from runner.api import create_app as runner_app
 
 
+class EchoHandle:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    async def stream(self):
+        yield Notification(
+            "item/completed",
+            ItemCompletedNotification(
+                completed_at_ms=1,
+                thread_id="codex-thread",
+                turn_id="turn",
+                item=ThreadItem(root=AgentMessageThreadItem(id="answer", text=self.text, type="agentMessage")),
+            ),
+        )
+        yield Notification(
+            "turn/completed",
+            TurnCompletedNotification(
+                thread_id="codex-thread",
+                turn=CodexTurn(id="turn", items=[], status=TurnStatus.completed),
+            ),
+        )
+
+
 def message(mid: str, content: str, channel: str = "parent", thread: str | None = None) -> JsonObject:
     return {
         "id": mid,
@@ -712,6 +735,8 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
         def json(self) -> dict[str, object]:
             return self.body
 
+        def raise_for_status(self) -> None: ...
+
     class Client:
         async def __aenter__(self) -> Self:
             return self
@@ -721,13 +746,18 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
 
         async def post(self, url: str, **kwargs: object) -> Response:
             del url, kwargs
-            await asyncio.sleep(0.05)
-            return Response({"thread_id": "next", "output": "answer", "model": "served"})
+            return Response({"status": "running"})
 
         async def get(self, url: str, **kwargs: object) -> Response:
-            assert url.endswith("/progress/workspace")
+            assert "/jobs/" in url
             del kwargs
-            return Response({"message": "🤖 Codex starting..."})
+            return Response(
+                {
+                    "status": "completed",
+                    "steps": ["🤖 Codex starting..."],
+                    "result": {"thread_id": "next", "output": "answer", "model": "served"},
+                }
+            )
 
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     updates: list[str] = []
@@ -959,7 +989,7 @@ async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypatch) -> None:
+async def test_temporal_retry_preserves_original_request(monkeypatch) -> None:
     seen: list[str] = []
 
     class Engine:
@@ -992,14 +1022,7 @@ async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypat
             "state": {},
         }
     )
-    assert seen == [
-        (
-            "continue\n\nContinue the current task from the existing workspace after the model "
-            "stream disconnected. Do not repeat completed commands; inspect the current state "
-            "and finish "
-            "the user's request.\n"
-        )
-    ]
+    assert seen == ["continue"]
 
 
 def test_temporal_retry_policy_is_bounded() -> None:
@@ -2034,17 +2057,11 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     configs: list[CodexConfig] = []
 
-    class Result:
-        usage = None
-
-        def __init__(self, text: str) -> None:
-            self.final_response = text
-
     class Thread:
         id = "codex-thread"
 
-        async def run(self, prompt: str, **kwargs: object) -> Result:
-            return Result(prompt)
+        async def turn(self, prompt: str, **kwargs: object) -> EchoHandle:
+            return EchoHandle(prompt)
 
     class Codex:
         def __init__(self, config: CodexConfig) -> None:
@@ -2177,10 +2194,14 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_codex_runner_propagates_midstream_disconnect_to_temporal(tmp_path, monkeypatch) -> None:
     prompts: list[str] = []
+    stopped: list[str] = []
 
     class Handle:
         def __init__(self, attempt: int) -> None:
             self.failed = attempt == 1
+
+        async def interrupt(self) -> None:
+            stopped.append("interrupted")
 
         async def stream(self):
             if self.failed:
@@ -2211,6 +2232,9 @@ async def test_codex_runner_propagates_midstream_disconnect_to_temporal(tmp_path
             del kwargs
             return Thread()
 
+        async def close(self) -> None:
+            stopped.append("closed")
+
     monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     runner = CodexRunner()
@@ -2218,6 +2242,9 @@ async def test_codex_runner_propagates_midstream_disconnect_to_temporal(tmp_path
     with pytest.raises(RuntimeError, match="disconnect"):
         await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
     assert prompts == ["hello"]
+    assert stopped == ["interrupted", "closed"]
+    assert not runner.active_turns
+    assert not runner.threads
 
 
 @pytest.mark.asyncio
@@ -2315,18 +2342,12 @@ async def test_codex_runner_limits_cross_thread_turns(tmp_path, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monkeypatch) -> None:
-    class Result:
-        usage = None
-
-        def __init__(self, text: str) -> None:
-            self.final_response = text
-
     class Thread:
         id = "codex-thread"
 
-        async def run(self, prompt: str, **kwargs: object) -> Result:
+        async def turn(self, prompt: str, **kwargs: object) -> EchoHandle:
             del kwargs
-            return Result(prompt)
+            return EchoHandle(prompt)
 
     class Codex:
         def __init__(self, config: object) -> None:

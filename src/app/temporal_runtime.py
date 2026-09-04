@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from temporalio import activity, workflow
@@ -45,8 +44,6 @@ def _engine() -> Engine:
 @activity.defn(name="wiseman.turn")
 async def run_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
-    if _activity_attempt() > 1:
-        event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
     state = _object_map(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
     retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
@@ -98,7 +95,11 @@ async def fail_turn(payload: dict) -> dict:
 
 async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:
     return await workflow.execute_activity(
-        fn, payload, start_to_close_timeout=duration, retry_policy=TRANSPORT_RETRY_POLICY
+        fn,
+        payload,
+        start_to_close_timeout=duration,
+        retry_policy=TRANSPORT_RETRY_POLICY,
+        heartbeat_timeout=timedelta(seconds=45) if fn is run_turn else None,
     )
 
 
@@ -106,7 +107,7 @@ async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, durati
 class TurnWorkflow:
     @workflow.run
     async def run(self, payload: dict) -> dict:
-        return await _activity(run_turn, payload, timedelta(minutes=10))
+        return await _activity(run_turn, payload, timedelta(hours=1))
 
 
 @workflow.defn(name="wiseman.thread")
@@ -149,9 +150,7 @@ class ThreadWorkflow:
                         id=f"wiseman-turn-{message_id or len(self.pending)}",
                     )
                 else:
-                    self.result = await _activity(
-                        run_turn, {"event": event, "state": self.state}, timedelta(minutes=10)
-                    )
+                    self.result = await _activity(run_turn, {"event": event, "state": self.state}, timedelta(hours=1))
             except Exception as exc:
                 self.result = await _activity(
                     fail_turn,
@@ -234,13 +233,6 @@ def _activity_attempt() -> int:
         return activity.info().attempt
     except RuntimeError:
         return 1
-
-
-def _retry_prompt() -> str:
-    try:
-        return (Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2").read_text()
-    except OSError:
-        return ""
 
 
 def _object_map(value: object) -> JsonObject:
