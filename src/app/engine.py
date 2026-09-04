@@ -219,6 +219,25 @@ class Engine:
             turn=int(cast("int", data.get("turn", 0))),
         )
 
+    async def preflight(self, event: Event, phase: str, state_data: JsonObject | None = None) -> None:  # fmt: skip  # noqa: E501
+        trigger = event.trigger
+        if self.lookup_channel is None or (channel := await self.lookup_channel(event)) is None:
+            return
+        steps = self.progress[trigger.id]
+        if event.kind == "startup" and not steps:
+            with suppress(discord.DiscordException):
+                await cast("EmbedMessageable", channel).send(embed=startup_embed())
+        steps.extend(() if phase in steps else (phase,))
+        message = self.deliveries.get(trigger.id)
+        content = render_progress(steps, self._state(trigger.thread_id or trigger.channel_id, state_data).turn + 1)  # fmt: skip  # noqa: E501
+        if message is None:
+            with suppress(discord.DiscordException):
+                message = await channel.send(content)
+            self.deliveries[trigger.id] = message
+        else:
+            with suppress(discord.DiscordException):
+                await edit_delivery(message, content)
+
     async def _prepare(self, request: _Preparation) -> _Prepared:
         event = request.event
         live = request.live

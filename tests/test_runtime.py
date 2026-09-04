@@ -55,6 +55,7 @@ from app.temporal_runtime import (
     TurnWorkflow,
     _retryable_turn_result,
     provision_workspace,
+    publish_progress,
     run_turn,
     start_codex,
 )
@@ -1413,7 +1414,14 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1}}
-    assert activities == [provision_workspace, start_codex, TurnWorkflow.run]
+    assert activities == [
+        publish_progress,
+        provision_workspace,
+        publish_progress,
+        start_codex,
+        publish_progress,
+        TurnWorkflow.run,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1448,7 +1456,16 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"codex_thread": "codex-thread", "turn": 2}}
-    assert activities == [provision_workspace, start_codex, TurnWorkflow.run, TurnWorkflow.run]
+    assert activities == [
+        publish_progress,
+        provision_workspace,
+        publish_progress,
+        start_codex,
+        publish_progress,
+        TurnWorkflow.run,
+        publish_progress,
+        TurnWorkflow.run,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1480,6 +1497,43 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_engine_preflight_reuses_progress_delivery() -> None:
+    class Delivery:
+        def __init__(self) -> None:
+            self.content = ""
+
+        async def edit(self, *, content: str) -> None:
+            self.content = content
+
+    class Channel:
+        def __init__(self) -> None:
+            self.sends: list[tuple[str, object | None]] = []
+            self.delivery = Delivery()
+
+        async def send(self, content: str = "", **kwargs: object) -> Delivery:
+            self.sends.append((content, kwargs.get("embed")))
+            return self.delivery
+
+    channel = Channel()
+    engine = Engine(Phoenix(), FakeRunner())
+
+    async def lookup(_event: Event) -> Channel:
+        return channel
+
+    engine.lookup_channel = lookup
+    event = Event(
+        trigger=message("preflight", "hello", thread="thread"),
+        kind="startup",
+    )
+    await engine.preflight(event, "🛠️ Workspace provisioning...", {"turn": 2})
+    await engine.preflight(event, "🤖 Codex starting...", {"turn": 2})
+    assert len(channel.sends) == 2
+    assert channel.sends[0][1] is not None
+    assert channel.delivery.content.startswith("⏳ Working · Gurt 3")
+    assert channel.delivery.content.endswith("🤖 Codex starting...")
+
+
+@pytest.mark.asyncio
 async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     activities: list[object] = []
@@ -1505,7 +1559,13 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1}}
-    assert activities == [provision_workspace, start_codex]
+    assert activities == [
+        publish_progress,
+        provision_workspace,
+        publish_progress,
+        start_codex,
+        publish_progress,
+    ]
     assert wait_timeouts == [timedelta(minutes=60)]
 
 

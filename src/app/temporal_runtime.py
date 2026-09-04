@@ -16,6 +16,8 @@ from app.types import JsonObject  # noqa: TC001 - Temporal resolves wire annotat
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from temporalio.client import Client
 
     from app.engine import Engine
@@ -84,16 +86,23 @@ async def start_codex(payload: dict) -> dict:
     return {"state": state, "workspace": workspace, "codex_thread": thread}
 
 
+@activity.defn(name="wiseman.progress")
+async def publish_progress(payload: dict) -> dict:
+    event = Event.model_validate(payload["event"])
+    phase = str(payload.get("phase", "⏳ Working..."))
+    await _engine().preflight(event, phase, _object_map(payload.get("state")))
+    return {"phase": phase}
+
+
+async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:  # fmt: skip  # noqa: E501
+    return await workflow.execute_activity(fn, payload, start_to_close_timeout=duration, retry_policy=TRANSPORT_RETRY_POLICY)  # fmt: skip  # noqa: E501
+
+
 @workflow.defn(name="wiseman.turn")
 class TurnWorkflow:
     @workflow.run
     async def run(self, payload: dict) -> dict:
-        return await workflow.execute_activity(
-            run_turn,
-            payload,
-            start_to_close_timeout=timedelta(minutes=10),
-            retry_policy=TRANSPORT_RETRY_POLICY,
-        )
+        return await _activity(run_turn, payload, timedelta(minutes=10))
 
 
 @workflow.defn(name="wiseman.thread")
@@ -101,7 +110,6 @@ class ThreadWorkflow:
     def __init__(self) -> None:
         self.pending: list[dict] = []
         self.state: JsonObject = {}
-        self.result: JsonObject = {}
 
     @workflow.signal
     async def submit(self, event: dict) -> None:
@@ -113,36 +121,16 @@ class ThreadWorkflow:
         while True:
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
-            processed = self.state.get("processed", [])
-            if message_id and message_id in _sequence(processed):
+            if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
-            if workflow.patched("split-startup-activities") and not self.state.get("codex_thread"):
-                await workflow.execute_activity(
-                    provision_workspace,
-                    {"event": event, "state": self.state},
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=TRANSPORT_RETRY_POLICY,
-                )
-                started = await workflow.execute_activity(
-                    start_codex,
-                    {"event": event, "state": self.state},
-                    start_to_close_timeout=timedelta(seconds=90),
-                    retry_policy=TRANSPORT_RETRY_POLICY,
-                )
+            if not self.state.get("codex_thread"):
+                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🛠️ Workspace provisioning..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                await _activity(provision_workspace, {"event": event, "state": self.state}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex starting..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+                started = await _activity(start_codex, {"event": event, "state": self.state}, timedelta(seconds=90))  # fmt: skip  # noqa: E501
                 self.state = _object_map(started.get("state", self.state))
-            if workflow.patched("child-turn-workflow"):
-                self.result = await workflow.execute_child_workflow(
-                    TurnWorkflow.run,
-                    {"event": event, "state": self.state},
-                    id=f"wiseman-turn-{message_id or len(self.pending)}",
-                )
-            else:
-                self.result = await workflow.execute_activity(
-                    run_turn,
-                    {"event": event, "state": self.state},
-                    start_to_close_timeout=timedelta(minutes=10),
-                    retry_policy=TRANSPORT_RETRY_POLICY,
-                )
+            await _activity(publish_progress, {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."}, timedelta(seconds=30))  # fmt: skip  # noqa: E501
+            self.result = await workflow.execute_child_workflow(TurnWorkflow.run, {"event": event, "state": self.state}, id=f"wiseman-turn-{message_id or len(self.pending)}")  # fmt: skip  # noqa: E501
             self.state = _object_map(self.result.get("state", self.state))
             try:
                 await workflow.wait_condition(
@@ -172,7 +160,7 @@ class TemporalRuntime:
             cast("Client", self.client),
             task_queue=self.queue,
             workflows=[ThreadWorkflow, TurnWorkflow],
-            activities=[provision_workspace, start_codex, run_turn],
+            activities=[provision_workspace, start_codex, publish_progress, run_turn],
         ):
             await asyncio.Event().wait()
 
