@@ -1559,7 +1559,8 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     class Message:
         def __init__(self, mid: str, channel: Channel, content: str) -> None:
             self.id, self.channel, self.content = mid, channel, content
-            self.author, self.mentions = User(), [bot_user]
+            self.author, self.mentions = User(), []
+            self.raw_mentions = [bot_user.id]
             self.created_at = datetime.now(UTC)
             self.attachments, self.reference = (), None
             self.reactions: list[str] = []

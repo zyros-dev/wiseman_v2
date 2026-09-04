@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Enforce the production source and per-file line budgets."""
-
 from __future__ import annotations
 
 import sys
@@ -17,13 +15,11 @@ SCRIPT_FILES = (
 
 
 def source_files() -> list[Path]:
-    """Return tracked production source paths, excluding caches and artifacts."""
     files = [path for root in SOURCE_ROOTS for path in root.rglob("*.py")]
     return sorted(files + [path for path in SCRIPT_FILES if path.exists()])
 
 
 def source_lines(path: Path) -> int:
-    """Count nonblank, non-comment source lines as the repository LoC measure."""
     return sum(
         1
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -32,7 +28,6 @@ def source_lines(path: Path) -> int:
 
 
 def main() -> int:
-    """Print the budget report and fail when either limit is exceeded."""
     counts = [(path, source_lines(path)) for path in source_files()]
     total = sum(lines for _, lines in counts)
     largest = sorted(counts, key=lambda item: item[1], reverse=True)
