@@ -16,8 +16,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient
-    from app.models import EmbedMessageable
-    from app.runner import SteerableRunner
     from app.types import JsonObject
 
 from app.admission import ContextConfig, context, event_data, image_tool_instruction, render_grammar
@@ -242,7 +240,7 @@ class Engine:
         steps = self.progress[trigger.id]
         if event.kind == "startup" and not steps:
             with suppress(discord.DiscordException):
-                await cast("EmbedMessageable", channel).send(embed=startup_embed())
+                await cast("Callable[..., Awaitable[object]]", channel.send)(embed=startup_embed())
         steps.extend(() if phase in steps else (phase,))
         message = self.deliveries.get(trigger.id)
         content = render_progress(steps, self._state(trigger.thread_id or trigger.channel_id, state_data).turn + 1)  # fmt: skip  # noqa: E501
@@ -328,7 +326,9 @@ class Engine:
         progress_message = self.deliveries.get(trigger.id)
         if r.channel is not None and r.kind == "startup" and not self.progress[trigger.id]:
             with suppress(discord.DiscordException):
-                await cast("EmbedMessageable", r.channel).send(embed=startup_embed())
+                await cast("Callable[..., Awaitable[object]]", r.channel.send)(
+                    embed=startup_embed()
+                )
         phase = "codex starting" if r.kind == "startup" else "working"
         progress = "🤖 Codex starting..." if r.kind == "startup" else "⏳ Working..."
         if not self.progress[trigger.id]:
@@ -432,7 +432,7 @@ class Engine:
         steer = getattr(self.runner, "steer", None)
         if not callable(steer):
             return False
-        accepted = await cast("SteerableRunner", self.runner).steer(
+        accepted = await cast("Callable[..., Awaitable[bool]]", steer)(
             "", prompt, user, workspace=thread_id
         )
         if accepted:

@@ -43,7 +43,6 @@ class MockState:
     messages: dict[str, str] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
     threads: dict[str, str] = field(default_factory=dict)
-    thread_archive_minutes: dict[str, int] = field(default_factory=dict)
     thread_activity: dict[str, float] = field(default_factory=dict)
     archived: set[str] = field(default_factory=set)
     locked: set[str] = field(default_factory=set)
@@ -77,7 +76,6 @@ class MockDiscord(DiscordClient):
         thread_id = f"thread-{self.next_id}"
         self.next_id += 1
         self.state.threads[thread_id] = name
-        self.state.thread_archive_minutes[thread_id] = auto_archive_minutes
         self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
