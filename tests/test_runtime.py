@@ -1430,7 +1430,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
     payload = {
         "event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")
     }
-    assert await provision_workspace(cast("JsonObject", payload)) is None
+    assert await provision_workspace(cast("JsonObject", payload)) == {"workspace": "t"}
     assert await start_codex({**payload, "state": {"turn": 0}}) == {
         "state": {"turn": 0, "codex_thread": "codex-thread"},
         "workspace": "t",

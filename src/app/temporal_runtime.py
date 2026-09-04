@@ -13,13 +13,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
 from app.types import JsonObject  # noqa: TC001 - Temporal resolves wire annotations
 
-TRANSPORT_RETRY_POLICY = RetryPolicy(
-    initial_interval=timedelta(seconds=5),
-    backoff_coefficient=2,
-    maximum_interval=timedelta(seconds=30),
-    maximum_attempts=2,
-)
-RETRY_MARKERS = ("runner returned http 5", "disconnected", "transport error")
+TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -47,12 +41,14 @@ def _engine() -> Engine:
 
 def _retryable_turn_result(result: JsonObject) -> bool:
     error = result.get("error")
-    lowered = error.lower() if isinstance(error, str) else ""
-    return any(marker in lowered for marker in RETRY_MARKERS)
+    return isinstance(error, str) and any(
+        marker in error.lower()
+        for marker in ("runner returned http 5", "disconnected", "transport error")
+    )
 
 
 @activity.defn(name="wiseman.turn")
-async def run_turn(payload: dict) -> JsonObject:
+async def run_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     if _activity_attempt() > 1:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
@@ -69,14 +65,15 @@ async def run_turn(payload: dict) -> JsonObject:
 
 
 @activity.defn(name="wiseman.workspace")
-async def provision_workspace(payload: dict) -> None:
+async def provision_workspace(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
     await cast("LifecycleRunner", _engine().runner).acquire(event.trigger.author_id, workspace)
+    return {"workspace": workspace}
 
 
 @activity.defn(name="wiseman.codex_start")
-async def start_codex(payload: dict) -> JsonObject:
+async def start_codex(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
@@ -90,7 +87,7 @@ async def start_codex(payload: dict) -> JsonObject:
 @workflow.defn(name="wiseman.turn")
 class TurnWorkflow:
     @workflow.run
-    async def run(self, payload: dict) -> JsonObject:
+    async def run(self, payload: dict) -> dict:
         return await workflow.execute_activity(
             run_turn,
             payload,
@@ -111,16 +108,15 @@ class ThreadWorkflow:
         self.pending.append(dict(event))
 
     @workflow.run
-    async def run(self, first: dict) -> JsonObject:
+    async def run(self, first: dict) -> dict:
         self.pending.append(_object_map(first["event"]))
-        split_startup = workflow.patched("split-startup-activities")
         while True:
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             processed = self.state.get("processed", [])
             if message_id and message_id in _sequence(processed):
                 continue
-            if split_startup and not self.state.get("codex_thread"):
+            if workflow.patched("split-startup-activities") and not self.state.get("codex_thread"):
                 await workflow.execute_activity(
                     provision_workspace,
                     {"event": event, "state": self.state},
@@ -134,11 +130,19 @@ class ThreadWorkflow:
                     retry_policy=TRANSPORT_RETRY_POLICY,
                 )
                 self.state = _object_map(started.get("state", self.state))
-            self.result = await workflow.execute_child_workflow(
-                TurnWorkflow.run,
-                {"event": event, "state": self.state},
-                id=f"wiseman-turn-{message_id or len(self.pending)}",
-            )
+            if workflow.patched("child-turn-workflow"):
+                self.result = await workflow.execute_child_workflow(
+                    TurnWorkflow.run,
+                    {"event": event, "state": self.state},
+                    id=f"wiseman-turn-{message_id or len(self.pending)}",
+                )
+            else:
+                self.result = await workflow.execute_activity(
+                    run_turn,
+                    {"event": event, "state": self.state},
+                    start_to_close_timeout=timedelta(minutes=10),
+                    retry_policy=TRANSPORT_RETRY_POLICY,
+                )
             self.state = _object_map(self.result.get("state", self.state))
             try:
                 await workflow.wait_condition(
@@ -204,9 +208,7 @@ def _activity_attempt() -> int:
 
 def _retry_prompt() -> str:
     try:
-        return (Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2").read_text(
-            encoding="utf-8"
-        )
+        return (Path(__file__).parents[2] / "contracts" / "codex-disconnect-retry.j2").read_text()
     except OSError:
         return ""
 

@@ -2,8 +2,7 @@
 
 from typing import TypedDict
 
-JsonScalar = str | int | float | bool | None
-JsonValue = JsonScalar | list | dict
+JsonValue = str | int | float | bool | None | list | dict
 JsonObject = dict[str, JsonValue]
 
 
