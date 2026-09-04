@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -82,9 +83,7 @@ class Gateway(discord.Client):
             LOGGER.exception("Could not persist Wiseman thread activity state")
 
     def _default_sequence_path(self) -> Path | None:
-        if self.activity_path is None:
-            return None
-        return self.activity_path.with_name("thread-sequence.json")
+        return self.activity_path.with_name("thread-sequence.json") if self.activity_path else None
 
     def _load_thread_sequence(self) -> int:
         if self.sequence_path is None or not self.sequence_path.exists():
@@ -260,7 +259,7 @@ class Gateway(discord.Client):
                 str(channel.id), str(reference_id), message.content, str(message.author.id)
             ):
                 return
-        if str(getattr(self.user, "id", "")) not in _mention_ids(message):
+        if str(getattr(self.user, "id", "")) not in mention_ids(message):
             return
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
@@ -286,7 +285,7 @@ class Gateway(discord.Client):
             thread_id=thread_id,
             timestamp=message.created_at.isoformat(),
             reply_to=str(message.reference.message_id) if message.reference else None,
-            mentions=_mention_ids(message),
+            mentions=mention_ids(message),
             attachments=[
                 {
                     "id": str(attachment.id),
@@ -350,7 +349,7 @@ async def _history(
             thread_id=thread_id,
             timestamp=item.created_at.isoformat(),
             reply_to=str(item.reference.message_id) if item.reference else None,
-            mentions=_mention_ids(item),
+            mentions=mention_ids(item),
             attachments=[
                 {
                     "id": str(attachment.id),
@@ -366,9 +365,11 @@ async def _history(
     ]
 
 
-def _mention_ids(message: object) -> list[str]:
+def mention_ids(message: object) -> list[str]:
     values = getattr(message, "raw_mentions", ()) or getattr(message, "mentions", ())
-    return [str(getattr(value, "id", value)) for value in values]
+    return [str(getattr(value, "id", value)) for value in values] or re.findall(
+        r"<@!?(\d+)>", str(getattr(message, "content", ""))
+    )
 
 
 def _managed_thread(thread: object) -> bool:
