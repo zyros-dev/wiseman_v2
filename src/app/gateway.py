@@ -281,7 +281,13 @@ class Gateway(discord.Client):
             and str(getattr(self.user, "id", "")) in mention_ids(message)
         )
         if not eligible:
-            LOGGER.info("Discord message ignored id=%s reason=not-an-admitted-mention", message.id)
+            LOGGER.warning(
+                "Discord message ignored id=%s reason=not-an-admitted-mention mentions=%s guild=%s allowlisted=%s",
+                message.id,
+                mention_ids(message),
+                guild_id,
+                not self.allowlist or guild_id in self.allowlist,
+            )
         return eligible
 
     def _is_self(self, message: discord.Message) -> bool:
