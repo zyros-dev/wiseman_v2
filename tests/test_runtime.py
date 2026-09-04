@@ -1425,6 +1425,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
 async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     activities: list[object] = []
+    wait_timeouts: list[timedelta] = []
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
         del kwargs
@@ -1432,7 +1433,8 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
         return {"state": {"turn": 1}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
-        del args, kwargs
+        del args
+        wait_timeouts.append(cast("timedelta", kwargs["timeout"]))
         raise TimeoutError
 
     async def child(*args: object, **kwargs: object) -> dict[str, object]:
@@ -1445,6 +1447,7 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1}}
     assert activities == [provision_workspace, start_codex]
+    assert wait_timeouts == [timedelta(minutes=60)]
 
 
 @pytest.mark.asyncio

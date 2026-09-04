@@ -13,6 +13,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.engine import Engine, EngineResult  # noqa: TC001 - Temporal resolves the annotation
 from app.models import Event
+from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -139,7 +140,8 @@ class ThreadWorkflow:
             self.state = _object_map(self.result.get("state", self.state))
             try:
                 await workflow.wait_condition(
-                    lambda: bool(self.pending), timeout=timedelta(hours=2)
+                    lambda: bool(self.pending),
+                    timeout=timedelta(minutes=THREAD_AUTO_ARCHIVE_MINUTES),
                 )
             except TimeoutError:
                 return self.result
