@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Discord-facing formatting, image assistance, and message delivery."""
-
 from __future__ import annotations
 
 import os
@@ -55,14 +53,12 @@ def banner() -> str:
 
 
 def thread_name(number: int) -> str:
-    """Return the stable sequence name shown in the Discord channel list."""
     if number < 1:
         raise ValueError("thread number must be positive")  # noqa: TRY003
     return f"Gurt {number}"[:THREAD_NAME_LIMIT]
 
 
 def startup_embed() -> discord.Embed:
-    """Render the one-time green thread-start status as a Discord embed."""
     title, _, description = banner().partition("\n")
     return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
 
@@ -70,7 +66,6 @@ def startup_embed() -> discord.Embed:
 async def describe_images(
     messages: Sequence[Mapping[str, object]], question: str = ""
 ) -> dict[str, object]:
-    """Ask the configured vision model to answer about bounded Discord image attachments."""
     images: list[dict[str, str]] = []
     seen: set[str] = set()
     for message in messages:
@@ -189,7 +184,6 @@ def split_discord_content(content: str) -> list[str]:
 
 
 def render_progress(steps: list[str], turn_number: int | None = None) -> str:
-    """Render bounded progress with the durable turn number supplied by the caller."""
     count = turn_number if turn_number is not None else 0
     visible = steps[-8:]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
@@ -197,7 +191,6 @@ def render_progress(steps: list[str], turn_number: int | None = None) -> str:
 
 
 async def deliver_content(message: object | None, channel: Messageable, content: str) -> None:
-    """Edit the progress message and send overflow chunks as normal messages."""
     chunks = split_discord_content(content)
     edited = False
     if message is not None:

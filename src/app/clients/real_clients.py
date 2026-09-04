@@ -1,9 +1,7 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Real client container construction at the application boundary."""
-
-from __future__ import annotations
-
 from dataclasses import dataclass
+
+import httpx
 
 from app.clients.client_interfaces import (
     ClientContainer,
@@ -18,16 +16,39 @@ from app.clients.client_interfaces import (
 
 
 class RealClientError(RuntimeError):
-    """Raised when production adapters were not supplied."""
+    pass
 
-    def __init__(self) -> None:
-        super().__init__("real client adapters must be supplied by the production entrypoint")
+
+class HttpProvider:
+    def __init__(self, url: str, token: str) -> None:
+        self.url, self.token = url.rstrip("/"), token
+
+    async def response(self, payload: dict[str, object]) -> dict[str, object]:
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(
+                f"{self.url}/api/v1/responses",
+                headers={"authorization": f"Bearer {self.token}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            value: object = response.json()
+        if not isinstance(value, dict):
+            raise RealClientError
+        return value
+
+
+class UnavailableTemporal:
+    async def submit(self, event: dict[str, object]) -> None:
+        del event
+        raise RealClientError
+
+    async def signal(self, workflow_id: str, event: dict[str, object]) -> None:
+        del workflow_id, event
+        raise RealClientError
 
 
 @dataclass(frozen=True, slots=True)
 class RealDependencies:
-    """Already-constructed production adapters supplied by the entrypoint."""
-
     discord: DiscordClient
     temporal: TemporalClient
     phoenix: PhoenixClient
@@ -38,15 +59,14 @@ class RealDependencies:
 def real_container(
     settings: ClientSettings, dependencies: RealDependencies | None = None
 ) -> ClientContainer:
-    """Build the real graph from explicit adapters; never silently use mocks."""
-    del settings
     if dependencies is None:
-        raise RealClientError
+        raise RealClientError("real client adapters must be supplied")  # noqa: TRY003
     return ClientContainer(
-        mode=ClientMode.REAL,
-        discord=dependencies.discord,
-        temporal=dependencies.temporal,
-        phoenix=dependencies.phoenix,
-        runner=dependencies.runner,
-        provider=dependencies.provider,
+        ClientMode.REAL,
+        dependencies.discord,
+        dependencies.temporal,
+        dependencies.phoenix,
+        dependencies.runner,
+        dependencies.provider,
+        settings,
     )

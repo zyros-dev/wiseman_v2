@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Runner interfaces and the authenticated warm-sandbox client."""
-
 from __future__ import annotations
 
 import asyncio
 import os
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
@@ -25,6 +24,9 @@ class Runner(Protocol):
     ) -> tuple[str, str, dict[str, object]]: ...
 
 
+TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
+
+
 class SteerableRunner(Protocol):
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
 
@@ -36,15 +38,11 @@ class LifecycleRunner(Runner, Protocol):
 
 
 class RunnerError(RuntimeError):
-    """Raised when the runner returns an invalid or failed response."""
-
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"runner returned HTTP {status}: {detail}")
 
 
 class HttpRunner:
-    """Thin authenticated client for the warm Codex runner."""
-
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 
@@ -89,7 +87,6 @@ class HttpRunner:
         return await self._post_turn(thread, prompt, user, workspace)
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        """Send a reply directly to the active Codex turn instead of queueing it."""
         data = await self._post(
             "/steer",
             {
@@ -111,6 +108,7 @@ class HttpRunner:
                 "codex_thread_id": thread or None,
                 "user_id": user,
                 "input": prompt,
+                "turn_number": TURN_NUMBER.get(),
             },
             request_timeout=300,
         )
@@ -132,13 +130,14 @@ class HttpRunner:
             "codex_thread_id": thread or None,
             "user_id": user,
             "input": prompt,
+            "turn_number": TURN_NUMBER.get(),
         }
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
         async with httpx.AsyncClient(timeout=600) as client:
             request = asyncio.create_task(
                 client.post(f"{self.url}/turn", headers=headers, json=payload)
             )
-            latest = ""
+            seen_steps: set[str] = set()
             while not request.done():
                 try:
                     status = await client.get(
@@ -148,10 +147,17 @@ class HttpRunner:
                     )
                     if not status.is_error:
                         value = status.json()
-                        message = value.get("message") if isinstance(value, dict) else None
-                        if isinstance(message, str) and message != latest:
-                            latest = message
-                            await progress(message)
+                        if isinstance(value, dict):
+                            steps = value.get("steps", [])
+                            messages = (
+                                steps
+                                if isinstance(steps, list) and steps
+                                else [value.get("message")]
+                            )
+                            for message in messages:
+                                if isinstance(message, str) and message not in seen_steps:
+                                    seen_steps.add(message)
+                                    await progress(message)
                 except httpx.HTTPError:
                     pass
                 if not request.done():
@@ -169,8 +175,6 @@ class HttpRunner:
 
 
 class FakeRunner:
-    """Deterministic local runner used only when no sandbox URL is configured."""
-
     async def acquire(self, user: str, workspace: str) -> None:
         del user, workspace
 

@@ -1,9 +1,8 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Typed protocols and the process-scoped external-client container."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -12,33 +11,44 @@ if TYPE_CHECKING:
 
 
 class ClientMode(StrEnum):
-    """Select a complete real or deterministic mock dependency graph."""
-
     MOCK = "mock"
     REAL = "real"
 
 
 class ClientContainerError(RuntimeError):
-    """Raised when the process client container is not configured."""
-
     def __init__(self) -> None:
         super().__init__("client container has not been configured")
 
 
 @dataclass(frozen=True, slots=True)
 class ClientSettings:
-    """Values needed to construct clients; credentials stay at the adapter edge."""
-
     discord_token: str = ""
     temporal_address: str = ""
     temporal_queue: str = "wiseman"
     phoenix_endpoint: str = ""
+    prompt_hub_url: str = ""
     phoenix_key: str = ""
     phoenix_project: str = "wiseman-v2"
     runner_url: str = ""
     runner_token: str = ""
     provider_url: str = ""
     provider_token: str = ""
+
+    @classmethod
+    def from_env(cls) -> ClientSettings:
+        return cls(
+            discord_token=os.getenv("DISCORD_BOT_TOKEN", ""),
+            temporal_address=os.getenv("TEMPORAL_ADDRESS", ""),
+            temporal_queue=os.getenv("TEMPORAL_TASK_QUEUE", "wiseman"),
+            phoenix_endpoint=os.getenv("PHOENIX_OTLP_ENDPOINT", ""),
+            prompt_hub_url=os.getenv("PHOENIX_PROMPT_HUB_URL", ""),
+            phoenix_key=os.getenv("PHOENIX_API_KEY", ""),
+            phoenix_project=os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
+            runner_url=os.getenv("WISEMAN_RUNNER_URL", ""),
+            runner_token=os.getenv("WISEMAN_RUNNER_API_TOKEN", ""),
+            provider_url=os.getenv("OPENROUTER_URL", "https://openrouter.ai"),
+            provider_token=os.getenv("OPENROUTER_API_KEY", ""),
+        )
 
 
 class DiscordClient(Protocol):
@@ -81,8 +91,6 @@ class PhoenixClient(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RunnerResult:
-    """Normalized result returned by a runner turn."""
-
     thread_id: str
     output: str
     billing: JsonObject
@@ -106,20 +114,18 @@ class ProviderClient(Protocol):
 
 @dataclass(slots=True)
 class ClientContainer:
-    """One application-scoped dependency graph; tests install isolated instances."""
-
     mode: ClientMode
     discord: DiscordClient
     temporal: TemporalClient
     phoenix: PhoenixClient
     runner: RunnerClient
     provider: ProviderClient
+    settings: ClientSettings = field(default_factory=ClientSettings)
 
     _installed: ClassVar[ClientContainer | None] = None
 
     @classmethod
     def install(cls, container: ClientContainer) -> ClientContainer:
-        """Install the one process container and return it for dependency injection."""
         cls._installed = container
         return container
 
@@ -131,10 +137,8 @@ class ClientContainer:
 
     @classmethod
     def reset(cls) -> None:
-        """Clear the process container between isolated tests or application shutdown."""
         cls._installed = None
 
 
 def current_clients() -> ClientContainer:
-    """Return the configured process container."""
     return ClientContainer.current()

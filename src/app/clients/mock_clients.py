@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Deterministic complete client graph used by tests and stateful fuzzing."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,6 +7,7 @@ from typing import TYPE_CHECKING
 from app.clients.client_interfaces import (
     ClientContainer,
     ClientMode,
+    ClientSettings,
     DiscordClient,
     PhoenixClient,
     ProviderClient,
@@ -24,16 +23,12 @@ type Failure = str
 
 
 class MockClientError(RuntimeError):
-    """Raised when a configured mock operation fails."""
-
     def __init__(self, operation: str) -> None:
         super().__init__(f"mock failure: {operation}")
 
 
 @dataclass(frozen=True, slots=True)
 class MockCall:
-    """One ordered observable external-client operation."""
-
     client: str
     operation: str
     values: tuple[str, ...] = ()
@@ -41,8 +36,6 @@ class MockCall:
 
 @dataclass(slots=True)
 class MockState:
-    """Shared fake state and deterministic failure queue."""
-
     calls: list[MockCall] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
     messages: dict[str, str] = field(default_factory=dict)
@@ -200,8 +193,7 @@ class MockProvider(ProviderClient):
         return {"model": "mock", "output": "mock provider response"}
 
 
-def mock_container() -> ClientContainer:
-    """Create a fresh, fully isolated mock dependency graph."""
+def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
     state = MockState()
     return ClientContainer(
         mode=ClientMode.MOCK,
@@ -210,4 +202,5 @@ def mock_container() -> ClientContainer:
         phoenix=MockPhoenix(state),
         runner=MockRunner(state),
         provider=MockProvider(state),
+        settings=settings or ClientSettings(),
     )

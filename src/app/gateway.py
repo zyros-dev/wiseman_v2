@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Discord gateway adapter and history normalization."""
-
 from __future__ import annotations
 
 import asyncio
@@ -19,16 +17,13 @@ if TYPE_CHECKING:
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
 from app.models import Event, Message, Messageable
-from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS
-from app.presentation import thread_name as _thread_name
+from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS, thread_name
 
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
 
 
 class Gateway(discord.Client):
-    """Direct Discord gateway adapter; it delegates to the same admission used by raw replay."""
-
     def __init__(
         self,
         engine: Engine,
@@ -111,7 +106,7 @@ class Gateway(discord.Client):
             temporary = self.sequence_path.with_name(f".{self.sequence_path.name}.tmp")
             temporary.write_text(str(self.thread_sequence), encoding="utf-8")
             temporary.replace(self.sequence_path)
-        return _thread_name(self.thread_sequence)
+        return thread_name(self.thread_sequence)
 
     def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
         self.thread_activity[thread_id] = timestamp if timestamp is not None else time.time()
@@ -150,7 +145,6 @@ class Gateway(discord.Client):
             LOGGER.exception("Could not persist Wiseman profile state")
 
     async def run_forever(self, token: str) -> None:
-        """Keep the gateway supervised when Discord returns a fatal session error."""
         delay = 1.0
         while not self.is_closed():
             try:
@@ -174,7 +168,6 @@ class Gateway(discord.Client):
             await self._expire_once()
 
     async def _discover_managed_threads(self) -> None:
-        """Recover active Wiseman threads after a gateway restart."""
         for guild in self.guilds:
             fetch = getattr(guild, "fetch_active_threads", None)
             if not callable(fetch):
@@ -204,7 +197,6 @@ class Gateway(discord.Client):
         self._persist_thread_activity()
 
     async def _expire_once(self, now: float | None = None) -> None:
-        """Archive and lock managed threads after one hour without human activity."""
         cutoff = (time.time() if now is None else now) - THREAD_CLOSE_AFTER_SECONDS
         for thread_id, last_activity in list(self.thread_activity.items()):
             if last_activity > cutoff:
@@ -233,7 +225,6 @@ class Gateway(discord.Client):
         await super().close()
 
     async def resolve(self, event: Event) -> discord.Message | None:
-        """Recover a live Discord message for a Temporal activity delivery."""
         channel_id = (
             event.trigger.channel_id
             if event.kind == "startup"
@@ -249,7 +240,6 @@ class Gateway(discord.Client):
             return None
 
     async def resolve_channel(self, event: Event) -> Messageable | None:
-        """Resolve the managed thread used for progress and answer delivery."""
         channel_id = event.trigger.thread_id or event.trigger.channel_id
         try:
             channel = await self.fetch_channel(int(channel_id))
@@ -343,7 +333,6 @@ async def _history(
     limit: int,
     before: discord.Message | None = None,
 ) -> list[Message]:
-    """Normalize bounded Discord history for the same grammar path as replay."""
     if channel is None:
         return []
     method = getattr(channel, "history", None)
