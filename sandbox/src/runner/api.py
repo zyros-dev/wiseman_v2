@@ -10,6 +10,8 @@ import pwd
 import shutil
 import subprocess
 import time
+from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -26,6 +28,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from openai_codex.models import Notification
 
 CODEX_TEXT_ONLY_OVERRIDES = (
@@ -58,7 +62,7 @@ class Workspace:
 
     @staticmethod
     def _admin(args: list[str]) -> None:
-        subprocess.run(args, check=True)  # noqa: S603 - arguments are generated below
+        subprocess.run(args, check=True)
 
     def _ensure_account(self, user: str) -> str:
         name = self.username(user)
@@ -111,18 +115,18 @@ class Workspace:
         users.mkdir(parents=True, exist_ok=True)
         base = (users / user).resolve()
         if base.parent != users:
-            raise WorkspaceError("workspace owner escapes root")  # noqa: TRY003
+            raise WorkspaceError("workspace owner escapes root")
         account = self._ensure_account(user)
         threads = base / "threads"
         threads.mkdir(parents=True, exist_ok=True)
         if threads.resolve().parent != base:
-            raise WorkspaceError("thread root escapes owner")  # noqa: TRY003
+            raise WorkspaceError("thread root escapes owner")
         path = (threads / thread).resolve()
         if path.parent != threads.resolve():
-            raise WorkspaceError("workspace path escapes owner")  # noqa: TRY003
+            raise WorkspaceError("workspace path escapes owner")
         shared = base / "shared"
         if shared.is_symlink() and shared.resolve() != shared:
-            raise WorkspaceError("shared directory escapes owner")  # noqa: TRY003
+            raise WorkspaceError("shared directory escapes owner")
         path.mkdir(parents=True, exist_ok=True)
         (shared / "skills").mkdir(parents=True, exist_ok=True)
         (shared / "memories.md").touch(exist_ok=True)
@@ -134,7 +138,7 @@ class Workspace:
         (shared / "AGENTS.md").chmod(0o600)
         link = path / "shared"
         if link.is_symlink() and link.resolve() != shared:
-            raise WorkspaceError("invalid shared link")  # noqa: TRY003
+            raise WorkspaceError("invalid shared link")
         if not link.exists():
             link.symlink_to(shared, target_is_directory=True)
         (path / ".codex").mkdir(exist_ok=True)
@@ -273,9 +277,7 @@ class CodexRunner:
         key = turn.thread_id
         client = self._client(turn, path, account)
         thread = self.threads.get(key)
-        if thread is None or (
-            turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id
-        ):
+        if thread is None or (turn.codex_thread_id and getattr(thread, "id", None) != turn.codex_thread_id):
             if not turn.codex_thread_id:
                 started = await self._start_locked(turn, path, account)
                 thread = self.threads[key]
@@ -334,7 +336,7 @@ class CodexRunner:
         finally:
             self.active_turns.pop(turn.thread_id, None)
         if completed is None:
-            raise RuntimeError("turn completed event not received")  # noqa: TRY003
+            raise RuntimeError("turn completed event not received")
         if completed.turn.error is not None:
             raise RuntimeError(completed.turn.error.message or "Codex turn failed")
         final_response = _final_response(items)
@@ -372,19 +374,19 @@ def _final_response(items: list[object]) -> str:
     return ""
 
 
-def _progress_message(event: Notification, turn_number: int = 0) -> str | None:  # noqa: PLR0911
+def _progress_message(event: Notification, turn_number: int = 0) -> str | None:
     if event.method == "turn/started":
         prefix = f"Gurt {turn_number}: " if turn_number else ""
         return f"🤖 {prefix}Codex turn started..."
     preview = " ".join(str(getattr(event.payload, "delta", "")).split())[:120]
-    if event.method == "item/agentMessage/delta":
-        return "✍️ Writing response..." + (f' "{preview}"' if preview else "")
-    if event.method == "item/commandExecution/outputDelta":
-        return "⚙️ Running command..." + (f' "{preview}"' if preview else "")
-    if event.method == "item/fileChange/outputDelta":
-        return "📝 Editing files..." + (f' "{preview}"' if preview else "")
-    if event.method == "item/mcpToolCall/progress":
-        return "🔌 Using a tool..." + (f' "{preview}"' if preview else "")
+    delta_labels = {
+        "item/agentMessage/delta": "✍️ Writing response...",
+        "item/commandExecution/outputDelta": "⚙️ Running command...",
+        "item/fileChange/outputDelta": "📝 Editing files...",
+        "item/mcpToolCall/progress": "🔌 Using a tool...",
+    }
+    if label := delta_labels.get(event.method):
+        return label + (f' "{preview}"' if preview else "")
     if event.method == "item/started":
         item = getattr(event.payload, "item", None)
         name = type(getattr(item, "root", item)).__name__
@@ -405,13 +407,12 @@ def create_app() -> FastAPI:
     )
     workspaces = Workspace(root)
     codex = CodexRunner()
-    app = FastAPI(title="wiseman-sandbox", docs_url=None, redoc_url=None)
-    cleaner: asyncio.Task[None] | None = None
-
-    async def sweep() -> None:
-        while True:
-            workspaces.cleanup()
-            await asyncio.sleep(3600)
+    app = FastAPI(
+        title="wiseman-sandbox",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=partial(_lifespan, workspaces),
+    )
 
     @app.get("/healthz")
     async def health() -> dict[str, str]:
@@ -421,33 +422,19 @@ def create_app() -> FastAPI:
     async def metrics() -> PlainTextResponse:
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.on_event("startup")
-    async def start_cleanup() -> None:
-        nonlocal cleaner
-        cleaner = asyncio.create_task(sweep())
-
-    @app.on_event("shutdown")
-    async def stop_cleanup() -> None:
-        if cleaner is not None:
-            cleaner.cancel()
-
     @app.post("/cleanup")
     async def cleanup(authorization: Annotated[str | None, Header()] = None) -> dict[str, int]:
         _auth(authorization, secret)
         return {"removed": workspaces.cleanup()}
 
     @app.post("/acquire")
-    async def acquire(
-        turn: Turn, authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def acquire(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
         path = workspaces.thread(turn.user_id, turn.thread_id)
         return {"thread_id": turn.thread_id, "path": str(path), "shared": str(path / "shared")}
 
     @app.post("/start")
-    async def start(
-        turn: Turn, authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def start(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
         path = workspaces.thread(turn.user_id, turn.thread_id)
         try:
@@ -456,9 +443,7 @@ def create_app() -> FastAPI:
             raise HTTPException(503, f"codex startup unavailable: {exc}") from exc
 
     @app.post("/turn")
-    async def run(
-        turn: Turn, authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def run(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
         path = workspaces.thread(turn.user_id, turn.thread_id)
         try:
@@ -468,9 +453,7 @@ def create_app() -> FastAPI:
         return data
 
     @app.post("/steer")
-    async def steer(
-        turn: Turn, authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, bool]:
+    async def steer(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
         _auth(authorization, secret)
         path = workspaces.thread(turn.user_id, turn.thread_id)
         try:
@@ -479,9 +462,7 @@ def create_app() -> FastAPI:
             raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 
     @app.get("/progress/{thread_id}")
-    async def progress(
-        thread_id: str, authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, str]:
+    async def progress(thread_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, str]:
         _auth(authorization, secret)
         return {
             "message": codex.progress.get(thread_id, "🤖 Codex starting..."),
@@ -491,4 +472,16 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+@asynccontextmanager
+async def _lifespan(workspaces: Workspace, _app: FastAPI) -> AsyncIterator[None]:
+    async def sweep() -> None:
+        while True:
+            workspaces.cleanup()
+            await asyncio.sleep(3600)
+
+    cleaner = asyncio.create_task(sweep())
+    try:
+        yield
+    finally:
+        cleaner.cancel()
+        await asyncio.gather(cleaner, return_exceptions=True)

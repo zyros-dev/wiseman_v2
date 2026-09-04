@@ -13,11 +13,7 @@ def build_clients(
     settings: ClientSettings,
     dependencies: RealDependencies | None = None,
 ) -> ClientContainer:
-    container = (
-        mock_container(settings)
-        if mode is ClientMode.MOCK
-        else real_container(settings, dependencies)
-    )
+    container = mock_container(settings) if mode is ClientMode.MOCK else real_container(settings, dependencies)
     return ClientContainer.install(container)
 
 

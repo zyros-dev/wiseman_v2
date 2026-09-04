@@ -28,10 +28,6 @@ class Runner(Protocol):
 TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
 
 
-class SteerableRunner(Protocol):
-    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
-
-
 class LifecycleRunner(Runner, Protocol):
     async def acquire(self, user: str, workspace: str) -> None: ...
 
@@ -47,9 +43,7 @@ class HttpRunner:
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 
-    async def _post(
-        self, path: str, payload: dict[str, object], request_timeout: float = 30
-    ) -> JsonObject:
+    async def _post(self, path: str, payload: dict[str, object], request_timeout: float = 30) -> JsonObject:
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.post(f"{self.url}{path}", headers=headers, json=payload)
@@ -113,9 +107,7 @@ class HttpRunner:
             },
             request_timeout=300,
         )
-        billing: dict[str, object] = {
-            key: data[key] for key in ("model", "cost", "usage") if key in data
-        }
+        billing: dict[str, object] = {key: data[key] for key in ("model", "cost", "usage") if key in data}
         return str(data.get("thread_id", thread)), str(data.get("output", "")), billing
 
     async def _run_with_progress(
@@ -135,9 +127,7 @@ class HttpRunner:
         }
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
         async with httpx.AsyncClient(timeout=600) as client:
-            request = asyncio.create_task(
-                client.post(f"{self.url}/turn", headers=headers, json=payload)
-            )
+            request = asyncio.create_task(client.post(f"{self.url}/turn", headers=headers, json=payload))
             seen_steps: set[str] = set()
             while not request.done():
                 try:
@@ -150,11 +140,7 @@ class HttpRunner:
                         value = status.json()
                         if isinstance(value, dict):
                             steps = value.get("steps", [])
-                            messages = (
-                                steps
-                                if isinstance(steps, list) and steps
-                                else [value.get("message")]
-                            )
+                            messages = steps if isinstance(steps, list) and steps else [value.get("message")]
                             for message in messages:
                                 if isinstance(message, str) and message not in seen_steps:
                                     seen_steps.add(message)
@@ -169,9 +155,7 @@ class HttpRunner:
         value = response.json()
         if not isinstance(value, dict):
             raise RunnerError(response.status_code, "runner returned a non-object response")
-        billing: dict[str, object] = {
-            key: value[key] for key in ("model", "cost", "usage") if key in value
-        }
+        billing: dict[str, object] = {key: value[key] for key in ("model", "cost", "usage") if key in value}
         return str(value.get("thread_id", thread)), str(value.get("output", "")), billing
 
 

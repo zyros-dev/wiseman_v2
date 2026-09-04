@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +25,13 @@ from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SEC
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
 DISCORD_MESSAGES = Counter("wiseman_discord_messages_received", "Discord messages received")
+
+
+@dataclass(slots=True)
+class _Incoming:
+    event: Event
+    delivery_channel: Messageable
+    live: discord.Message
 
 
 class Gateway(discord.Client):
@@ -114,9 +122,7 @@ class Gateway(discord.Client):
             value = json.loads(self.profile_path.read_text(encoding="utf-8"))
             reactions = value.get("reaction_emojis", {})
             if isinstance(reactions, dict):
-                self.engine.set_reaction_emojis(
-                    {str(key): str(item) for key, item in reactions.items()}
-                )
+                self.engine.set_reaction_emojis({str(key): str(item) for key, item in reactions.items()})
         except (OSError, TypeError, ValueError, AttributeError):
             LOGGER.warning("Ignoring invalid Wiseman profile state")
 
@@ -172,7 +178,7 @@ class Gateway(discord.Client):
                 self.thread_activity.setdefault(thread_id, _last_message_time(thread))
                 edit = getattr(thread, "edit", None)
                 try:
-                    if callable(edit) and getattr(thread, "auto_archive_duration", None) != THREAD_AUTO_ARCHIVE_MINUTES:  # fmt: skip  # noqa: E501
+                    if callable(edit) and getattr(thread, "auto_archive_duration", None) != THREAD_AUTO_ARCHIVE_MINUTES:
                         await cast("Callable[..., Awaitable[object]]", edit)(
                             auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
                         )
@@ -190,14 +196,10 @@ class Gateway(discord.Client):
                 if isinstance(channel, discord.Thread):
                     await channel.edit(archived=True, locked=True)
                 else:
-                    LOGGER.warning(
-                        "Managed thread %s was not returned as a Discord thread", thread_id
-                    )
+                    LOGGER.warning("Managed thread %s was not returned as a Discord thread", thread_id)
                     continue
             except (discord.ClientException, discord.DiscordException, ValueError):
-                LOGGER.warning(
-                    "Could not close managed thread %s; retaining it for retry", thread_id
-                )
+                LOGGER.warning("Could not close managed thread %s; retaining it for retry", thread_id)
                 continue
             self._forget_thread(thread_id)
 
@@ -210,9 +212,7 @@ class Gateway(discord.Client):
 
     async def resolve(self, event: Event) -> discord.Message | None:
         channel_id = (
-            event.trigger.channel_id
-            if event.kind == "startup"
-            else event.trigger.thread_id or event.trigger.channel_id
+            event.trigger.channel_id if event.kind == "startup" else event.trigger.thread_id or event.trigger.channel_id
         )
         try:
             channel = await self.fetch_channel(int(channel_id))
@@ -231,78 +231,21 @@ class Gateway(discord.Client):
         except (discord.DiscordException, ValueError):
             return None
 
-    async def on_message(self, message: discord.Message) -> None:  # noqa: PLR0912
-        if (
-            isinstance(message.channel, discord.Thread)
-            and str(message.author.id) != str(getattr(self.user, "id", ""))
-            and str(message.channel.id) in self.thread_activity
-        ):
-            self._touch_thread(str(message.channel.id))
-        if message.author.bot and str(message.author.id) == str(getattr(self.user, "id", "")):
-            return
+    async def on_message(self, message: discord.Message) -> None:
         DISCORD_MESSAGES.inc()
-        LOGGER.warning("Discord message received id=%s channel=%s mentions=%s bot=%s", message.id, message.channel.id, mention_ids(message), getattr(self.user, "id", ""))  # fmt: skip  # noqa: E501
-        channel = message.channel
-        guild_id = getattr(getattr(channel, "guild", None), "id", None)
-        if self.allowlist and guild_id not in self.allowlist:
-            return
-        if isinstance(channel, discord.Thread):
-            reference_id = getattr(message.reference, "message_id", None)
-            if reference_id is not None and await self.engine.steer_if_active(
-                str(channel.id), str(reference_id), message.content, str(message.author.id)
-            ):
-                return
-        if str(getattr(self.user, "id", "")) not in mention_ids(message):
-            return
-        if isinstance(channel, discord.Thread):
-            thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
-            delivery_channel = channel
-            self._touch_thread(thread_id)
-            thread_messages = await _history(channel, 100)
-            parent_messages = await _history(channel.parent, 100) if channel.parent else []
-        else:
-            thread = await message.create_thread(
-                name=self._next_thread_name(),
-                auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
-            )
-            thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
-            delivery_channel = thread
-            self._touch_thread(thread_id)
-            thread_messages, parent_messages = [], await _history(channel, 100, before=message)
-        trigger = Message(
-            id=str(message.id),
-            author_id=str(message.author.id),
-            author_name=message.author.name,
-            content=message.content,
-            channel_id=parent_id,
-            thread_id=thread_id,
-            timestamp=message.created_at.isoformat(),
-            reply_to=str(message.reference.message_id) if message.reference else None,
-            mentions=mention_ids(message),
-            attachments=[
-                {
-                    "id": str(attachment.id),
-                    "filename": attachment.filename,
-                    "url": attachment.url,
-                    "content_type": attachment.content_type,
-                    "size": attachment.size,
-                }
-                for attachment in message.attachments
-            ],
+        LOGGER.warning(
+            "Discord message received id=%s channel=%s mentions=%s bot=%s",
+            message.id,
+            message.channel.id,
+            mention_ids(message),
+            getattr(self.user, "id", ""),
         )
-        event = Event(
-            trigger=trigger,
-            kind=kind,
-            parent_messages=parent_messages,
-            thread_messages=thread_messages,
-            seen_ids=[],
-            raw_payload={
-                "trigger": trigger.model_dump(mode="json"),
-                "kind": kind,
-                "parent_messages": [item.model_dump(mode="json") for item in parent_messages],
-                "thread_messages": [item.model_dump(mode="json") for item in thread_messages],
-            },
-        )
+        if not await self._eligible(message):
+            return
+        incoming = await self._incoming(message)
+        if incoming is None:
+            return
+        event = incoming.event
         if self.temporal is not None:
             try:
                 await self.temporal.submit(event.model_dump(mode="json"))
@@ -312,12 +255,73 @@ class Gateway(discord.Client):
             self.engine.reaction_user = self.user
             result = await self.engine.handle(
                 event,
-                message,
-                delivery_channel=delivery_channel,
-                state_data=self.fallback_state.get(thread_id, {}),
+                incoming.live,
+                delivery_channel=incoming.delivery_channel,
+                state_data=self.fallback_state.get(event.trigger.thread_id or event.trigger.channel_id, {}),
             )
             if isinstance(result.get("state"), dict):
-                self.fallback_state[thread_id] = cast("JsonObject", result["state"])
+                self.fallback_state[event.trigger.thread_id or event.trigger.channel_id] = cast(
+                    "JsonObject", result["state"]
+                )
+
+    async def _eligible(self, message: discord.Message) -> bool:
+        channel = message.channel
+        if isinstance(channel, discord.Thread) and not self._is_self(message):
+            if str(channel.id) in self.thread_activity:
+                self._touch_thread(str(channel.id))
+            reference_id = getattr(message.reference, "message_id", None)
+            if reference_id is not None and await self.engine.steer_if_active(
+                str(channel.id), str(reference_id), message.content, str(message.author.id)
+            ):
+                return False
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        eligible = (
+            not self._is_self(message)
+            and (not self.allowlist or guild_id in self.allowlist)
+            and str(getattr(self.user, "id", "")) in mention_ids(message)
+        )
+        if not eligible:
+            LOGGER.info("Discord message ignored id=%s reason=not-an-admitted-mention", message.id)
+        return eligible
+
+    def _is_self(self, message: discord.Message) -> bool:
+        return message.author.bot and str(message.author.id) == str(getattr(self.user, "id", ""))
+
+    async def _incoming(self, message: discord.Message) -> _Incoming | None:
+        channel = message.channel
+        if isinstance(channel, discord.Thread):
+            thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
+            delivery_channel = channel
+            self._touch_thread(thread_id)
+            thread_messages = await _history(channel, 100)
+            parent_messages = await _history(channel.parent, 100) if channel.parent else []
+        else:
+            try:
+                thread = await message.create_thread(
+                    name=self._next_thread_name(),
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+            except discord.DiscordException:
+                LOGGER.exception("Could not create a thread for Discord message %s", message.id)
+                return None
+            thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
+            delivery_channel = thread
+            self._touch_thread(thread_id)
+            thread_messages, parent_messages = [], await _history(channel, 100, before=message)
+        trigger = _trigger(message, parent_id, thread_id)
+        event = Event(
+            trigger=trigger,
+            kind=kind,
+            parent_messages=parent_messages,
+            thread_messages=thread_messages,
+            raw_payload={
+                "trigger": trigger.model_dump(mode="json"),
+                "kind": kind,
+                "parent_messages": [item.model_dump(mode="json") for item in parent_messages],
+                "thread_messages": [item.model_dump(mode="json") for item in thread_messages],
+            },
+        )
+        return _Incoming(event, delivery_channel, message)
 
 
 async def _history(
@@ -333,36 +337,39 @@ async def _history(
     history_method = cast("Callable[..., AsyncIterator[discord.Message]]", method)
     thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
     channel_id = str(getattr(channel, "parent_id", getattr(channel, "id", "")))
-    history = (
-        history_method(limit=limit, before=before)
-        if before is not None
-        else history_method(limit=limit)
+    history = history_method(limit=limit, before=before) if before is not None else history_method(limit=limit)
+    return [_message(item, channel_id, thread_id) async for item in history]
+
+
+def _trigger(message: discord.Message, parent_id: str, thread_id: str) -> Message:
+    return _message(message, parent_id, thread_id)
+
+
+def _message(item: discord.Message, channel_id: str, thread_id: str | None) -> Message:
+    author = item.author
+    reference = getattr(item, "reference", None)
+    return Message(
+        id=str(item.id),
+        author_id=str(author.id),
+        author_name=author.name,
+        bot=author.bot,
+        content=item.content,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        timestamp=item.created_at.isoformat(),
+        reply_to=str(reference.message_id) if reference else None,
+        mentions=mention_ids(item),
+        attachments=[
+            {
+                "id": str(attachment.id),
+                "filename": attachment.filename,
+                "url": attachment.url,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+            }
+            for attachment in item.attachments
+        ],
     )
-    return [
-        Message(
-            id=str(item.id),
-            author_id=str(item.author.id),
-            author_name=item.author.name,
-            bot=item.author.bot,
-            content=item.content,
-            channel_id=channel_id,
-            thread_id=thread_id,
-            timestamp=item.created_at.isoformat(),
-            reply_to=str(item.reference.message_id) if item.reference else None,
-            mentions=mention_ids(item),
-            attachments=[
-                {
-                    "id": str(attachment.id),
-                    "filename": attachment.filename,
-                    "url": attachment.url,
-                    "content_type": attachment.content_type,
-                    "size": attachment.size,
-                }
-                for attachment in item.attachments
-            ],
-        )
-        async for item in history
-    ]
 
 
 def _atomic_write(path: Path, content: str) -> None:

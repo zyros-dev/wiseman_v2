@@ -42,8 +42,7 @@ def _message(value: Mapping[str, object], thread_id: str | None = None) -> Messa
     author = _mapping(value.get("author"))
     reference = _mapping(value.get("message_reference") or value.get("reference"))
     mentions = [
-        str(item.get("id", "")) if isinstance(item, dict) else str(item)
-        for item in _sequence(value.get("mentions"))
+        str(item.get("id", "")) if isinstance(item, dict) else str(item) for item in _sequence(value.get("mentions"))
     ]
     return Message(
         id=str(value["id"]),
@@ -77,11 +76,7 @@ def normalize_event(value: object) -> Event:
     if isinstance(raw.get("d"), dict) and raw.get("t") == "MESSAGE_CREATE":
         value = {
             **_mapping(raw["d"]),
-            **{
-                key: raw[key]
-                for key in ("kind", "parent_messages", "thread_messages")
-                if key in raw
-            },
+            **{key: raw[key] for key in ("kind", "parent_messages", "thread_messages") if key in raw},
         }
     normalized = _mapping(value)
     if "trigger" in normalized:
@@ -103,23 +98,15 @@ def normalize_event(value: object) -> Event:
     )
 
 
-def event_data(event: Event) -> dict[str, object]:
-    return cast("dict[str, object]", event.model_dump(mode="json", exclude={"raw_payload"}))
-
-
 def render_grammar(name: str, source: str, raw: object, **values: object) -> dict[str, object]:
     normalized = {"messages": values.get("messages", []), "mode": values.get("mode", "")}
     try:
-        rendered = (
-            Environment(undefined=StrictUndefined, autoescape=True)
-            .from_string(source)
-            .render(**normalized)
-        )
+        rendered = Environment(undefined=StrictUndefined, autoescape=True).from_string(source).render(**normalized)
     except TemplateError as exc:
         raise ValueError from exc
     parsed = json.loads(rendered)
     if not isinstance(parsed, dict):
-        raise TypeError("grammar must render an object")  # noqa: TRY003
+        raise TypeError("grammar must render an object")
     return cast(
         "dict[str, object]",
         {
@@ -155,8 +142,7 @@ def context(event: Event, config: ContextConfig | None = None) -> dict[str, obje
     selected = list({m.id: m for m in (*ancestors[::-1], *pool, trigger)}.values())
     selected.sort(key=lambda item: (item.timestamp, item.id))
     messages = [
-        item.model_dump(mode="json", exclude={"attachments": {"__all__": {"url", "proxy_url"}}})
-        for item in selected
+        item.model_dump(mode="json", exclude={"attachments": {"__all__": {"url", "proxy_url"}}}) for item in selected
     ]
     result = {
         "schema": "wiseman.discord_context.v2",
@@ -169,9 +155,7 @@ def context(event: Event, config: ContextConfig | None = None) -> dict[str, obje
         "startup": startup,
     }
     schema = json.loads(
-        (Path(__file__).parents[2] / "contracts" / "discord-context.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (Path(__file__).parents[2] / "contracts" / "discord-context.schema.json").read_text(encoding="utf-8")
     )
     validate(result, schema)
     return cast("dict[str, object]", result)
@@ -187,9 +171,7 @@ def image_tool_instruction(
     trigger: Mapping[str, object], reply_ancestors: Sequence[Mapping[str, object]] | None = None
 ) -> str:
     messages = [trigger]
-    if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(
-        str(trigger.get("content") or "")
-    ):
+    if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(str(trigger.get("content") or "")):
         messages.extend(
             message
             for message in reversed(reply_ancestors or [])
@@ -210,9 +192,7 @@ def image_tool_instruction(
                 seen.add(url)
     if not images:
         return ""
-    source = (Path(__file__).parents[2] / "contracts" / "image-tool-instruction.j2").read_text(
-        encoding="utf-8"
-    )
+    source = (Path(__file__).parents[2] / "contracts" / "image-tool-instruction.j2").read_text(encoding="utf-8")
     template = Environment(autoescape=True, undefined=StrictUndefined).from_string(source)
     return template.render(urls=images[:4]).strip()
 

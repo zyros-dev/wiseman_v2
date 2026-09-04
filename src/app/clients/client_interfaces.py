@@ -33,8 +33,6 @@ class ClientSettings:
     phoenix_project: str = "wiseman-v2"
     runner_url: str = ""
     runner_token: str = ""
-    provider_url: str = ""
-    provider_token: str = ""
 
     @classmethod
     def from_env(cls) -> ClientSettings:
@@ -48,8 +46,6 @@ class ClientSettings:
             phoenix_project=os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
             runner_url=os.getenv("WISEMAN_RUNNER_URL", ""),
             runner_token=os.getenv("WISEMAN_RUNNER_API_TOKEN", ""),
-            provider_url=os.getenv("OPENROUTER_URL", "https://openrouter.ai"),
-            provider_token=os.getenv("OPENROUTER_API_KEY", ""),
         )
 
 
@@ -58,9 +54,7 @@ class DiscordClient(Protocol):
 
     async def create_thread(self, channel_id: str, name: str, auto_archive_minutes: int) -> str: ...
 
-    async def send(
-        self, channel_id: str, content: str = "", *, embed: JsonObject | None = None
-    ) -> str: ...
+    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None) -> str: ...
 
     async def edit(self, message_id: str, content: str) -> None: ...
 
@@ -81,8 +75,6 @@ class DiscordClient(Protocol):
 
 class TemporalClient(Protocol):
     async def submit(self, event: JsonObject) -> None: ...
-
-    async def signal(self, workflow_id: str, event: JsonObject) -> None: ...
 
 
 class PhoenixClient(Protocol):
@@ -114,10 +106,6 @@ class RunnerClient(Protocol):
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
 
 
-class ProviderClient(Protocol):
-    async def response(self, payload: JsonObject) -> JsonObject: ...
-
-
 @dataclass(slots=True)
 class ClientContainer:
     mode: ClientMode
@@ -126,7 +114,6 @@ class ClientContainer:
     phoenix: PhoenixClient
     prompts: PromptClient
     runner: RunnerClient
-    provider: ProviderClient
     settings: ClientSettings = field(default_factory=ClientSettings)
 
     _installed: ClassVar[ClientContainer | None] = None

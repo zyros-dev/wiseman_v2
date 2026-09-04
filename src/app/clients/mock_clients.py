@@ -11,7 +11,6 @@ from app.clients.client_interfaces import (
     DiscordClient,
     PhoenixClient,
     PromptClient,
-    ProviderClient,
     RunnerClient,
     TemporalClient,
 )
@@ -74,9 +73,7 @@ class MockDiscord(DiscordClient):
         self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
-    async def send(
-        self, channel_id: str, content: str = "", *, embed: JsonObject | None = None
-    ) -> str:
+    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None) -> str:
         del embed
         self.state.call("discord", "send", channel_id, content)
         message_id = f"message-{self.next_id}"
@@ -120,7 +117,7 @@ class MockDiscord(DiscordClient):
 
     def advance(self, seconds: float) -> None:
         if seconds < 0:
-            raise ValueError("fake time cannot move backwards")  # noqa: TRY003
+            raise ValueError("fake time cannot move backwards")
         self.state.fake_time += seconds
         for thread_id, touched in self.state.thread_activity.items():
             if self.state.fake_time - touched >= 60 * 60:
@@ -144,9 +141,6 @@ class MockTemporal(TemporalClient):
 
     async def submit(self, event: JsonObject) -> None:
         self.state.call("temporal", "submit", str(event.get("trigger", "")))
-
-    async def signal(self, workflow_id: str, event: JsonObject) -> None:
-        self.state.call("temporal", "signal", workflow_id, str(event.get("trigger", "")))
 
 
 class MockPhoenix(PhoenixClient):
@@ -206,15 +200,6 @@ class MockRunner(RunnerClient):
         return bool(prompt)
 
 
-class MockProvider(ProviderClient):
-    def __init__(self, state: MockState) -> None:
-        self.state = state
-
-    async def response(self, payload: JsonObject) -> JsonObject:
-        self.state.call("provider", "response", str(payload.get("model", "")))
-        return {"model": "mock", "output": "mock provider response"}
-
-
 def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
     state = MockState()
     return ClientContainer(
@@ -224,6 +209,5 @@ def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
         phoenix=MockPhoenix(state),
         prompts=MockPrompts(),
         runner=MockRunner(state),
-        provider=MockProvider(state),
         settings=settings or ClientSettings(),
     )

@@ -108,9 +108,7 @@ class DiscordClientMachine(RuleBasedStateMachine):
         if self.message_ids:
             message_id = self.message_ids[-1]
             before = self.state.messages[message_id]
-            expected_failure = bool(
-                self.state.failures and self.state.failures[0] == "discord.edit"
-            )
+            expected_failure = bool(self.state.failures and self.state.failures[0] == "discord.edit")
             run_safely(self.client.edit(message_id, "updated"))
             if expected_failure:
                 assert self.state.messages[message_id] == before
@@ -286,9 +284,7 @@ class _DeliveryChannel:
         self.client, self.channel_id = client, channel_id
 
     async def send(self, content: str = "", *, embed: object | None = None) -> _LiveMessage:
-        message_id = await self.client.send(
-            self.channel_id, content, embed=cast("JsonObject | None", embed)
-        )
+        message_id = await self.client.send(self.channel_id, content, embed=cast("JsonObject | None", embed))
         return _LiveMessage(self.client, message_id)
 
 

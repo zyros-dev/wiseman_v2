@@ -125,9 +125,7 @@ async def test_engine_restarts_from_returned_state_without_local_durable_store()
     followup = first_event.model_copy(
         update={
             "kind": "followup",
-            "trigger": first_event.trigger.model_copy(
-                update={"id": "message-2", "content": "next"}
-            ),
+            "trigger": first_event.trigger.model_copy(update={"id": "message-2", "content": "next"}),
         }
     )
     second = await restarted.handle(followup, state_data=cast("JsonObject", first["state"]))
@@ -196,7 +194,6 @@ def test_real_mode_requires_explicit_adapters_and_never_falls_back() -> None:
             phoenix=mock.phoenix,
             prompts=mock.prompts,
             runner=mock.runner,
-            provider=mock.provider,
         ),
     )
     assert real.mode is ClientMode.REAL
