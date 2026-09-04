@@ -98,7 +98,6 @@ class Engine:
         if config is None:
             raise ValueError("engine config is required")  # noqa: TRY003
         self.config = config
-        self.states: dict[str, State] = defaultdict(State)
         self.reactions: dict[str, list[str]] = defaultdict(list)
         self.progress: dict[str, list[str]] = defaultdict(list)
         self.locks: dict[str, asyncio.Lock] = {}
@@ -152,7 +151,7 @@ class Engine:
     ) -> EngineResult:
         trigger = event.trigger
         key = trigger.thread_id or trigger.channel_id
-        state = self._state(key, state_data)
+        state = self._state(state_data)
         if trigger.id in state.processed:
             return {
                 "trace": f"discord-{trigger.id}",
@@ -224,14 +223,14 @@ class Engine:
             )
         )
 
-    def _state(self, key: str, data: JsonObject | None) -> State:
-        if data is None:
-            return self.states[key]
+    def _state(self, data: JsonObject | None) -> State:
+        data = data or {}
         return State(
             codex_thread=cast("str | None", data.get("codex_thread")),
             seen=_strings(data.get("seen", [])),
             processed=_strings(data.get("processed", [])),
             turn=int(cast("int", data.get("turn", 0))),
+            closed=bool(data.get("closed", False)),
         )
 
     async def preflight(self, event: Event, phase: str, state_data: JsonObject | None = None) -> None:  # fmt: skip  # noqa: E501
@@ -244,7 +243,7 @@ class Engine:
                 await cast("Callable[..., Awaitable[object]]", channel.send)(embed=startup_embed())
         steps.extend(() if phase in steps else (phase,))
         message = self.deliveries.get(trigger.id)
-        content = render_progress(steps, self._state(trigger.thread_id or trigger.channel_id, state_data).turn + 1)  # fmt: skip  # noqa: E501
+        content = render_progress(steps, self._state(state_data).turn + 1)  # fmt: skip  # noqa: E501
         if message is None:
             with suppress(discord.DiscordException):
                 message = await channel.send(content)
@@ -254,10 +253,9 @@ class Engine:
                 await edit_delivery(message, content)
 
     async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> EngineResult:  # fmt: skip  # noqa: E501
-        key = event.trigger.thread_id or event.trigger.channel_id
         live = await self.lookup(event) if self.lookup is not None else None
         channel = await self.lookup_channel(event) if self.lookup_channel is not None else None
-        lifecycle = _Lifecycle(event.trigger, live, channel, self.deliveries.get(event.trigger.id), self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]), f"discord-{event.trigger.id}", event.kind or "startup", self._state(key, state_data))  # fmt: skip  # noqa: E501
+        lifecycle = _Lifecycle(event.trigger, live, channel, self.deliveries.get(event.trigger.id), self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]), f"discord-{event.trigger.id}", event.kind or "startup", self._state(state_data))  # fmt: skip  # noqa: E501
         return await self._failure(lifecycle, RuntimeError(error))
 
     async def _prepare(self, request: _Preparation) -> _Prepared:

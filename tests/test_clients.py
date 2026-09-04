@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -12,6 +12,9 @@ from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
 from app.engine import Engine, EngineConfig
 from app.models import Event, Message
+
+if TYPE_CHECKING:
+    from app.types import JsonObject
 
 
 @pytest.mark.asyncio
@@ -98,6 +101,40 @@ async def test_engine_uses_the_injected_client_container() -> None:
     assert any(call.client == "runner" and call.operation == "run" for call in state.calls)
     assert any(call.client == "phoenix" and call.operation == "record" for call in state.calls)
     assert state.records
+
+
+@pytest.mark.asyncio
+async def test_engine_restarts_from_returned_state_without_local_durable_store() -> None:
+    container = mock_container()
+    first_engine = Engine(clients=container)
+    first_event = Event(
+        trigger=Message(
+            id="message-1",
+            author_id="user-1",
+            author_name="user",
+            content="hello",
+            channel_id="channel-1",
+            thread_id="thread-1",
+            timestamp="2026-09-04T00:00:00+00:00",
+        ),
+        kind="startup",
+    )
+
+    first = await first_engine.handle(first_event, state_data={})
+    restarted = Engine(clients=container)
+    followup = first_event.model_copy(
+        update={
+            "kind": "followup",
+            "trigger": first_event.trigger.model_copy(
+                update={"id": "message-2", "content": "next"}
+            ),
+        }
+    )
+    second = await restarted.handle(followup, state_data=cast("JsonObject", first["state"]))
+
+    assert not hasattr(first_engine, "states")
+    assert second["state"]["turn"] == 2
+    assert second["state"]["codex_thread"] == first["state"]["codex_thread"]
 
 
 @pytest.mark.asyncio

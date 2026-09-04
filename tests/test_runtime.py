@@ -35,7 +35,7 @@ from app.admission import ContextConfig, context, image_tool_instruction, normal
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway, _history, mention_ids
 from app.http_api import create_app
-from app.models import Event, State
+from app.models import Event
 from app.phoenix import Phoenix, PromptHub, provider_values
 from app.presentation import (
     banner,
@@ -922,7 +922,12 @@ async def test_same_thread_turns_are_serialized() -> None:
     events = [
         normalize_event(discord_message(str(index), "hello", thread="same")) for index in (1, 2)
     ]
-    results = await __import__("asyncio").gather(*(engine.handle(event) for event in events))
+    state: JsonObject = {}
+    results = []
+    for event in events:
+        result = await engine.handle(event, state_data=state)
+        results.append(result)
+        state = cast("JsonObject", result["state"])
     assert maximum == 1
     assert [result["state"]["turn"] for result in results] == [1, 2]
 
@@ -949,10 +954,11 @@ async def test_new_turn_recovers_after_previous_failure() -> None:
 
     engine = configured_engine(runner=Runner())
     first = await engine.handle(
-        normalize_event(discord_message("failed", "hello", thread="recover"))
+        normalize_event(discord_message("failed", "hello", thread="recover")), state_data={}
     )
     second = await engine.handle(
-        normalize_event(discord_message("recovered", "retry", thread="recover"))
+        normalize_event(discord_message("recovered", "retry", thread="recover")),
+        state_data=cast("JsonObject", first["state"]),
     )
     assert first["reactions"] == ["❌"]
     assert second["reactions"] == ["✅"]
@@ -962,8 +968,10 @@ async def test_new_turn_recovers_after_previous_failure() -> None:
 @pytest.mark.asyncio
 async def test_closed_thread_rejects_new_work() -> None:
     engine = configured_engine()
-    engine.states["t"] = State(closed=True)
-    result = await engine.handle(normalize_event(discord_message("closed", "hello", thread="t")))
+    result = await engine.handle(
+        normalize_event(discord_message("closed", "hello", thread="t")),
+        state_data={"closed": True},
+    )
     assert result["error"] == "thread is closed"
 
 
@@ -1763,7 +1771,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     followup.author.bot = True
     followup.author.id = 8
     await bot.on_message(cast("discord.Message", followup))
-    assert engine.states["2"].turn == 2
+    assert bot.fallback_state["2"]["turn"] == 2
     assert startup.reactions == ["✅"]
     assert followup.reactions == ["✅"]
     assert len(parent.thread.sent) == 3
@@ -1779,7 +1787,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     rejected.guild = Guild(2)
     ignored = Message("ignored", rejected, "hello")
     await bot.on_message(cast("discord.Message", ignored))
-    assert "ignored" not in engine.states
+    assert "ignored" not in bot.fallback_state
 
 
 @pytest.mark.asyncio

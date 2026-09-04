@@ -37,16 +37,6 @@ class HttpProvider:
         return value
 
 
-class UnavailableTemporal:
-    async def submit(self, event: dict[str, object]) -> None:
-        del event
-        raise RuntimeError
-
-    async def signal(self, workflow_id: str, event: dict[str, object]) -> None:
-        del workflow_id, event
-        raise RuntimeError
-
-
 @dataclass(frozen=True, slots=True)
 class RealDependencies:
     discord: DiscordClient

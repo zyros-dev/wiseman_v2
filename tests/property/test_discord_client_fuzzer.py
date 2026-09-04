@@ -13,7 +13,6 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, ru
 
 from app.admission import normalize_event
 from app.clients.mock_clients import (
-    MockClientError,
     MockDiscord,
     MockPhoenix,
     MockRunner,
@@ -47,7 +46,7 @@ def run[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
 def run_safely[ResultT](awaitable: Awaitable[ResultT]) -> ResultT | None:
     try:
         return run(awaitable)
-    except MockClientError:
+    except RuntimeError:
         return None
 
 
@@ -209,7 +208,7 @@ def test_failed_discord_mutation_is_atomic(operation: str) -> None:
     }
     before = _discord_snapshot(state, client)
     state.failures.append(operation)
-    with pytest.raises(MockClientError):
+    with pytest.raises(RuntimeError):
         run(actions[operation]())
     assert _discord_snapshot(state, client) == before
 

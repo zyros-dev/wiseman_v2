@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
+    from app.types import JsonObject
 from app.models import Event, Message, Messageable
 from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS, thread_name
 
@@ -38,6 +39,7 @@ class Gateway(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents)
         self.engine, self.allowlist = engine, allowlist
+        self.fallback_state: dict[str, JsonObject] = {}
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
@@ -62,6 +64,9 @@ class Gateway(discord.Client):
         DISCORD_CONNECTED.set(1)
         await self._discover_managed_threads()
 
+    async def on_disconnect(self) -> None:
+        DISCORD_CONNECTED.set(0)
+
     def _load_thread_activity(self) -> dict[str, float]:
         if self.activity_path is None or not self.activity_path.exists():
             return {}
@@ -76,10 +81,7 @@ class Gateway(discord.Client):
         if self.activity_path is None:
             return
         try:
-            self.activity_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.activity_path.with_name(f".{self.activity_path.name}.tmp")
-            temporary.write_text(json.dumps(self.thread_activity, sort_keys=True), encoding="utf-8")
-            temporary.replace(self.activity_path)
+            _atomic_write(self.activity_path, json.dumps(self.thread_activity, sort_keys=True))
         except OSError:
             LOGGER.exception("Could not persist Wiseman thread activity state")
 
@@ -95,10 +97,7 @@ class Gateway(discord.Client):
     def _next_thread_name(self) -> str:
         self.thread_sequence += 1
         if self.sequence_path is not None:
-            self.sequence_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.sequence_path.with_name(f".{self.sequence_path.name}.tmp")
-            temporary.write_text(str(self.thread_sequence), encoding="utf-8")
-            temporary.replace(self.sequence_path)
+            _atomic_write(self.sequence_path, str(self.thread_sequence))
         return thread_name(self.thread_sequence)
 
     def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
@@ -106,8 +105,7 @@ class Gateway(discord.Client):
         self._persist_thread_activity()
 
     def _forget_thread(self, thread_id: str) -> None:
-        if self.thread_activity.pop(thread_id, None) is not None:
-            self._persist_thread_activity()
+        self.thread_activity.pop(thread_id, None) is not None and self._persist_thread_activity()
 
     def _load_profile(self) -> None:
         if self.profile_path is None or not self.profile_path.exists():
@@ -126,13 +124,10 @@ class Gateway(discord.Client):
         if self.profile_path is None:
             return
         try:
-            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.profile_path.with_name(f".{self.profile_path.name}.tmp")
-            temporary.write_text(
+            _atomic_write(
+                self.profile_path,
                 json.dumps({"reaction_emojis": self.engine.reaction_emojis}, sort_keys=True),
-                encoding="utf-8",
             )
-            temporary.replace(self.profile_path)
         except OSError:
             LOGGER.exception("Could not persist Wiseman profile state")
 
@@ -315,7 +310,14 @@ class Gateway(discord.Client):
                 LOGGER.exception("Could not submit Discord message %s to Temporal", message.id)
         else:
             self.engine.reaction_user = self.user
-            await self.engine.handle(event, message, delivery_channel=delivery_channel)
+            result = await self.engine.handle(
+                event,
+                message,
+                delivery_channel=delivery_channel,
+                state_data=self.fallback_state.get(thread_id, {}),
+            )
+            if isinstance(result.get("state"), dict):
+                self.fallback_state[thread_id] = cast("JsonObject", result["state"])
 
 
 async def _history(
@@ -363,6 +365,13 @@ async def _history(
     ]
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
 def mention_ids(message: object) -> list[str]:
     values = getattr(message, "raw_mentions", ()) or getattr(message, "mentions", ())
     return [str(getattr(value, "id", value)) for value in values] + re.findall(
@@ -371,9 +380,8 @@ def mention_ids(message: object) -> list[str]:
 
 
 def _managed_thread(thread: object, user: object | None) -> bool:
-    return bool(getattr(user, "id", None)) and str(getattr(thread, "owner_id", "")) == str(
-        getattr(user, "id", "")
-    )
+    user_id = getattr(user, "id", None)
+    return bool(user_id) and str(getattr(thread, "owner_id", "")) == str(user_id)
 
 
 def _last_message_time(thread: object) -> float:
