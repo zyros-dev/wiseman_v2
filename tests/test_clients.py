@@ -10,7 +10,7 @@ import pytest
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
 from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
-from app.engine import Engine
+from app.engine import Engine, EngineConfig
 from app.models import Event, Message
 
 
@@ -163,3 +163,14 @@ def test_real_mode_requires_explicit_adapters_and_never_falls_back() -> None:
         ),
     )
     assert real.mode is ClientMode.REAL
+
+
+def test_engine_requires_typed_config_or_client_container() -> None:
+    container = mock_container()
+    config = EngineConfig(container.phoenix, container.runner, container.prompts)
+    engine = Engine(config)
+    assert engine.config is config
+    with pytest.raises(ValueError, match="engine config is required"):
+        Engine()
+    with pytest.raises(ValueError, match="choose config or clients"):
+        Engine(config, clients=container)

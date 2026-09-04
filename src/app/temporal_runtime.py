@@ -60,7 +60,7 @@ async def run_turn(payload: dict) -> dict:
 async def provision_workspace(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    await cast(LifecycleRunner, _engine().runner).acquire(  # noqa: TC006
+    await cast(LifecycleRunner, _engine().config.runner).acquire(  # noqa: TC006
         event.trigger.author_id, workspace
     )
     return {"workspace": workspace}
@@ -71,7 +71,7 @@ async def start_codex(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await cast(LifecycleRunner, _engine().runner).start(  # noqa: TC006
+    thread = await cast(LifecycleRunner, _engine().config.runner).start(  # noqa: TC006
         str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
     )
     state["codex_thread"] = thread
