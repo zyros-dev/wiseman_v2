@@ -53,15 +53,12 @@ class Gateway(discord.Client):
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
         await self._discover_managed_threads()
-        LOGGER.info("Discord gateway ready as %s", self.user)
 
     async def on_disconnect(self) -> None:
         DISCORD_CONNECTED.set(0)
-        LOGGER.warning("Discord gateway disconnected; discord.py will reconnect")
 
     async def on_resumed(self) -> None:
         DISCORD_CONNECTED.set(1)
-        LOGGER.info("Discord gateway session resumed")
 
     def _load_thread_activity(self) -> dict[str, float]:
         if self.activity_path is None or not self.activity_path.exists():
@@ -93,8 +90,7 @@ class Gateway(discord.Client):
         if self.sequence_path is None or not self.sequence_path.exists():
             return 0
         try:
-            value = json.loads(self.sequence_path.read_text(encoding="utf-8"))
-            return max(0, int(value))
+            return max(0, int(json.loads(self.sequence_path.read_text(encoding="utf-8"))))
         except (OSError, TypeError, ValueError):
             LOGGER.warning("Ignoring invalid Wiseman thread sequence state")
             return 0
@@ -113,8 +109,7 @@ class Gateway(discord.Client):
         self._persist_thread_activity()
 
     def _forget_thread(self, thread_id: str) -> None:
-        if thread_id in self.thread_activity:
-            self.thread_activity.pop(thread_id)
+        if self.thread_activity.pop(thread_id, None) is not None:
             self._persist_thread_activity()
 
     def _load_profile(self) -> None:
@@ -154,9 +149,6 @@ class Gateway(discord.Client):
             except Exception:
                 DISCORD_CONNECTED.set(0)
                 LOGGER.exception("Discord gateway session failed; retrying")
-            else:
-                if not self.is_closed():
-                    LOGGER.warning("Discord gateway stopped unexpectedly; retrying")
             if self.is_closed():
                 return
             await asyncio.sleep(delay)
@@ -249,7 +241,7 @@ class Gateway(discord.Client):
         except (discord.DiscordException, ValueError):
             return None
 
-    async def on_message(self, message: discord.Message) -> None:
+    async def on_message(self, message: discord.Message) -> None:  # noqa: PLR0912
         if (
             isinstance(message.channel, discord.Thread)
             and not message.author.bot
@@ -268,7 +260,7 @@ class Gateway(discord.Client):
                 str(channel.id), str(reference_id), message.content, str(message.author.id)
             ):
                 return
-        if self.user not in message.mentions:
+        if str(getattr(self.user, "id", "")) not in _mention_ids(message):
             return
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
@@ -294,7 +286,7 @@ class Gateway(discord.Client):
             thread_id=thread_id,
             timestamp=message.created_at.isoformat(),
             reply_to=str(message.reference.message_id) if message.reference else None,
-            mentions=[str(user.id) for user in message.mentions],
+            mentions=_mention_ids(message),
             attachments=[
                 {
                     "id": str(attachment.id),
@@ -320,7 +312,10 @@ class Gateway(discord.Client):
             },
         )
         if self.temporal is not None:
-            await self.temporal.submit(event.model_dump(mode="json"))
+            try:
+                await self.temporal.submit(event.model_dump(mode="json"))
+            except Exception:
+                LOGGER.exception("Could not submit Discord message %s to Temporal", message.id)
         else:
             self.engine.reaction_user = self.user
             await self.engine.handle(event, message, delivery_channel=delivery_channel)
@@ -355,7 +350,7 @@ async def _history(
             thread_id=thread_id,
             timestamp=item.created_at.isoformat(),
             reply_to=str(item.reference.message_id) if item.reference else None,
-            mentions=[str(user.id) for user in item.mentions],
+            mentions=_mention_ids(item),
             attachments=[
                 {
                     "id": str(attachment.id),
@@ -369,6 +364,11 @@ async def _history(
         )
         async for item in history
     ]
+
+
+def _mention_ids(message: object) -> list[str]:
+    values = getattr(message, "raw_mentions", ()) or getattr(message, "mentions", ())
+    return [str(getattr(value, "id", value)) for value in values]
 
 
 def _managed_thread(thread: object) -> bool:
