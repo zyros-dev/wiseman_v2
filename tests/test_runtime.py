@@ -1408,6 +1408,60 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_temporal_thread_compacts_history_with_pending_signal(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    turns = 0
+    continuation: list[dict[str, object]] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        if args[0] is start_codex:
+            return {"state": {"codex_thread": "codex"}}
+        return {"state": {"codex_thread": "codex"}}
+
+    async def child(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal turns
+        del args, kwargs
+        turns += 1
+        return {"state": {"codex_thread": "codex", "turn": turns}}
+
+    async def wait_for_signal(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        if turns > 20:
+            raise TimeoutError
+        workflow.pending.append({"id": f"message-{turns + 1}"})
+
+    class ContinuedError(Exception):
+        pass
+
+    def continue_as_new(value: object) -> None:
+        continuation.append(cast("dict[str, object]", value))
+        raise ContinuedError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.continue_as_new", continue_as_new)
+    with pytest.raises(ContinuedError):
+        await workflow.run({"event": {"id": "message-1"}})
+    assert continuation == [
+        {
+            "state": {"codex_thread": "codex", "turn": 20},
+            "pending": [{"id": "message-21"}],
+        }
+    ]
+
+    async def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TimeoutError
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    resumed = await ThreadWorkflow().run(continuation[0])
+    assert resumed == {"state": {"codex_thread": "codex", "turn": 21}}
+
+
+@pytest.mark.asyncio
 async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     activities: list[object] = []

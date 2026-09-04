@@ -13,6 +13,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
+HISTORY_COMPACTION_TURNS = 20
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -91,18 +92,13 @@ async def publish_progress(payload: dict) -> dict:
 @activity.defn(name="wiseman.failure")
 async def fail_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
-    return cast(
-        "dict",
-        await _engine().fail(event, str(payload.get("error", "unknown failure")), _object_map(payload.get("state"))),
-    )
+    error = str(payload.get("error", "unknown failure"))
+    return dict(await _engine().fail(event, error, _object_map(payload.get("state"))))
 
 
 async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:
     return await workflow.execute_activity(
-        fn,
-        payload,
-        start_to_close_timeout=duration,
-        retry_policy=TRANSPORT_RETRY_POLICY,
+        fn, payload, start_to_close_timeout=duration, retry_policy=TRANSPORT_RETRY_POLICY
     )
 
 
@@ -125,9 +121,13 @@ class ThreadWorkflow:
 
     @workflow.run
     async def run(self, first: dict) -> dict:
-        self.pending.append(_object_map(first["event"]))
+        self.state = _object_map(first.get("state"))
+        self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
+        if event := _object_map(first.get("event")):
+            self.pending.insert(0, event)
         workflow.patched("split-startup-activities")
         child_workflow = workflow.patched("child-turn-workflow")
+        compact_history = workflow.patched("thread-history-compaction")
         while True:
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
@@ -166,6 +166,9 @@ class ThreadWorkflow:
                 )
             except TimeoutError:
                 return self.result
+            turn = self.state.get("turn")
+            if compact_history and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
+                workflow.continue_as_new({"state": self.state, "pending": self.pending})
 
 
 async def _setup(event: dict, state: JsonObject) -> JsonObject:
