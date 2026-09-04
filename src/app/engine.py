@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, cast
 
 import discord
 from prometheus_client import Counter
@@ -28,6 +28,7 @@ from app.presentation import (
     startup_embed,
 )
 from app.runner import TURN_NUMBER, HttpRunner, Runner, RunnerError, SteerableRunner
+from app.types import EngineResult, StateData  # noqa: TC001 - public result types are re-exported
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -74,25 +75,6 @@ class _Success:
     prompt: str
     output: str
     billing: dict[str, object]
-
-
-class StateData(TypedDict):
-    codex_thread: str | None
-    seen: list[str]
-    processed: list[str]
-    turn: int
-
-
-class EngineResult(TypedDict, total=False):
-    trace: str
-    status: str
-    kind: str
-    error: str
-    output: str
-    selected_ids: list[str]
-    reactions: list[str]
-    progress: list[str]
-    state: StateData
 
 
 class Engine:
