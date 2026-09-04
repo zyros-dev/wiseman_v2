@@ -5,7 +5,6 @@ from typing import TypedDict
 JsonScalar = str | int | float | bool | None
 JsonValue = JsonScalar | list | dict
 JsonObject = dict[str, JsonValue]
-TemporalPayload = dict
 
 
 type StateData = dict[str, object]

@@ -71,7 +71,7 @@ from app.temporal_runtime import (
     run_turn,
     start_codex,
 )
-from app.types import EngineResult, JsonObject, TemporalPayload
+from app.types import EngineResult, JsonObject
 from runner.api import (
     CODEX_TEXT_ONLY_OVERRIDES,
     ApprovalMode,
@@ -121,7 +121,7 @@ def test_temporal_payload_round_trip_preserves_nested_event() -> None:
     converter = JSONPlainPayloadConverter()
     encoded = converter.to_payload(payload)
     assert encoded is not None
-    decoded = converter.from_payload(encoded, TemporalPayload)
+    decoded = converter.from_payload(encoded, dict)
     assert decoded == payload
 
 
