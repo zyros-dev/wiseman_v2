@@ -1,5 +1,3 @@
-"""Contract tests for the canonical raw Discord and runner paths."""
-
 # Copyright (c) 2026 Nick van der Merwe
 
 import asyncio

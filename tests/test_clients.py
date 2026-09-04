@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Contract tests for the explicit real/mock client boundary."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import cast
 
 import pytest
@@ -98,6 +98,35 @@ async def test_engine_uses_the_injected_client_container() -> None:
     assert any(call.client == "runner" and call.operation == "run" for call in state.calls)
     assert any(call.client == "phoenix" and call.operation == "record" for call in state.calls)
     assert state.records
+
+
+@pytest.mark.asyncio
+async def test_injected_clients_isolate_concurrent_threads() -> None:
+    container = mock_container()
+    engine = Engine(clients=container)
+
+    def event(message_id: str, thread_id: str) -> Event:
+        return Event(
+            trigger=Message(
+                id=message_id,
+                author_id="user-1",
+                author_name="user",
+                content=message_id,
+                channel_id="channel-1",
+                thread_id=thread_id,
+                timestamp=message_id,
+            ),
+            kind="startup",
+        )
+
+    results = await asyncio.gather(
+        engine.handle(event("message-1", "thread-1")),
+        engine.handle(event("message-2", "thread-2")),
+    )
+    state = cast("MockState", container.discord.state)  # type: ignore[attr-defined]
+    calls = [call for call in state.calls if call.client == "runner" and call.operation == "run"]
+    assert {call.values[-1] for call in calls} == {"thread-1", "thread-2"}
+    assert {result["state"]["turn"] for result in results} == {1}
 
 
 def test_mock_containers_are_isolated_and_installed_explicitly() -> None:

@@ -43,7 +43,6 @@ class MockState:
     messages: dict[str, str] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
     threads: dict[str, str] = field(default_factory=dict)
-    thread_archive_minutes: dict[str, int] = field(default_factory=dict)
     thread_activity: dict[str, float] = field(default_factory=dict)
     archived: set[str] = field(default_factory=set)
     locked: set[str] = field(default_factory=set)
