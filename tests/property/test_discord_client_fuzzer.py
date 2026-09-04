@@ -1,5 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Stateful fuzzing for the deterministic Discord client boundary."""
 
 from __future__ import annotations
 
@@ -37,7 +36,6 @@ ResultT = TypeVar("ResultT")
 
 
 def run[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
-    """Execute one async client operation from a synchronous state-machine rule."""
     return asyncio.run(_resolve(awaitable))
 
 
@@ -49,8 +47,6 @@ def run_safely[ResultT](awaitable: Awaitable[ResultT]) -> ResultT | None:
 
 
 class DiscordClientMachine(RuleBasedStateMachine):
-    """Generate valid and repeated Discord lifecycle calls against one fake API."""
-
     def __init__(self) -> None:
         super().__init__()
         self.state = MockState()
@@ -224,8 +220,6 @@ class _EngineRunner:
 
 
 class EngineLifecycleMachine(RuleBasedStateMachine):
-    """Fuzz accepted turns through the application boundary and restart state."""
-
     def __init__(self) -> None:
         super().__init__()
         self.state = MockState()
