@@ -1291,7 +1291,7 @@ async def test_gateway_rediscovery_uses_owner_not_thread_name(monkeypatch) -> No
     bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=42))  # noqa: SLF001
 
     class Thread:
-        id, owner_id, last_message_id, name = 9, 42, 9, "rust"
+        id, owner_id, last_message_id, name, auto_archive_duration = 9, 42, 9, "rust", 1440
 
         async def edit(self, **kwargs: object) -> None:
             assert kwargs == {"auto_archive_duration": 60}
