@@ -32,34 +32,20 @@ from openai_codex.models import Notification
 from temporalio.converter import JSONPlainPayloadConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from app.admission import ContextConfig, context, normalize_event
-from app.admission import image_tool_instruction as _image_tool_instruction
+from app.admission import ContextConfig, context, image_tool_instruction, normalize_event
 from app.engine import Engine
 from app.gateway import Gateway, _history, mention_ids
 from app.http_api import create_app
 from app.models import Event, State
-from app.phoenix import Phoenix, PromptHub
-from app.phoenix import provider_values as _provider_values
+from app.phoenix import Phoenix, PromptHub, provider_values
 from app.presentation import (
-    banner as _banner,
-)
-from app.presentation import (
-    deliver_content as _deliver_content,
-)
-from app.presentation import (
-    describe_images as _describe_images,
-)
-from app.presentation import (
-    normalize_image_url as _normalize_image_url,
-)
-from app.presentation import (
-    render_progress as _render_progress,
-)
-from app.presentation import (
-    split_discord_content as _split_discord_content,
-)
-from app.presentation import (
-    thread_name as _thread_name,
+    banner,
+    deliver_content,
+    describe_images,
+    normalize_image_url,
+    render_progress,
+    split_discord_content,
+    thread_name,
 )
 from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
@@ -226,7 +212,7 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
 
 
 def test_image_tool_instruction_uses_nearest_referenced_image_only() -> None:
-    instruction = _image_tool_instruction(
+    instruction = image_tool_instruction(
         {
             "content": "what is in this image?",
             "attachments": [],
@@ -251,7 +237,7 @@ def test_image_tool_instruction_uses_nearest_referenced_image_only() -> None:
 
 
 def test_image_tool_instruction_ignores_historical_images_for_ordinary_text() -> None:
-    instruction = _image_tool_instruction(
+    instruction = image_tool_instruction(
         {"content": "continue the task", "attachments": []},
         [{"attachments": [{"content_type": "image/png", "url": "https://cdn.example/old.png"}]}],
     )
@@ -324,7 +310,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", Client)
-    result = await _describe_images(
+    result = await describe_images(
         [
             {
                 "attachments": [
@@ -344,7 +330,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     assert request["model"] == "z-ai/glm-5.3-flash"
     assert "How many chairs" in prompt
     assert cast("dict[str, object]", content[1]["image_url"])["url"] == "https://cdn/image.jpg"
-    generic = await _describe_images(
+    generic = await describe_images(
         [
             {
                 "attachments": [
@@ -374,17 +360,17 @@ def test_reaction_state_is_idempotent() -> None:
 
 def test_discord_content_splits_long_answers_at_readable_boundaries() -> None:
     content = "first paragraph\n\n" + ("word " * 600)
-    chunks = _split_discord_content(content)
+    chunks = split_discord_content(content)
     assert len(chunks) > 1
     assert all(len(chunk) <= 2_000 for chunk in chunks)
     assert "".join(chunks).replace(" ", "") == content.replace(" ", "")
 
 
 def test_image_url_normalization_accepts_model_wrappers() -> None:
-    assert _normalize_image_url(" <https://cdn.example/image.png> ") == (
+    assert normalize_image_url(" <https://cdn.example/image.png> ") == (
         "https://cdn.example/image.png"
     )
-    assert _normalize_image_url("attachment://image.png") == ""
+    assert normalize_image_url("attachment://image.png") == ""
 
 
 @pytest.mark.asyncio
@@ -407,7 +393,7 @@ async def test_long_delivery_edits_first_chunk_and_sends_overflow() -> None:
     channel = Channel()
     progress = await channel.send("working")
     content = "paragraph\n\n" + ("word " * 600)
-    await _deliver_content(progress, channel, content)
+    await deliver_content(progress, channel, content)
     assert len(channel.sent) >= 2
     assert all(len(chunk) <= 2_000 for chunk in channel.sent)
     assert "".join(channel.sent).replace(" ", "") == content.replace(" ", "")
@@ -523,10 +509,10 @@ def test_discord_tools_require_authentication() -> None:
 
 
 def test_thread_name_uses_persisted_sequence() -> None:
-    assert _thread_name(1) == "Gurt 1"
-    assert _thread_name(42) == "Gurt 42"
+    assert thread_name(1) == "Gurt 1"
+    assert thread_name(42) == "Gurt 42"
     with pytest.raises(ValueError, match="positive"):
-        _thread_name(0)
+        thread_name(0)
 
 
 def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
@@ -571,7 +557,7 @@ def test_workspace_ownership_repairs_nested_codex_state_without_following_links(
 
 
 def test_nested_provider_event_preserves_model_usage_and_cost() -> None:
-    usage, cost, model = _provider_values(
+    usage, cost, model = provider_values(
         {
             "type": "response.completed",
             "response": {"model": "served-model", "usage": {"input_tokens": 4, "cost": 0.02}},
@@ -590,10 +576,10 @@ def test_banner_omits_unknowns_and_shows_configured_route(monkeypatch) -> None:
         "WISEMAN_ROUTE_INFO",
         json.dumps({"requested_model": "model", "provider": "provider", "input_price": "$1/M"}),
     )
-    banner = _banner()
-    assert "`model` via provider" in banner
-    assert "Input: `$1/M`" in banner
-    assert "Context:" not in banner
+    rendered = banner()
+    assert "`model` via provider" in rendered
+    assert "Input: `$1/M`" in rendered
+    assert "Context:" not in rendered
 
 
 @pytest.mark.asyncio
@@ -660,11 +646,11 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
 
 
 def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
-    rendered = _render_progress(["🤖 Codex turn started...", "⚙️ Running command..."], 1)
+    rendered = render_progress(["🤖 Codex turn started...", "⚙️ Running command..."], 1)
     assert rendered.startswith("⏳ Working · Gurt 1\n")
     assert rendered.count("Gurt 1") == 1
 
-    bounded = _render_progress(
+    bounded = render_progress(
         ["🤖 Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)], 1
     )
     assert bounded.startswith("⏳ Working · Gurt 1\n")
@@ -1065,7 +1051,7 @@ async def test_temporal_submit_without_client_is_explicit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_delivery_sends_banner_progress_and_answer(monkeypatch) -> None:
+async def test_live_delivery_sendsbanner_progress_and_answer(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_ROUTE_INFO", json.dumps({"requested_model": "model"}))
 
     class Channel:
@@ -1286,7 +1272,7 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
 
 
 @pytest.mark.asyncio
-async def test_gateway_rediscovery_uses_owner_not_thread_name(monkeypatch) -> None:
+async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> None:
     bot = Gateway(Engine(Phoenix(), FakeRunner()), {1})
     bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=42))  # noqa: SLF001
 

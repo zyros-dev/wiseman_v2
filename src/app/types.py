@@ -2,11 +2,11 @@
 
 from typing import TypedDict
 
-JsonValue = str | int | float | bool | None | list | dict
-JsonObject = dict[str, JsonValue]
+type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
+type JsonObject = dict[str, JsonValue]
 
 
-type StateData = dict[str, object]
+type StateData = dict[str, JsonValue | list[str]]
 
 
 class EngineResult(TypedDict, total=False):
