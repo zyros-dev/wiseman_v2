@@ -1,6 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-"""Phoenix tracing, admission audit persistence, and prompt loading."""
-
 from __future__ import annotations
 
 import hashlib
@@ -42,8 +40,6 @@ def provider_values(
 
 
 class Phoenix:
-    """Record every semantic layer immediately and optionally forward it to Phoenix."""
-
     def __init__(
         self,
         endpoint: str = "",
@@ -103,7 +99,6 @@ class Phoenix:
             self.contexts.pop(trace)
 
     def audit(self, audit_id: str) -> dict[str, object] | None:
-        """Return the admission artifact, including one recovered after a restart."""
         value = self.audits.get(audit_id)
         if value is None and self.audit_dir is not None:
             try:
@@ -133,22 +128,24 @@ class Phoenix:
 
 
 class PromptHub:
-    """Fetch the active Phoenix prompt source, with a deterministic local default."""
-
     def __init__(self, url: str = "", key: str = "") -> None:
         self.url, self.key = url.rstrip("/"), key
 
     async def source(self, kind: str) -> str:
         local_kind = {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)
-        default_path = Path(__file__).parents[2] / "contracts" / f"{local_kind}.json"
+        contracts = Path(__file__).parents[2] / "contracts"
+        candidates = (
+            contracts / f"{local_kind}.j2",
+            contracts / f"{local_kind}.txt",
+            contracts / f"{local_kind}.json",
+        )
         fallback = {
             "wiseman-soul": os.getenv("WISEMAN_SOUL", ""),
             "wiseman-runtime": os.getenv("WISEMAN_RUNTIME", ""),
         }
-        default = (
-            default_path.read_text(encoding="utf-8")
-            if default_path.exists()
-            else fallback.get(kind, "")
+        default = next(
+            (path.read_text(encoding="utf-8") for path in candidates if path.exists()),
+            fallback.get(kind, ""),
         )
         if not self.url:
             return default
@@ -174,7 +171,6 @@ class PromptHub:
 
 
 def route_info() -> dict[str, object]:
-    """Return only configured provider facts; absent catalog values stay absent."""
     try:
         value = json.loads(os.getenv("WISEMAN_ROUTE_INFO", "{}"))
     except ValueError:
