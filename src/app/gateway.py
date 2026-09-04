@@ -48,6 +48,7 @@ class Gateway(discord.Client):
         super().__init__(intents=intents)
         self.engine, self.allowlist = engine, allowlist
         self.fallback_state: dict[str, JsonObject] = {}
+        self.raw_gateway_payload: JsonObject | None = None
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
@@ -75,6 +76,11 @@ class Gateway(discord.Client):
 
     async def on_disconnect(self) -> None:
         DISCORD_CONNECTED.set(0)
+
+    async def on_socket_raw_receive(self, payload: str) -> None:
+        value: object = json.loads(payload)
+        if isinstance(value, dict) and value.get("t") == "MESSAGE_CREATE":
+            self.raw_gateway_payload = cast("JsonObject", value)
 
     def _load_thread_activity(self) -> dict[str, float]:
         if self.activity_path is None or not self.activity_path.exists():
@@ -329,17 +335,14 @@ class Gateway(discord.Client):
             self._touch_thread(thread_id)
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
         trigger = _message(message, parent_id, thread_id)
+        raw_payload = self.raw_gateway_payload or trigger.model_dump(mode="json")
+        self.raw_gateway_payload = None
         event = Event(
             trigger=trigger,
             kind=kind,
             parent_messages=parent_messages,
             thread_messages=thread_messages,
-            raw_payload={
-                "trigger": trigger.model_dump(mode="json"),
-                "kind": kind,
-                "parent_messages": [item.model_dump(mode="json") for item in parent_messages],
-                "thread_messages": [item.model_dump(mode="json") for item in thread_messages],
-            },
+            raw_payload=raw_payload,
         )
         return _Incoming(event, delivery_channel, message)
 

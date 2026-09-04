@@ -1789,8 +1789,12 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     startup = Message("start", parent, "hello")
     startup.author.bot = True
     startup.author.id = 8
+    await bot.on_socket_raw_receive('{"op":0,"t":"MESSAGE_CREATE","d":{"id":"start"}}')
     await bot.on_message(cast("discord.Message", startup))
     assert parent.thread is not None
+    audit = engine.config.phoenix.audit("discord-start")
+    assert audit is not None
+    assert cast("dict[str, object]", audit["raw_request"])["t"] == "MESSAGE_CREATE"
     followup = Message("follow", parent.thread, "next")
     followup.author.bot = True
     followup.author.id = 8
@@ -1843,6 +1847,14 @@ async def test_gateway_admits_reply_to_bot_without_explicit_mention() -> None:
     gateway._connection.user = cast("discord.ClientUser", User())
 
     assert await gateway._eligible(cast("discord.Message", Message()))
+
+
+@pytest.mark.asyncio
+async def test_gateway_preserves_raw_message_create_envelope() -> None:
+    gateway = Gateway(configured_engine(), {1})
+    await gateway.on_socket_raw_receive('{"op":0,"t":"MESSAGE_CREATE","d":{"id":"42"}}')
+
+    assert gateway.raw_gateway_payload == {"op": 0, "t": "MESSAGE_CREATE", "d": {"id": "42"}}
 
 
 @pytest.mark.asyncio
