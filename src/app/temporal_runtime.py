@@ -59,12 +59,9 @@ async def run_turn(payload: Mapping[str, object]) -> EngineResult:
         event.trigger.content = f"{event.trigger.content}\n\n{_retry_prompt()}"
     state = _json_object(payload.get("state"))
     event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
-    result = await _engine().handle(
-        event,
-        state_data=state,
-        retry_transport=_activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1),
-    )
-    if _retryable_turn_result(result):
+    retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
+    result = await _engine().handle(event, state_data=state, retry_transport=retry_transport)
+    if _retryable_turn_result(result) and retry_transport:
         raise ApplicationError(str(result["error"]), type="runner_transport")
     return result
 
