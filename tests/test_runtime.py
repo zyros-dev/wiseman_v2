@@ -34,7 +34,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from app.admission import ContextConfig, context, normalize_event
 from app.admission import image_tool_instruction as _image_tool_instruction
 from app.engine import Engine
-from app.gateway import Gateway, _history
+from app.gateway import Gateway, _history, mention_ids
 from app.http_api import create_app
 from app.models import Event, State
 from app.phoenix import Phoenix, PromptHub
@@ -277,6 +277,11 @@ def test_normalize_discord_gateway_message_create_envelope() -> None:
     event = normalize_event(payload)
     assert event.trigger.id == "gateway"
     assert event.raw_payload == payload
+
+
+def test_gateway_mention_fallback_reads_raw_discord_content() -> None:
+    message = type("Message", (), {"raw_mentions": [], "mentions": [], "content": "<@!42> hi"})()
+    assert mention_ids(message) == ["42"]
 
 
 @pytest.mark.asyncio
