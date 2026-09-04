@@ -27,7 +27,6 @@ MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
 MAX_DISCORD_USERNAME_LENGTH = 32
 THREAD_CLOSE_AFTER_SECONDS = THREAD_AUTO_ARCHIVE_MINUTES * 60
-THREAD_NAME_LIMIT = 100
 
 
 def banner() -> str:
@@ -53,7 +52,7 @@ def banner() -> str:
 def thread_name(number: int) -> str:
     if number < 1:
         raise ValueError("thread number must be positive")
-    return f"Gurt {number}"[:THREAD_NAME_LIMIT]
+    return f"Gurt {number}"
 
 
 def startup_embed() -> discord.Embed:

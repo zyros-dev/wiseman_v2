@@ -1834,10 +1834,14 @@ async def test_gateway_admits_reply_to_bot_without_explicit_mention() -> None:
 
     class Reference:
         message_id = 99
-        resolved = BotMessage()
+        resolved = None
 
     class Channel:
         guild = Guild()
+
+        async def fetch_message(self, message_id: int) -> BotMessage:
+            assert message_id == 99
+            return BotMessage()
 
     class Message:
         id, content, channel = 100, "continue", Channel()
