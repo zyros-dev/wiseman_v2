@@ -12,8 +12,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from app.engine import Engine, EngineResult  # noqa: TC001 - Temporal resolves the annotation
-from app.models import Event
-from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES
+from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
