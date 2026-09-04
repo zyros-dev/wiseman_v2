@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -55,9 +56,7 @@ class Gateway(discord.Client):
         self.sequence_path = (
             Path(sequence_path)
             if sequence_path
-            else self.activity_path.with_name("thread-sequence.json")
-            if self.activity_path
-            else None
+            else self.activity_path and self.activity_path.with_name("thread-sequence.json")
         )
         self.thread_sequence = self._load_thread_sequence()
         self.thread_activity = self._load_thread_activity()
@@ -172,12 +171,9 @@ class Gateway(discord.Client):
                 LOGGER.warning("Could not discover active threads in guild %s", guild.id)
                 continue
             threads = getattr(result, "threads", result)
-            iterable = cast("list[object]", threads) if isinstance(threads, (list, tuple)) else []
-            for thread in iterable:
-                if not _managed_thread(thread, self.user):
-                    continue
+            for thread in cast("list[object]", threads) if isinstance(threads, (list, tuple)) else []:
                 thread_id = str(getattr(thread, "id", ""))
-                if not thread_id:
+                if not thread_id or str(getattr(thread, "owner_id", "")) != str(getattr(self.user, "id", "")):
                     continue
                 self.thread_activity.setdefault(thread_id, _last_message_time(thread))
                 edit = getattr(thread, "edit", None)
@@ -205,7 +201,8 @@ class Gateway(discord.Client):
             except (discord.ClientException, discord.DiscordException, ValueError):
                 LOGGER.warning("Could not close managed thread %s; retaining it for retry", thread_id)
                 continue
-            self._forget_thread(thread_id)
+            if self.thread_activity.pop(thread_id, None) is not None:
+                self._persist_thread_activity()
 
     async def close(self) -> None:
         DISCORD_CONNECTED.set(0)
@@ -224,7 +221,7 @@ class Gateway(discord.Client):
                 self.engine.reaction_user = self.user
                 return await channel.fetch_message(int(event.trigger.id))
         except (discord.DiscordException, ValueError):
-            return None
+            pass
 
     async def resolve_channel(self, event: Event) -> Messageable | None:
         channel_id = event.trigger.thread_id or event.trigger.channel_id
@@ -233,7 +230,7 @@ class Gateway(discord.Client):
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 return channel
         except (discord.DiscordException, ValueError):
-            return None
+            pass
 
     async def resolve_delivery(self, event: Event, delivery_id: str) -> discord.Message | None:
         channel = await self.resolve_channel(event)
@@ -248,13 +245,7 @@ class Gateway(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         DISCORD_MESSAGES.inc()
-        LOGGER.warning(
-            "Discord message received id=%s channel=%s mentions=%s bot=%s",
-            message.id,
-            message.channel.id,
-            mention_ids(message),
-            getattr(self.user, "id", ""),
-        )
+        LOGGER.warning("Discord message received id=%s mentions=%s", message.id, mention_ids(message))
         if not await self._eligible(message):
             return
         incoming = await self._incoming(message)
@@ -307,7 +298,15 @@ class Gateway(discord.Client):
         return eligible
 
     async def _replies_to_self(self, message: discord.Message) -> bool:
-        resolved = getattr(getattr(message, "reference", None), "resolved", None)
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None)
+        if (
+            resolved is None
+            and getattr(reference, "message_id", None)
+            and callable(fetch := getattr(message.channel, "fetch_message", None))
+        ):
+            with suppress(discord.DiscordException, ValueError):
+                resolved = await cast("Callable[[int], Awaitable[object]]", fetch)(int(reference.message_id))
         return resolved is not None and self._is_self(cast("discord.Message", resolved))
 
     def _is_self(self, message: discord.Message) -> bool:
@@ -358,8 +357,10 @@ async def _history(
     if not callable(method):
         return []
     history_method = cast("Callable[..., AsyncIterator[discord.Message]]", method)
-    thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
-    channel_id = str(getattr(channel, "parent_id", getattr(channel, "id", "")))
+    thread_id, channel_id = (
+        (str(channel.id) if isinstance(channel, discord.Thread) else None),
+        str(getattr(channel, "parent_id", getattr(channel, "id", ""))),
+    )
     history = history_method(limit=limit, before=before) if before is not None else history_method(limit=limit)
     return [_message(item, channel_id, thread_id) async for item in history]
 
@@ -403,11 +404,6 @@ def mention_ids(message: object) -> list[str]:
     return [str(getattr(value, "id", value)) for value in values] + re.findall(
         r"<@!?(\d+)>", str(getattr(message, "content", ""))
     )
-
-
-def _managed_thread(thread: object, user: object | None) -> bool:
-    user_id = getattr(user, "id", None)
-    return bool(user_id) and str(getattr(thread, "owner_id", "")) == str(user_id)
 
 
 def _last_message_time(thread: object) -> float:
