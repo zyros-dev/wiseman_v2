@@ -28,6 +28,7 @@ from openai_codex.generated.v2_all import (
     Turn as CodexTurn,
 )
 from openai_codex.models import Notification
+from temporalio.converter import JSONPlainPayloadConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.admission import ContextConfig, context, normalize_event
@@ -70,7 +71,7 @@ from app.temporal_runtime import (
     run_turn,
     start_codex,
 )
-from app.types import EngineResult, JsonObject
+from app.types import EngineResult, JsonObject, TemporalPayload
 from runner.api import (
     CODEX_TEXT_ONLY_OVERRIDES,
     ApprovalMode,
@@ -110,6 +111,18 @@ def discord_message(
         "mentions": [],
         "attachments": [],
     }
+
+
+def test_temporal_payload_round_trip_preserves_nested_event() -> None:
+    payload = {
+        "event": {"trigger": {"id": "message", "channel_id": "channel"}},
+        "state": {},
+    }
+    converter = JSONPlainPayloadConverter()
+    encoded = converter.to_payload(payload)
+    assert encoded is not None
+    decoded = converter.from_payload(encoded, TemporalPayload)
+    assert decoded == payload
 
 
 def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
