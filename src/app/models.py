@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.types import JsonObject
 
+THREAD_AUTO_ARCHIVE_MINUTES = 60
+
 
 class Message(BaseModel):
     model_config = ConfigDict(extra="ignore")
