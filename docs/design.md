@@ -15,7 +15,7 @@ flowchart LR
   T --> TS[(TimescaleDB)]
 ```
 
-`src/app/main.py` is deliberately the small coordinator. `Gateway.on_message`
+`src/app/http_api.py` is deliberately the small coordinator. `Gateway.on_message`
 and `/v1/discord/events` both pass through `normalize_event`; the replay route
 accepts captured Discord JSON with nested authors, mentions, references, and
 attachments as well as canonical events. A raw HTTP fixture therefore

@@ -250,7 +250,7 @@ class CodexRunner:
 
     @staticmethod
     def _developer_instructions() -> str:
-        return _prompt("sandbox-developer-instructions.txt")
+        return _prompt("sandbox-developer-instructions.j2")
 
     async def run(self, turn: Turn, path: Path, account: str = "") -> dict[str, object]:
         lock = self.locks.setdefault(turn.thread_id, asyncio.Lock())
@@ -356,10 +356,11 @@ class CodexRunner:
 
 def _prompt(name: str) -> str:
     for root in (PROMPT_ROOT, Path(__file__).parents[3] / "contracts"):
-        try:
-            return (root / name).read_text(encoding="utf-8")
-        except OSError:
-            continue
+        for candidate in (name, name.removesuffix(".txt") + ".j2"):
+            try:
+                return (root / candidate).read_text(encoding="utf-8")
+            except OSError:
+                continue
     return os.getenv("WISEMAN_DEVELOPER_INSTRUCTIONS", "")
 
 

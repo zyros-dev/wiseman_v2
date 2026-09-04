@@ -7,8 +7,9 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import Any, Self, cast
 
+import discord
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -78,9 +79,6 @@ from runner.api import (
     _progress_message,
 )
 from runner.api import create_app as runner_app
-
-if TYPE_CHECKING:
-    import discord
 
 
 def message(
@@ -762,6 +760,38 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discord_reaction_failures_do_not_abort_terminal_delivery() -> None:
+    class Delivery:
+        async def edit(self, *, content: str) -> None:
+            del content
+
+    class Channel:
+        async def send(self, content: str = "", **kwargs: object) -> Delivery:
+            del content, kwargs
+            return Delivery()
+
+    class Live:
+        channel = Channel()
+
+        async def add_reaction(self, emoji: str) -> None:
+            del emoji
+            raise discord.DiscordException
+
+        async def remove_reaction(self, emoji: str, member: object) -> None:
+            del emoji, member
+            raise discord.DiscordException
+
+    engine = Engine(Phoenix(), FakeRunner())
+    engine.reaction_user = object()
+    result = await engine.handle(
+        normalize_event(discord_message("reaction-failure", "hello", thread="t")),
+        cast("discord.Message", Live()),
+    )
+    assert result["output"].startswith("Codex received: ")
+    assert result["reactions"] == ["✅"]
+
+
+@pytest.mark.asyncio
 async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
     class Runner:
         attempts = 0
@@ -1309,7 +1339,7 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
         del kwargs
         turns += 1
         activities.append(args[0])
-        return {"state": {"turn": turns}}
+        return {"state": {"codex_thread": "codex-thread", "turn": turns}}
 
     async def wait_for_signal(*args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -1322,7 +1352,7 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
-    assert result == {"state": {"turn": 2}}
+    assert result == {"state": {"codex_thread": "codex-thread", "turn": 2}}
     assert activities == [provision_workspace, start_codex, TurnWorkflow.run, TurnWorkflow.run]
 
 
