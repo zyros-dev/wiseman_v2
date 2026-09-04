@@ -246,7 +246,7 @@ class Gateway(discord.Client):
         if message.author.bot:
             return
         DISCORD_MESSAGES.inc()
-        LOGGER.warning("Discord message received id=%s channel=%s", message.id, message.channel.id)
+        LOGGER.warning("Discord message received id=%s channel=%s mentions=%s bot=%s", message.id, message.channel.id, mention_ids(message), getattr(self.user, "id", ""))  # fmt: skip  # noqa: E501
         channel = message.channel
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
         if self.allowlist and guild_id not in self.allowlist:
