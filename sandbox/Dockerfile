@@ -10,6 +10,7 @@ RUN apt-get update \
     && chmod 0440 /etc/sudoers.d/wiseman \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock ./
+COPY contracts ./contracts
 COPY sandbox/src ./sandbox/src
 COPY sandbox/codex-as-user /usr/local/bin/codex-as-user
 COPY sandbox/wiseman-image /usr/local/bin/wiseman-image

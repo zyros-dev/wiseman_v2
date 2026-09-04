@@ -5,9 +5,9 @@
 import asyncio
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import httpx
 import pytest
@@ -28,27 +28,38 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from app.main import (
-    Engine,
-    FakeRunner,
-    Gateway,
-    HttpRunner,
-    Phoenix,
-    PromptHub,
-    State,
-    _banner,
-    _deliver_content,
-    _describe_images,
-    _history,
-    _normalize_image_url,
-    _provider_values,
-    _render_progress,
-    _split_discord_content,
-    _thread_name,
-    create_app,
-    normalize_event,
+from app.admission import ContextConfig, context, normalize_event
+from app.admission import image_tool_instruction as _image_tool_instruction
+from app.engine import Engine
+from app.gateway import Gateway, _history
+from app.http_api import create_app
+from app.models import Event, State
+from app.phoenix import Phoenix, PromptHub
+from app.phoenix import provider_values as _provider_values
+from app.presentation import (
+    banner as _banner,
 )
+from app.presentation import (
+    deliver_content as _deliver_content,
+)
+from app.presentation import (
+    describe_images as _describe_images,
+)
+from app.presentation import (
+    normalize_image_url as _normalize_image_url,
+)
+from app.presentation import (
+    render_progress as _render_progress,
+)
+from app.presentation import (
+    split_discord_content as _split_discord_content,
+)
+from app.presentation import (
+    thread_name as _thread_name,
+)
+from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
+    TRANSPORT_RETRY_POLICY,
     TemporalError,
     TemporalRuntime,
     ThreadWorkflow,
@@ -67,6 +78,9 @@ from runner.api import (
     _progress_message,
 )
 from runner.api import create_app as runner_app
+
+if TYPE_CHECKING:
+    import discord
 
 
 def message(
@@ -126,14 +140,19 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert second.json()["kind"] == "followup"
     assert "1" in second.json()["selected_ids"]
     assert {"123", "124", "2"}.issubset(second.json()["selected_ids"])
-    context = [item for item in engine.phoenix.records if item["node"] == "context"][-1]
+    context = cast(
+        "dict[str, Any]",
+        [item for item in engine.phoenix.records if item["node"] == "context"][-1],
+    )
     assert context["normalized"]["reply_ancestors"][0]["id"] == "1"
     assert "1" not in {item["id"] for item in context["normalized"]["surrounding"]}
     assert engine.reactions["1"] == ["✅"]
     duplicate = client.post("/v1/discord/events", headers=headers, json=startup)
     assert duplicate.json()["status"] == "duplicate"
     assert duplicate.json()["state"]["turn"] == 2
-    grammar = next(item for item in engine.phoenix.records if item["node"] == "grammar")
+    grammar = cast(
+        "dict[str, Any]", next(item for item in engine.phoenix.records if item["node"] == "grammar")
+    )
     assert {"source", "raw", "normalized", "rendered", "version"} <= grammar.keys()
     assert grammar["parsed"]["schema"] == "wiseman.context.grammar.v2"
     codex = [item for item in engine.phoenix.records if item["node"] == "codex"]
@@ -188,6 +207,54 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
     assert "https://cdn.example/old.png" not in prompt["user"]
 
 
+def test_image_tool_instruction_uses_nearest_referenced_image_only() -> None:
+    instruction = _image_tool_instruction(
+        {
+            "content": "what is in this image?",
+            "attachments": [],
+        },
+        [
+            {
+                "content": "old photo",
+                "attachments": [
+                    {"content_type": "image/png", "url": "https://cdn.example/old.png"}
+                ],
+            },
+            {
+                "content": "latest photo",
+                "attachments": [
+                    {"content_type": "image/png", "url": "https://cdn.example/latest.png"}
+                ],
+            },
+        ],
+    )
+    assert "https://cdn.example/latest.png" in instruction
+    assert "https://cdn.example/old.png" not in instruction
+
+
+def test_image_tool_instruction_ignores_historical_images_for_ordinary_text() -> None:
+    instruction = _image_tool_instruction(
+        {"content": "continue the task", "attachments": []},
+        [{"attachments": [{"content_type": "image/png", "url": "https://cdn.example/old.png"}]}],
+    )
+    assert instruction == ""
+
+
+def test_context_uses_injected_ancestor_bound() -> None:
+    messages = [message(str(index), f"m-{index}") for index in range(4)]
+    for index in range(1, 4):
+        messages[index]["reply_to"] = str(index - 1)
+    event = Event(
+        trigger=normalize_event({**message("trigger", "question"), "reply_to": "3"}).trigger,
+        kind="followup",
+        parent_messages=[normalize_event(item).trigger for item in messages],
+    )
+    current = context(event, ContextConfig(max_ancestors=2))
+    ancestors = current["reply_ancestors"]
+    assert isinstance(ancestors, list)
+    assert [item["id"] for item in ancestors if isinstance(item, dict)] == ["2", "3"]
+
+
 def test_normalize_discord_gateway_message_create_envelope() -> None:
     payload = {"op": 0, "t": "MESSAGE_CREATE", "d": discord_message("gateway", "hello")}
     event = normalize_event(payload)
@@ -225,7 +292,7 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
             return Response()
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", Client)
     result = await _describe_images(
         [
             {
@@ -321,7 +388,7 @@ async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> Non
         seen.append(str(messages[0]["attachments"][0]["url"]))
         return {"text": "description", "attachments": ["image"], "question": question or None}
 
-    monkeypatch.setattr("app.main._describe_images", describe)
+    monkeypatch.setattr("app.http_api.describe_images", describe)
     response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
         "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
     )
@@ -360,7 +427,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
 
     monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
-    monkeypatch.setattr("app.main.discord.Thread", Thread)
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
     engine = Engine(Phoenix(), FakeRunner())
     app = create_app(engine, token="secret")
     app.state.gateway._connection.user = User()  # noqa: SLF001
@@ -421,12 +488,11 @@ def test_discord_tools_require_authentication() -> None:
     assert client.post("/v1/tools/send-file", json={}).status_code == 401
 
 
-def test_thread_name_uses_message_without_mentions_and_stays_bounded() -> None:
-    assert _thread_name("<@123> investigate the queue") == "investigate the queue"
-    assert _thread_name("  <@!123>\ncheck   this  ") == "check this"
-    assert _thread_name("<@123>", 1) == "image"
-    assert _thread_name("<@123>") == "wiseman"
-    assert len(_thread_name("<@123> " + "x" * 150)) == 100
+def test_thread_name_uses_persisted_sequence() -> None:
+    assert _thread_name(1) == "Gurt 1"
+    assert _thread_name(42) == "Gurt 42"
+    with pytest.raises(ValueError, match="positive"):
+        _thread_name(0)
 
 
 def test_workspace_link_cannot_escape_owner(tmp_path) -> None:
@@ -521,7 +587,7 @@ async def test_http_runner_forwards_thread_and_returns_billing(monkeypatch) -> N
             assert body["codex_thread_id"] == "old"
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     result = await HttpRunner("http://runner", "secret").run("old", "prompt", "user", "workspace")
     assert result == ("next", "answer", {"model": "served", "cost": 0.1})
 
@@ -553,19 +619,19 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
             }
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     assert await HttpRunner("http://runner", "secret").steer(
         "codex", "use the other file", "user", "workspace"
     )
 
 
 def test_progress_renderer_keeps_turn_count_and_bounded_recent_steps() -> None:
-    rendered = _render_progress(["🤖 Gurt 1: Codex turn started...", "⚙️ Running command..."])
+    rendered = _render_progress(["🤖 Codex turn started...", "⚙️ Running command..."], 1)
     assert rendered.startswith("⏳ Working · Gurt 1\n")
-    assert rendered.count("Gurt 1") == 2
+    assert rendered.count("Gurt 1") == 1
 
     bounded = _render_progress(
-        ["🤖 Gurt 1: Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)]
+        ["🤖 Codex turn started..."] + ["⚙️ Running command..." for _ in range(10)], 1
     )
     assert bounded.startswith("⏳ Working · Gurt 1\n")
     assert bounded.count("\n") == 8
@@ -666,7 +732,7 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
             del kwargs
             return Response({"message": "🤖 Codex starting..."})
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     updates: list[str] = []
 
     async def receive(message: str) -> None:
@@ -693,6 +759,54 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     assert result["error"] == "runner down"
     assert result["reactions"] == ["❌"]
     assert any(item["node"] == "failure" for item in engine.phoenix.records)
+
+
+@pytest.mark.asyncio
+async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
+    class Runner:
+        attempts = 0
+
+        class DisconnectionError(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("Server disconnected without sending a response")
+
+        async def run(
+            self, thread: str, prompt: str, user: str, workspace: str = ""
+        ) -> tuple[str, str, dict[str, object]]:
+            del thread, prompt, user, workspace
+            self.attempts += 1
+            if self.attempts == 1:
+                raise self.DisconnectionError
+            return "codex", "answer", {}
+
+    class Delivery:
+        id = "progress"
+
+        async def edit(self, *, content: str) -> None:
+            del content
+
+    class Channel:
+        def __init__(self) -> None:
+            self.embeds = 0
+            self.progress = 0
+
+        async def send(self, content: str = "", **kwargs: object) -> Delivery:
+            del content
+            if kwargs.get("embed") is not None:
+                self.embeds += 1
+            else:
+                self.progress += 1
+            return Delivery()
+
+    channel = Channel()
+    engine = Engine(Phoenix(), Runner())
+    event = normalize_event(discord_message("retry-delivery", "hello", thread="t"))
+    with pytest.raises(RuntimeError, match="disconnected"):
+        await engine.handle(event, delivery_channel=channel, state_data={}, retry_transport=True)
+    result = await engine.handle(event, delivery_channel=channel, state_data={})
+    assert result["output"] == "answer"
+    assert channel.embeds == 1
+    assert channel.progress == 1
 
 
 @pytest.mark.asyncio
@@ -771,6 +885,55 @@ async def test_temporal_activity_restores_seen_state(monkeypatch) -> None:
         }
     )
     assert result["state"]["turn"] == 2
+
+
+@pytest.mark.asyncio
+async def test_temporal_retry_adds_contract_backed_continuation_prompt(monkeypatch) -> None:
+    seen: list[str] = []
+
+    class Engine:
+        async def handle(
+            self,
+            event: Event,
+            state_data: dict[str, object] | None = None,
+            *,
+            retry_transport: bool = False,
+        ) -> dict[str, object]:
+            del state_data, retry_transport
+            seen.append(event.trigger.content)
+            return {"state": {"turn": 1}}
+
+    class ActivityInfo:
+        attempt = 2
+
+    monkeypatch.setattr("app.main.engine", Engine())
+
+    def activity_info() -> ActivityInfo:
+        return ActivityInfo()
+
+    monkeypatch.setattr("app.temporal_runtime.activity.info", activity_info)
+    await run_turn(
+        {
+            "event": {
+                "trigger": message("retry", "continue", thread="t"),
+                "kind": "startup",
+            },
+            "state": {},
+        }
+    )
+    assert seen == [
+        (
+            "continue\n\nContinue the current task from the existing workspace after the model "
+            "stream disconnected. Do not repeat completed commands; inspect the current state "
+            "and finish "
+            "the user's request.\n"
+        )
+    ]
+
+
+def test_temporal_retry_policy_is_bounded() -> None:
+    assert TRANSPORT_RETRY_POLICY.maximum_attempts == 2
+    assert TRANSPORT_RETRY_POLICY.maximum_interval == timedelta(seconds=30)
 
 
 def test_temporal_retries_disconnected_runner_result() -> None:
@@ -967,7 +1130,7 @@ async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
         del _delay
 
     monkeypatch.setattr(bot, "start", fake_start)
-    monkeypatch.setattr("app.main.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("app.gateway.asyncio.sleep", fake_sleep)
     await bot.run_forever("discord")
     assert calls == 2
 
@@ -980,7 +1143,9 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tmp_path) -> None:
+async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(
+    tmp_path, monkeypatch
+) -> None:
     activity_file = tmp_path / "activity.json"
     bot = Gateway(Engine(Phoenix(), FakeRunner()), {1}, activity_file)
     bot._touch_thread("123", timestamp=0)  # noqa: SLF001
@@ -990,6 +1155,16 @@ async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tm
 
     restored.thread_activity["456"] = 1
 
+    class Thread:
+        async def edit(self, **kwargs: object) -> None:
+            assert kwargs == {"archived": True, "locked": True}
+
+    async def fetch_channel(thread_id: int) -> Thread:
+        assert thread_id == 456
+        return Thread()
+
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
+    monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
     await restored._expire_once(now=7_201)  # noqa: SLF001
     assert restored.thread_activity == {"123": 7_200.0}
 
@@ -1030,7 +1205,7 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
             return Response()
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     engine = Engine(Phoenix(), FakeRunner())
     response = TestClient(create_app(engine)).post("/v1/responses", json={"model": "requested"})
     assert response.status_code == 200
@@ -1073,7 +1248,7 @@ def test_provider_relay_retries_disconnect_before_response(monkeypatch) -> None:
 
     client = Client()
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: client)
     response = TestClient(create_app(Engine(Phoenix(), FakeRunner()))).post(
         "/v1/responses", json={"model": "requested"}
     )
@@ -1162,7 +1337,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_temporal_old_workflow_history_keeps_one_activity(monkeypatch) -> None:
+async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatch) -> None:
     workflow = ThreadWorkflow()
     activities: list[object] = []
 
@@ -1175,16 +1350,15 @@ async def test_temporal_old_workflow_history_keeps_one_activity(monkeypatch) -> 
         del args, kwargs
         raise TimeoutError
 
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _id: False)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1}}
-    assert activities == [run_turn]
+    assert activities == [provision_workspace, start_codex, run_turn]
 
 
 @pytest.mark.asyncio
-async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:  # noqa: C901
+async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:
     class Guild:
         def __init__(self, gid: int) -> None:
             self.id = gid
@@ -1246,7 +1420,7 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
             self.reactions: list[str] = []
 
         async def create_thread(self, name: str, auto_archive_duration: int) -> Thread:
-            assert name == "hello"
+            assert name == "Gurt 1"
             assert auto_archive_duration == 60
             self.channel.thread = Thread(self.channel)
             return self.channel.thread
@@ -1266,13 +1440,13 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     parent = Channel()
     bot_user = User()
     engine = Engine(Phoenix(), FakeRunner())
-    monkeypatch.setattr("app.main.discord.Thread", Thread)
-    bot = __import__("app.main", fromlist=["Gateway"]).Gateway(engine, {1})
-    bot._connection.user = bot_user  # noqa: SLF001
+    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
+    bot = Gateway(engine, {1})
+    bot._connection.user = cast("discord.ClientUser", bot_user)  # noqa: SLF001
     startup = Message("start", parent, "hello")
-    await bot.on_message(startup)
+    await bot.on_message(cast("discord.Message", startup))
     followup = Message("follow", parent.thread, "next")
-    await bot.on_message(followup)
+    await bot.on_message(cast("discord.Message", followup))
     assert engine.states["2"].turn == 2
     assert startup.reactions == ["✅"]
     assert followup.reactions == ["✅"]
@@ -1289,8 +1463,19 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     rejected = Channel()
     rejected.guild = Guild(2)
     ignored = Message("ignored", rejected, "hello")
-    await bot.on_message(ignored)
+    await bot.on_message(cast("discord.Message", ignored))
     assert "ignored" not in engine.states
+
+
+@pytest.mark.asyncio
+async def test_gateway_persists_gurt_thread_sequence(tmp_path) -> None:
+    sequence = tmp_path / "thread-sequence.json"
+    first = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    assert first._next_thread_name() == "Gurt 1"  # noqa: SLF001
+    assert first._next_thread_name() == "Gurt 2"  # noqa: SLF001
+
+    restored = Gateway(Engine(Phoenix(), FakeRunner()), {1}, sequence_path=sequence)
+    assert restored._next_thread_name() == "Gurt 3"  # noqa: SLF001
 
 
 def test_replay_accepts_discord_message_json() -> None:
@@ -1472,7 +1657,7 @@ async def test_prompt_hub_reads_phoenix_latest_version(monkeypatch) -> None:
             assert kwargs["headers"] == {"Authorization": "Bearer key"}
             return Response()
 
-    monkeypatch.setattr("app.main.httpx.AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     source = await PromptHub("http://phoenix", "key").source("startup")
     assert '"model": "model"' in source
 
@@ -1631,7 +1816,9 @@ async def test_codex_runner_records_each_sdk_progress_phase(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_codex_runner_recovers_from_midstream_disconnect(tmp_path, monkeypatch) -> None:
+async def test_codex_runner_propagates_midstream_disconnect_to_temporal(
+    tmp_path, monkeypatch
+) -> None:
     prompts: list[str] = []
 
     class Handle:
@@ -1671,16 +1858,9 @@ async def test_codex_runner_recovers_from_midstream_disconnect(tmp_path, monkeyp
     monkeypatch.setattr("runner.api.AsyncCodex", Codex)
     runner = CodexRunner()
     path = Workspace(str(tmp_path)).thread("u", "t")
-    result = await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
-    assert result["thread_id"] == "codex-thread"
-    assert prompts == [
-        "hello",
-        (
-            "Continue the current task from the existing workspace after the model stream "
-            "disconnected. Do not repeat completed commands; inspect the current state and "
-            "finish the user's request."
-        ),
-    ]
+    with pytest.raises(RuntimeError, match="disconnect"):
+        await runner.run(Turn(thread_id="t", user_id="u", input="hello"), path)
+    assert prompts == ["hello"]
 
 
 @pytest.mark.asyncio
@@ -1812,7 +1992,7 @@ async def test_http_runner_reaches_sandbox_for_start_and_followup(tmp_path, monk
     transport = httpx.ASGITransport(app=runner_app())
     client_type = httpx.AsyncClient
     monkeypatch.setattr(
-        "app.main.httpx.AsyncClient",
+        "app.http_api.httpx.AsyncClient",
         lambda **kwargs: client_type(transport=transport, base_url="http://sandbox", **kwargs),
     )
     runner = HttpRunner("http://sandbox", "secret")

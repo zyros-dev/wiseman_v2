@@ -8,16 +8,18 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import discord
 from prometheus_client import Gauge
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
+
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
 from app.models import Event, Message, Messageable
-from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES
+from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS
 from app.presentation import thread_name as _thread_name
 
 LOGGER = logging.getLogger("wiseman")
@@ -33,6 +35,7 @@ class Gateway(discord.Client):
         allowlist: set[int],
         activity_path: str | Path | None = None,
         profile_path: str | Path | None = None,
+        sequence_path: str | Path | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -41,6 +44,8 @@ class Gateway(discord.Client):
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
+        self.sequence_path = Path(sequence_path) if sequence_path else self._default_sequence_path()
+        self.thread_sequence = self._load_thread_sequence()
         self.thread_activity = self._load_thread_activity()
         self._load_profile()
         self.expiry_task: asyncio.Task[None] | None = None
@@ -52,6 +57,7 @@ class Gateway(discord.Client):
 
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
+        await self._discover_managed_threads()
         LOGGER.info("Discord gateway ready as %s", self.user)
 
     async def on_disconnect(self) -> None:
@@ -82,6 +88,30 @@ class Gateway(discord.Client):
             temporary.replace(self.activity_path)
         except OSError:
             LOGGER.exception("Could not persist Wiseman thread activity state")
+
+    def _default_sequence_path(self) -> Path | None:
+        if self.activity_path is None:
+            return None
+        return self.activity_path.with_name("thread-sequence.json")
+
+    def _load_thread_sequence(self) -> int:
+        if self.sequence_path is None or not self.sequence_path.exists():
+            return 0
+        try:
+            value = json.loads(self.sequence_path.read_text(encoding="utf-8"))
+            return max(0, int(value))
+        except (OSError, TypeError, ValueError):
+            LOGGER.warning("Ignoring invalid Wiseman thread sequence state")
+            return 0
+
+    def _next_thread_name(self) -> str:
+        self.thread_sequence += 1
+        if self.sequence_path is not None:
+            self.sequence_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.sequence_path.with_name(f".{self.sequence_path.name}.tmp")
+            temporary.write_text(str(self.thread_sequence), encoding="utf-8")
+            temporary.replace(self.sequence_path)
+        return _thread_name(self.thread_sequence)
 
     def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
         self.thread_activity[thread_id] = timestamp if timestamp is not None else time.time()
@@ -143,11 +173,55 @@ class Gateway(discord.Client):
             await asyncio.sleep(60)
             await self._expire_once()
 
+    async def _discover_managed_threads(self) -> None:
+        """Recover active Wiseman threads after a gateway restart."""
+        for guild in self.guilds:
+            fetch = getattr(guild, "fetch_active_threads", None)
+            if not callable(fetch):
+                continue
+            try:
+                result = await cast("Callable[[], Awaitable[object]]", fetch)()
+            except discord.DiscordException:
+                LOGGER.warning("Could not discover active threads in guild %s", guild.id)
+                continue
+            threads = getattr(result, "threads", result)
+            iterable = cast("list[object]", threads) if isinstance(threads, (list, tuple)) else []
+            for thread in iterable:
+                if not _managed_thread(thread):
+                    continue
+                thread_id = str(getattr(thread, "id", ""))
+                if not thread_id:
+                    continue
+                self.thread_activity.setdefault(thread_id, _last_message_time(thread))
+                edit = getattr(thread, "edit", None)
+                try:
+                    if callable(edit):
+                        await cast("Callable[..., Awaitable[object]]", edit)(
+                            auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
+                        )
+                except discord.DiscordException:
+                    LOGGER.warning("Could not set one-hour archive on thread %s", thread_id)
+        self._persist_thread_activity()
+
     async def _expire_once(self, now: float | None = None) -> None:
-        """Forget local tracking after Discord's native archive window expires."""
-        cutoff = (time.time() if now is None else now) - (THREAD_AUTO_ARCHIVE_MINUTES * 60)
+        """Archive and lock managed threads after one hour without human activity."""
+        cutoff = (time.time() if now is None else now) - THREAD_CLOSE_AFTER_SECONDS
         for thread_id, last_activity in list(self.thread_activity.items()):
             if last_activity > cutoff:
+                continue
+            try:
+                channel = await self.fetch_channel(int(thread_id))
+                if isinstance(channel, discord.Thread):
+                    await channel.edit(archived=True, locked=True)
+                else:
+                    LOGGER.warning(
+                        "Managed thread %s was not returned as a Discord thread", thread_id
+                    )
+                    continue
+            except (discord.ClientException, discord.DiscordException, ValueError):
+                LOGGER.warning(
+                    "Could not close managed thread %s; retaining it for retry", thread_id
+                )
                 continue
             self._forget_thread(thread_id)
 
@@ -215,7 +289,7 @@ class Gateway(discord.Client):
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
             thread = await message.create_thread(
-                name=_thread_name(message.content, len(message.attachments)),
+                name=self._next_thread_name(),
                 auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
             )
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
@@ -265,18 +339,24 @@ class Gateway(discord.Client):
 
 
 async def _history(
-    channel: Any,  # noqa: ANN401 - Discord's channel union shares the history protocol
+    channel: object | None,
     limit: int,
     before: discord.Message | None = None,
 ) -> list[Message]:
     """Normalize bounded Discord history for the same grammar path as replay."""
     if channel is None:
         return []
-    kwargs: dict[str, Any] = {"limit": limit}
-    if before is not None:
-        kwargs["before"] = before
+    method = getattr(channel, "history", None)
+    if not callable(method):
+        return []
+    history_method = cast("Callable[..., AsyncIterator[discord.Message]]", method)
     thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
-    channel_id = str(getattr(channel, "parent_id", channel.id))
+    channel_id = str(getattr(channel, "parent_id", getattr(channel, "id", "")))
+    history = (
+        history_method(limit=limit, before=before)
+        if before is not None
+        else history_method(limit=limit)
+    )
     return [
         Message(
             id=str(item.id),
@@ -300,5 +380,18 @@ async def _history(
                 for attachment in item.attachments
             ],
         )
-        async for item in channel.history(**kwargs)
+        async for item in history
     ]
+
+
+def _managed_thread(thread: object) -> bool:
+    name = str(getattr(thread, "name", ""))
+    return name.startswith(("Gurt ", "wiseman"))
+
+
+def _last_message_time(thread: object) -> float:
+    value = getattr(thread, "last_message_id", None) or getattr(thread, "id", 0)
+    try:
+        return discord.utils.snowflake_time(int(value)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return time.time()

@@ -9,14 +9,17 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import set_span_in_context
+from opentelemetry.trace import Context, Span, set_span_in_context
+
+if TYPE_CHECKING:
+    from app.types import JsonObject
 
 LOGGER = logging.getLogger("wiseman")
 
@@ -26,7 +29,7 @@ def json_text(value: object) -> str:
 
 
 def provider_values(
-    body: dict[str, Any], usage: object, cost: object, model: object
+    body: JsonObject, usage: object, cost: object, model: object
 ) -> tuple[object, object, object]:
     nested = body.get("response") or body.get("data") or body
     if not isinstance(nested, dict):
@@ -49,11 +52,11 @@ class Phoenix:
         audit_dir: str | Path | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
-        self.records: list[dict[str, Any]] = []
-        self.audits: dict[str, dict[str, Any]] = {}
+        self.records: list[dict[str, object]] = []
+        self.audits: dict[str, dict[str, object]] = {}
         self.audit_dir = Path(audit_dir) if audit_dir else None
-        self.roots: dict[str, Any] = {}
-        self.contexts: dict[str, Any] = {}
+        self.roots: dict[str, Span] = {}
+        self.contexts: dict[str, Context] = {}
         self.provider = TracerProvider(
             resource=Resource.create(
                 {"service.name": "wiseman-v2", "openinference.project.name": project}
@@ -99,24 +102,24 @@ class Phoenix:
             self.roots.pop(trace).end()
             self.contexts.pop(trace)
 
-    def audit(self, audit_id: str) -> dict[str, Any] | None:
+    def audit(self, audit_id: str) -> dict[str, object] | None:
         """Return the admission artifact, including one recovered after a restart."""
         value = self.audits.get(audit_id)
         if value is None and self.audit_dir is not None:
             try:
-                loaded = json.loads(self._audit_path(audit_id).read_text(encoding="utf-8"))
+                loaded: object = json.loads(self._audit_path(audit_id).read_text(encoding="utf-8"))
             except (OSError, TypeError, ValueError):
                 loaded = None
             if isinstance(loaded, dict) and loaded.get("audit_id") == audit_id:
                 value = loaded
-                self.audits[audit_id] = loaded
+                self.audits[audit_id] = cast("dict[str, object]", loaded)
         return dict(value) if value is not None else None
 
     def _audit_path(self, audit_id: str) -> Path:
         digest = hashlib.sha256(audit_id.encode()).hexdigest()
         return (self.audit_dir or Path()) / f"{digest}.json"
 
-    def _persist_audit(self, audit_id: str, artifact: dict[str, Any]) -> None:
+    def _persist_audit(self, audit_id: str, artifact: dict[str, object]) -> None:
         if self.audit_dir is None:
             return
         try:
@@ -170,13 +173,13 @@ class PromptHub:
             return default
 
 
-def route_info() -> dict[str, Any]:
+def route_info() -> dict[str, object]:
     """Return only configured provider facts; absent catalog values stay absent."""
     try:
         value = json.loads(os.getenv("WISEMAN_ROUTE_INFO", "{}"))
     except ValueError:
         value = {}
-    info = value if isinstance(value, dict) else {}
+    info = cast("dict[str, object]", value) if isinstance(value, dict) else {}
     defaults = {
         "requested_model": os.getenv("WISEMAN_MODEL"),
         "provider": os.getenv("WISEMAN_PROVIDER"),

@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import os
-import re
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
 import discord
 import httpx
+from jinja2 import Environment, StrictUndefined
 
 from app.phoenix import route_info
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from app.models import Messageable
 
 DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
@@ -24,6 +28,7 @@ MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
 MAX_DISCORD_USERNAME_LENGTH = 32
 THREAD_AUTO_ARCHIVE_MINUTES = 60
+THREAD_CLOSE_AFTER_SECONDS = THREAD_AUTO_ARCHIVE_MINUTES * 60
 THREAD_NAME_LIMIT = 100
 
 
@@ -49,15 +54,11 @@ def banner() -> str:
     )
 
 
-def thread_name(content: str, attachment_count: int = 0) -> str:
-    """Turn the triggering message into a valid, readable Discord thread name."""
-    name = re.sub(r"<@!?\d+>", "", content)
-    name = " ".join(name.split()).strip()
-    if not name:
-        name = "image" if attachment_count else "wiseman"
-    if len(name) > THREAD_NAME_LIMIT:
-        name = name[: THREAD_NAME_LIMIT - 1].rstrip() + "…"
-    return name
+def thread_name(number: int) -> str:
+    """Return the stable sequence name shown in the Discord channel list."""
+    if number < 1:
+        raise ValueError("thread number must be positive")  # noqa: TRY003
+    return f"Gurt {number}"[:THREAD_NAME_LIMIT]
 
 
 def startup_embed() -> discord.Embed:
@@ -66,12 +67,15 @@ def startup_embed() -> discord.Embed:
     return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
 
 
-async def describe_images(messages: list[dict[str, Any]], question: str = "") -> dict[str, Any]:
+async def describe_images(
+    messages: Sequence[Mapping[str, object]], question: str = ""
+) -> dict[str, object]:
     """Ask the configured vision model to answer about bounded Discord image attachments."""
     images: list[dict[str, str]] = []
     seen: set[str] = set()
     for message in messages:
-        for attachment in message.get("attachments", []):
+        for value in _sequence(message.get("attachments")):
+            attachment = _mapping(value)
             content_type = str(attachment.get("content_type") or "")
             url = str(attachment.get("url") or attachment.get("proxy_url") or "")
             attachment_id = str(attachment.get("id") or url)
@@ -89,14 +93,8 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "attachments": [item["id"] for item in images],
             "question": question or None,
         }
-    content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": question
-            or "Please describe this image generally in one concise factual paragraph. Read "
-            "visible text and report relevant objects, quantities, prices, and layout. Do not "
-            "answer only None or guess details that are not visible.",
-        },
+    content: list[dict[str, object]] = [
+        {"type": "text", "text": _vision_question(question)},
         *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
     ]
     try:
@@ -111,8 +109,11 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
                 },
             )
             response.raise_for_status()
-            data = response.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            value: object = response.json()
+        data = _mapping(value)
+        choices = _sequence(data.get("choices"))
+        first = _mapping(choices[0]) if choices else {}
+        answer = _mapping(first.get("message")).get("content", "")
         if isinstance(answer, list):
             answer = "".join(str(item.get("text", "")) for item in answer if isinstance(item, dict))
         usage = data.get("usage")
@@ -120,7 +121,7 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
             "text": str(answer),
             "model": data.get("model", model),
             "usage": usage,
-            "cost": usage.get("cost") if isinstance(usage, dict) else data.get("cost"),
+            "cost": _mapping(usage).get("cost") if isinstance(usage, dict) else data.get("cost"),
             "attachments": [item["id"] for item in images],
             "question": question or None,
         }
@@ -133,12 +134,31 @@ async def describe_images(messages: list[dict[str, Any]], question: str = "") ->
         }
 
 
+def _contract(name: str) -> str:
+    return (Path(__file__).parents[2] / "contracts" / name).read_text(encoding="utf-8")
+
+
+def _vision_question(question: str) -> str:
+    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(
+        _contract("vision-question.j2")
+    )
+    return template.render(question=question)
+
+
 async def edit_delivery(message: object | None, content: str) -> bool:
     edit = getattr(message, "edit", None)
     if not callable(edit):
         return False
-    await cast("Any", edit)(content=content)
+    await cast("Callable[..., Awaitable[object]]", edit)(content=content)
     return True
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: object) -> Sequence[object]:
+    return value if isinstance(value, Sequence) and not isinstance(value, str) else ()
 
 
 def normalize_image_url(value: object) -> str:
@@ -168,9 +188,9 @@ def split_discord_content(content: str) -> list[str]:
     return chunks
 
 
-def render_progress(steps: list[str]) -> str:
-    turns = [int(match) for step in steps for match in re.findall(r"\bGurt (\d+)\b", step)]
-    count = max(turns, default=0)
+def render_progress(steps: list[str], turn_number: int | None = None) -> str:
+    """Render bounded progress with the durable turn number supplied by the caller."""
+    count = turn_number if turn_number is not None else 0
     visible = steps[-8:]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])

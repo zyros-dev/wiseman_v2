@@ -5,26 +5,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 from jinja2 import Environment, StrictUndefined, TemplateError
 from jsonschema import validate
 
 from app.models import Event, Message
 
-MAX_ANCESTORS = 12
+if TYPE_CHECKING:
+    from app.types import JsonObject
 
 
-def _message(value: dict[str, Any], thread_id: str | None = None) -> Message:
+@dataclass(frozen=True, slots=True)
+class ContextConfig:
+    """Bound the context window at the application configuration boundary."""
+
+    max_ancestors: int = 12
+
+    def __post_init__(self) -> None:
+        if self.max_ancestors < 0:
+            raise ValueError
+
+    @classmethod
+    def from_env(cls) -> ContextConfig:
+        value = os.getenv("WISEMAN_MAX_ANCESTORS", "12")
+        try:
+            return cls(int(value))
+        except ValueError as exc:
+            raise ValueError from exc
+
+
+def _message(value: Mapping[str, object], thread_id: str | None = None) -> Message:
     """Normalize either a canonical message or Discord REST JSON."""
     if "author_id" in value:
-        return Message.model_validate(value)
-    author = value.get("author") or {}
-    reference = value.get("message_reference") or value.get("reference") or {}
+        return Message.model_validate(dict(value))
+    author = _mapping(value.get("author"))
+    reference = _mapping(value.get("message_reference") or value.get("reference"))
     mentions = [
         str(item.get("id", "")) if isinstance(item, dict) else str(item)
-        for item in value.get("mentions", [])
+        for item in _sequence(value.get("mentions"))
     ]
     return Message(
         id=str(value["id"]),
@@ -34,58 +58,62 @@ def _message(value: dict[str, Any], thread_id: str | None = None) -> Message:
         content=str(value.get("content", "")),
         timestamp=str(value.get("timestamp", "")),
         channel_id=str(value.get("channel_id", "")),
-        thread_id=value.get("thread_id", thread_id),
+        thread_id=_string(value.get("thread_id")) or thread_id,
         reply_to=str(reference["message_id"]) if reference.get("message_id") else None,
         mentions=mentions,
         attachments=[
-            {
-                "id": str(item.get("id", "")),
-                "filename": item.get("filename"),
-                "url": item.get("url"),
-                "content_type": item.get("content_type"),
-                "size": item.get("size"),
-            }
-            for item in value.get("attachments", [])
+            cast(
+                "JsonObject",
+                {
+                    "id": str(_mapping(item).get("id", "")),
+                    "filename": _mapping(item).get("filename"),
+                    "url": _mapping(item).get("url"),
+                    "content_type": _mapping(item).get("content_type"),
+                    "size": _mapping(item).get("size"),
+                },
+            )
+            for item in _sequence(value.get("attachments"))
         ],
     )
 
 
-def normalize_event(value: dict[str, Any]) -> Event:
+def normalize_event(value: object) -> Event:
     """Use one admission normalizer for raw Discord fixtures and canonical events."""
-    raw = value
-    if isinstance(value.get("d"), dict) and value.get("t") == "MESSAGE_CREATE":
+    raw = _mapping(value)
+    if isinstance(raw.get("d"), dict) and raw.get("t") == "MESSAGE_CREATE":
         value = {
-            **value["d"],
+            **_mapping(raw["d"]),
             **{
-                key: value[key]
+                key: raw[key]
                 for key in ("kind", "parent_messages", "thread_messages")
-                if key in value
+                if key in raw
             },
         }
-    if "trigger" in value:
-        trigger = _message(value["trigger"], value.get("thread_id"))
-        parent = value.get("parent_messages", [])
-        thread = value.get("thread_messages", [])
+    normalized = _mapping(value)
+    if "trigger" in normalized:
+        trigger = _message(_mapping(normalized["trigger"]), _string(normalized.get("thread_id")))
+        parent = _sequence(normalized.get("parent_messages"))
+        thread = _sequence(normalized.get("thread_messages"))
     else:
-        trigger = _message(value, value.get("thread_id"))
-        parent = value.get("parent_messages", [])
-        thread = value.get("thread_messages", [])
+        trigger = _message(normalized, _string(normalized.get("thread_id")))
+        parent = _sequence(normalized.get("parent_messages"))
+        thread = _sequence(normalized.get("thread_messages"))
     return Event(
         trigger=trigger,
-        kind=value.get("kind"),
-        parent_messages=[_message(item) for item in parent],
-        thread_messages=[_message(item) for item in thread],
-        seen_ids=[str(item) for item in value.get("seen_ids", [])],
-        anchor_id=value.get("anchor_id"),
-        raw_payload=raw,
+        kind=_string(normalized.get("kind")),
+        parent_messages=[_message(_mapping(item)) for item in parent],
+        thread_messages=[_message(_mapping(item)) for item in thread],
+        seen_ids=[str(item) for item in _sequence(normalized.get("seen_ids"))],
+        anchor_id=_string(normalized.get("anchor_id")),
+        raw_payload=cast("JsonObject", raw),
     )
 
 
-def event_data(event: Event) -> dict[str, Any]:
-    return event.model_dump(mode="json", exclude={"raw_payload"})
+def event_data(event: Event) -> dict[str, object]:
+    return cast("dict[str, object]", event.model_dump(mode="json", exclude={"raw_payload"}))
 
 
-def render_grammar(name: str, source: str, raw: object, **values: object) -> dict[str, Any]:
+def render_grammar(name: str, source: str, raw: object, **values: object) -> dict[str, object]:
     """Produce the inspectable raw, normalized, source, and rendered grammar layers."""
     normalized = {"messages": values.get("messages", []), "mode": values.get("mode", "")}
     try:
@@ -99,19 +127,23 @@ def render_grammar(name: str, source: str, raw: object, **values: object) -> dic
     parsed = json.loads(rendered)
     if not isinstance(parsed, dict):
         raise TypeError("grammar must render an object")  # noqa: TRY003
-    return {
-        "name": name,
-        "version": hashlib.sha256(source.encode()).hexdigest()[:12],
-        "source": source,
-        "raw": raw,
-        "normalized": normalized,
-        "rendered": rendered,
-        "parsed": parsed,
-    }
+    return cast(
+        "dict[str, object]",
+        {
+            "name": name,
+            "version": hashlib.sha256(source.encode()).hexdigest()[:12],
+            "source": source,
+            "raw": raw,
+            "normalized": normalized,
+            "rendered": rendered,
+            "parsed": parsed,
+        },
+    )
 
 
-def context(event: Event) -> dict[str, Any]:
+def context(event: Event, config: ContextConfig | None = None) -> dict[str, object]:
     """Select startup history or only unseen follow-up history, capped at 100 messages."""
+    config = config or ContextConfig.from_env()
     trigger = event.trigger
     startup = event.kind in (None, "startup")
     pool = event.parent_messages if startup else event.parent_messages + event.thread_messages
@@ -122,7 +154,7 @@ def context(event: Event) -> dict[str, Any]:
     by_id = {m.id: m for m in (*event.parent_messages, *event.thread_messages, trigger)}
     ancestors: list[Message] = []
     parent = trigger.reply_to
-    while parent and parent in by_id and len(ancestors) < MAX_ANCESTORS:
+    while parent and parent in by_id and len(ancestors) < config.max_ancestors:
         if parent in {m.id for m in ancestors}:
             break
         item = by_id[parent]
@@ -147,15 +179,37 @@ def context(event: Event) -> dict[str, Any]:
         )
     )
     validate(result, schema)
-    return result
+    return cast("dict[str, object]", result)
 
 
-def image_tool_instruction(messages: list[dict[str, Any]]) -> str:
-    """Make image handling explicit when the model cannot see Discord attachments natively."""
+IMAGE_REFERENCE_WORDS = re.compile(
+    r"\b(image|photo|picture|screenshot|attachment|chart|graph|diagram|visual)\b",
+    re.IGNORECASE,
+)
+
+
+def image_tool_instruction(
+    trigger: Mapping[str, object], reply_ancestors: Sequence[Mapping[str, object]] | None = None
+) -> str:
+    """Select only the current or explicitly referenced Discord image."""
+    messages = [trigger]
+    if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(
+        str(trigger.get("content") or "")
+    ):
+        messages.extend(
+            message
+            for message in reversed(reply_ancestors or [])
+            if any(
+                str(_mapping(attachment).get("content_type") or "").startswith("image/")
+                for attachment in _sequence(_mapping(message).get("attachments"))
+            )
+        )
+        messages = messages[:2]
     images: list[str] = []
     seen: set[str] = set()
     for message in messages:
-        for attachment in message.get("attachments", []):
+        for value in _sequence(message.get("attachments")):
+            attachment = _mapping(value)
             content_type = str(attachment.get("content_type") or "")
             url = str(attachment.get("url") or attachment.get("proxy_url") or "")
             if content_type.startswith("image/") and url and url not in seen:
@@ -163,11 +217,20 @@ def image_tool_instruction(messages: list[dict[str, Any]]) -> str:
                 seen.add(url)
     if not images:
         return ""
-    urls = "\n".join(f"- {url}" for url in images[:4])
-    return (
-        "This turn includes Discord image attachment(s). Before answering, you MUST run "
-        "`/usr/local/bin/wiseman-image` once for each relevant image URL below. Use `--question` "
-        "when the user asks about a visual detail; otherwise request a generic description. "
-        "Do not claim to have seen an image until the command returns.\n"
-        f"Image URLs:\n{urls}"
+    source = (Path(__file__).parents[2] / "contracts" / "image-tool-instruction.j2").read_text(
+        encoding="utf-8"
     )
+    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(source)
+    return template.render(urls=images[:4]).strip()
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) else None

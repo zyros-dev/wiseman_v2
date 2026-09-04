@@ -11,7 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 import discord
 import httpx
@@ -33,22 +33,51 @@ from app.presentation import (
     MAX_DISCORD_UPLOAD_BYTES,
     MAX_DISCORD_USERNAME_LENGTH,
     MIN_DISCORD_USERNAME_LENGTH,
+    describe_images,
 )
-from app.presentation import (
-    describe_images as _describe_images,
-)
-from app.presentation import (
-    normalize_image_url as _normalize_image_url,
-)
+from app.presentation import normalize_image_url as _normalize_image_url
 from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import TemporalRuntime
-
-describe_images = _describe_images
 
 UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_STATUSES = frozenset({404, 408, 425, 429})
 UPSTREAM_SERVER_ERROR = 500
 HTTP_NOT_FOUND = 404
+
+
+class ProfileInputError(ValueError):
+    def __init__(self, field: str) -> None:
+        messages = {
+            "username": "username must be 2-32 characters",
+            "avatar_type": "avatar_base64 must be a string",
+            "avatar_encoding": "avatar_base64 is invalid",
+            "avatar_size": "avatar exceeds the 8 MiB limit",
+            "missing": "provide username or avatar",
+        }
+        super().__init__(messages[field])
+
+
+def _profile_values(payload: dict[str, object]) -> tuple[str | None, bytes | None]:
+    username = payload.get("username")
+    if username is not None and (
+        not isinstance(username, str)
+        or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH
+    ):
+        raise ProfileInputError("username")
+    avatar = payload.get("avatar_base64")
+    data: bytes | None = None
+    if avatar is not None:
+        if not isinstance(avatar, str):
+            raise ProfileInputError("avatar_type")
+        try:
+            data = base64.b64decode(avatar, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ProfileInputError("avatar_encoding") from exc
+        if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
+            raise ProfileInputError("avatar_size")
+    if username is None and data is None:
+        raise ProfileInputError("missing")
+    return username, data
 
 
 def create_app(  # noqa: C901, PLR0915
@@ -116,7 +145,7 @@ def create_app(  # noqa: C901, PLR0915
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/v1/phoenix/events")
-    async def events() -> list[dict[str, Any]]:
+    async def events() -> list[dict[str, object]]:
         return engine.phoenix.records
 
     def replay_authorized(x_replay_token: str | None) -> None:
@@ -127,7 +156,7 @@ def create_app(  # noqa: C901, PLR0915
     @app.get("/v1/phoenix/audits/{audit_id}")
     async def audit(
         audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         replay_authorized(x_replay_token)
         value = engine.phoenix.audit(audit_id)
         if value is None:
@@ -135,7 +164,7 @@ def create_app(  # noqa: C901, PLR0915
         return value
 
     @app.post("/v1/responses")
-    async def responses(  # noqa: C901
+    async def responses(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:
@@ -212,9 +241,9 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.post("/v1/tools/describe-image")
     async def describe_image(
-        payload: dict[str, Any],
+        payload: dict[str, object],
         authorization: Annotated[str | None, Header()] = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid tool token")
@@ -240,8 +269,8 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.post("/v1/tools/set-reactions")
     async def set_reactions(
-        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, object]:
         tool_authorized(authorization)
         try:
             values = {
@@ -255,42 +284,27 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.post("/v1/tools/set-profile")
     async def set_profile(
-        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, object]:
         tool_authorized(authorization)
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
-        username = payload.get("username")
-        if username is not None and (
-            not isinstance(username, str)
-            or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH
-        ):
-            raise HTTPException(422, "username must be 2-32 characters")
-        kwargs: dict[str, Any] = {}
-        if username is not None:
-            kwargs["username"] = username
-        avatar = payload.get("avatar_base64")
-        if avatar is not None:
-            if not isinstance(avatar, str):
-                raise HTTPException(422, "avatar_base64 must be a string")
-            try:
-                data = base64.b64decode(avatar, validate=True)
-            except (ValueError, TypeError) as exc:
-                raise HTTPException(422, "avatar_base64 is invalid") from exc
-            if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
-                raise HTTPException(422, "avatar exceeds the 8 MiB limit")
-            kwargs["avatar"] = data
-        if not kwargs:
-            raise HTTPException(422, "provide username or avatar")
+        try:
+            username_value, avatar_data = _profile_values(payload)
+        except ProfileInputError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if bot.user is None:
             raise HTTPException(503, "Discord gateway is not ready")
-        await bot.user.edit(**kwargs)
+        if username_value is None:
+            await bot.user.edit(avatar=avatar_data)
+        else:
+            await bot.user.edit(username=username_value, avatar=avatar_data)
         return {"status": "updated", "username": getattr(bot.user, "name", None)}
 
     @app.post("/v1/tools/send-file")
     async def send_file(
-        payload: dict[str, Any], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
+    ) -> dict[str, object]:
         tool_authorized(authorization)
         thread_id = str(payload.get("thread_id") or "")
         filename = Path(str(payload.get("filename") or "")).name
@@ -317,8 +331,8 @@ def create_app(  # noqa: C901, PLR0915
 
     @app.post("/v1/replay/discord")
     async def replay(
-        payload: dict[str, Any], x_replay_token: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+        payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None
+    ) -> dict[str, object]:
         replay_authorized(x_replay_token)
         try:
             event = normalize_event(payload)
@@ -327,12 +341,12 @@ def create_app(  # noqa: C901, PLR0915
         if temporal is not None:
             await temporal.submit(event.model_dump(mode="json"))
             return {"status": "queued", "message_id": event.trigger.id}
-        return await engine.handle(event)
+        return dict(await engine.handle(event))
 
     @app.post("/v1/replay/phoenix/{audit_id}")
     async def replay_audit(
         audit_id: str, x_replay_token: Annotated[str | None, Header()] = None
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Replay the exact raw request captured by the Phoenix admission audit."""
         replay_authorized(x_replay_token)
         artifact = engine.phoenix.audit(audit_id)

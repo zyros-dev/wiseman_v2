@@ -26,6 +26,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "coverage[toml]>=7.6,<8",
+  "hypothesis>=6.140,<7",
   "pip-audit>=2.7,<3",
   "pyrefly==1.2.0",
   "pytest>=9.0.3,<10",
@@ -57,10 +58,19 @@ ignore = [
   "EM101",   # exception strings remain readable at small boundaries
   "FIX002",  # TODOs are tracked in implementation issues
   "ISC001",  # conflicts with formatter
-  "PLR0913", # typed boundary functions may have several explicit fields
   "S101",    # assertions are appropriate in tests
   "TD003",   # TODO issue links are not required in local code
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-positional-args = 5
+max-branches = 10
+max-returns = 6
+max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN", "ARG", "B018", "N802", "PLC2701", "PLR2004", "S106"]
