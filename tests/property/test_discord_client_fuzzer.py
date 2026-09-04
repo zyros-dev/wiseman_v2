@@ -20,7 +20,7 @@ from app.engine import Engine
 from app.models import Event, Message
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
 
     import discord
 
@@ -210,10 +210,14 @@ class _EngineRunner:
         return await self.client.start(thread, user, workspace)
 
     async def run(
-        self, thread: str, prompt: str, user: str, workspace: str = ""
+        self,
+        thread: str,
+        prompt: str,
+        user: str,
+        workspace: str = "",
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]:
-        result = await self.client.run(thread, prompt, user, workspace)
-        return result.thread_id, result.output, cast("dict[str, object]", result.billing)
+        return await self.client.run(thread, prompt, user, workspace, progress=progress)
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
         return await self.client.steer(thread, prompt, user, workspace)

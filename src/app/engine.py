@@ -15,8 +15,13 @@ from prometheus_client import Counter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient
+    from app.models import EmbedMessageable
+    from app.runner import SteerableRunner
+    from app.types import JsonObject
+
 from app.admission import ContextConfig, context, event_data, image_tool_instruction, render_grammar
-from app.models import ActiveTurn, EmbedMessageable, Event, Message, Messageable, State
+from app.models import ActiveTurn, Event, Message, Messageable, State
 from app.phoenix import Phoenix, PromptHub, json_text, route_info
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
@@ -26,11 +31,8 @@ from app.presentation import (
     render_progress,
     startup_embed,
 )
-from app.runner import TURN_NUMBER, HttpRunner, Runner, RunnerError, SteerableRunner
+from app.runner import TURN_NUMBER, Runner, RunnerError
 from app.types import EngineResult, StateData  # noqa: TC001 - public result types are re-exported
-
-if TYPE_CHECKING:
-    from app.types import JsonObject
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
@@ -79,12 +81,22 @@ class _Success:
 class Engine:
     def __init__(
         self,
-        phoenix: Phoenix,
-        runner: Runner,
+        phoenix: Phoenix | None = None,
+        runner: Runner | None = None,
         prompts: PromptHub | None = None,
         context_config: ContextConfig | None = None,
+        clients: ClientContainer | None = None,
     ) -> None:
-        self.phoenix, self.runner, self.prompts = phoenix, runner, prompts or PromptHub()
+        if clients is None and (phoenix is None or runner is None):
+            raise ValueError("phoenix and runner are required without clients")  # noqa: TRY003
+        self.phoenix: PhoenixClient = (
+            clients.phoenix if clients is not None else cast("PhoenixClient", phoenix)
+        )
+        self.runner: Runner = clients.runner if clients is not None else cast("Runner", runner)
+        self.prompts: PromptClient = (
+            clients.prompts if clients is not None else prompts or PromptHub()
+        )
+        self.clients = clients
         self.context_config = context_config or ContextConfig.from_env()
         self.states: dict[str, State] = defaultdict(State)
         self.reactions: dict[str, list[str]] = defaultdict(list)
@@ -97,6 +109,12 @@ class Engine:
         self.deliveries: dict[str, object] = {}
         self.lookup: Callable[[Event], Awaitable[discord.Message | None]] | None = None
         self.lookup_channel: Callable[[Event], Awaitable[Messageable | None]] | None = None
+
+    def bind_clients(self, clients: ClientContainer) -> None:
+        self.clients = clients
+        self.phoenix = clients.phoenix
+        self.runner = clients.runner
+        self.prompts = clients.prompts
 
     async def handle(
         self,
@@ -333,15 +351,13 @@ class Engine:
         report: Callable[[str], Awaitable[None]],
     ) -> tuple[str, str, dict[str, object]]:
         workspace = trigger.thread_id or trigger.channel_id
-        if isinstance(self.runner, HttpRunner):
-            token = TURN_NUMBER.set(state.turn + 1)
-            try:
-                return await self.runner.run(
-                    state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
-                )
-            finally:
-                TURN_NUMBER.reset(token)
-        return await self.runner.run(state.codex_thread or "", prompt, trigger.author_id, workspace)
+        token = TURN_NUMBER.set(state.turn + 1)
+        try:
+            return await self.runner.run(
+                state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
+            )
+        finally:
+            TURN_NUMBER.reset(token)
 
     async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
         trigger = lifecycle.trigger

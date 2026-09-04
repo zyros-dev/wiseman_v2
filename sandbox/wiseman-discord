@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Nick van der Merwe
-"""Small authenticated Discord tools exposed to the Codex sandbox."""
-
 import argparse
 import base64
 import json
@@ -14,17 +11,12 @@ from pathlib import Path
 MAX_BYTES = 8 * 1024 * 1024
 
 
-def _configuration() -> tuple[str, str]:
+def _post(route: str, payload: dict[str, object]) -> dict[str, object]:
     base = os.getenv("WISEMAN_RELAY_URL", "").rstrip("/")
     token = os.getenv("WISEMAN_MCP_TOKEN", os.getenv("WISEMAN_PROVIDER_TOKEN", ""))
     if not base or not token:
         raise RuntimeError("wiseman-discord is not configured")  # noqa: TRY003
-    return base, token
-
-
-def _post(route: str, payload: dict[str, object]) -> dict[str, object]:
-    base, token = _configuration()
-    request = urllib.request.Request(  # noqa: S310
+    request = urllib.request.Request(
         f"{base}{route}",
         data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -32,84 +24,56 @@ def _post(route: str, payload: dict[str, object]) -> dict[str, object]:
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
-            result = json.load(response)
+            value = json.load(response)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-        detail = f"gateway request failed: {exc}"
-        raise RuntimeError(detail) from exc
-    if not isinstance(result, dict):
+        raise RuntimeError(f"gateway request failed: {exc}") from exc  # noqa: TRY003
+    if not isinstance(value, dict):
         raise TypeError("gateway returned invalid JSON")  # noqa: TRY003
-    return result
+    return value
 
 
-def _workspace_file(value: str) -> tuple[Path, bytes]:
+def _file(value: str) -> tuple[Path, bytes]:
     path = Path(value).expanduser().resolve()
     root = Path.cwd().resolve()
     shared = (root / "shared").resolve()
     if path != root and root not in path.parents and path != shared and shared not in path.parents:
         raise RuntimeError("file must be inside the current thread workspace")  # noqa: TRY003
-    if not path.is_file():
-        raise RuntimeError("file does not exist")  # noqa: TRY003
-    if path.stat().st_size > MAX_BYTES:
-        raise RuntimeError("file exceeds the 8 MiB upload limit")  # noqa: TRY003
+    if not path.is_file() or path.stat().st_size > MAX_BYTES:
+        raise RuntimeError("file is missing or exceeds the 8 MiB upload limit")  # noqa: TRY003
     return path, path.read_bytes()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="wiseman-discord")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    upload = subparsers.add_parser("send-file")
+    commands = parser.add_subparsers(dest="command", required=True)
+    upload = commands.add_parser("send-file")
     upload.add_argument("path")
     upload.add_argument("--caption", default="")
-    reactions = subparsers.add_parser("set-reactions")
-    reactions.add_argument("--processing")
-    reactions.add_argument("--success")
-    reactions.add_argument("--failure")
-    profile = subparsers.add_parser("set-profile")
+    image = commands.add_parser("describe-image")
+    image.add_argument("url")
+    image.add_argument("--question", default="")
+    reactions = commands.add_parser("set-reactions")
+    for phase in ("processing", "success", "failure"):
+        reactions.add_argument(f"--{phase}")
+    profile = commands.add_parser("set-profile")
     profile.add_argument("--username")
     profile.add_argument("--avatar")
     args = parser.parse_args()
     try:
         if args.command == "send-file":
-            path, data = _workspace_file(args.path)
-            result = _post(
-                "/tools/send-file",
-                {
-                    "thread_id": os.getenv("WISEMAN_THREAD_ID", ""),
-                    "filename": path.name,
-                    "caption": args.caption[:2_000],
-                    "data_base64": base64.b64encode(data).decode(),
-                },
-            )
+            path, data = _file(args.path)
+            result = _post("/tools/send-file", {"thread_id": os.getenv("WISEMAN_THREAD_ID", ""), "filename": path.name, "caption": args.caption[:2_000], "data_base64": base64.b64encode(data).decode()})  # noqa: E501
+        elif args.command == "describe-image":
+            result = _post("/tools/describe-image", {"url": args.url, "question": args.question[:2_000], "thread_id": os.getenv("WISEMAN_THREAD_ID", "")})  # noqa: E501
         elif args.command == "set-reactions":
-            result = _post(
-                "/tools/set-reactions",
-                {
-                    key: value
-                    for key, value in {
-                        "processing": args.processing,
-                        "success": args.success,
-                        "failure": args.failure,
-                    }.items()
-                    if value is not None
-                },
-            )
+            result = _post("/tools/set-reactions", {phase: getattr(args, phase) for phase in ("processing", "success", "failure") if getattr(args, phase) is not None})  # noqa: E501
         else:
-            avatar = None
-            if args.avatar:
-                _, data = _workspace_file(args.avatar)
-                avatar = base64.b64encode(data).decode()
-            result = _post(
-                "/tools/set-profile",
-                {
-                    key: value
-                    for key, value in {"username": args.username, "avatar_base64": avatar}.items()
-                    if value is not None
-                },
-            )
-    except (OSError, RuntimeError) as exc:
+            avatar = base64.b64encode(_file(args.avatar)[1]).decode() if args.avatar else None
+            result = _post("/tools/set-profile", {key: value for key, value in (("username", args.username), ("avatar_base64", avatar)) if value is not None})
+    except (OSError, RuntimeError, TypeError) as exc:
         print(f"wiseman-discord failed: {exc}", file=sys.stderr)  # noqa: T201
         return 1
-    print(json.dumps(result, sort_keys=True))  # noqa: T201
+    print(result.get("text", "") if args.command == "describe-image" else json.dumps(result, sort_keys=True))  # noqa: T201,E501
     return 0
 
 

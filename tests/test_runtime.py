@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,7 +168,7 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert "old-" not in str(codex[1]["input"])
     first_prompt = json.loads(str(codex[0]["input"]))
     assert json.loads(first_prompt["context"])["messages"]
-    assert not engine.phoenix.roots
+    assert not cast("Phoenix", engine.phoenix).roots
     assert len(engine.phoenix.records) >= 8
 
 
@@ -206,7 +207,7 @@ async def test_image_turn_makes_agent_tool_call_explicit() -> None:
     await engine.handle(event)
     codex = next(item for item in engine.phoenix.records if item["node"] == "codex")
     prompt = json.loads(str(codex["input"]))
-    assert "/usr/local/bin/wiseman-image" in str(codex["input"])
+    assert "/usr/local/bin/wiseman-discord describe-image" in str(codex["input"])
     assert "https://cdn.example/photo.png" in str(codex["input"])
     assert "https://cdn.example/old.png" not in prompt["context"]
     assert "https://cdn.example/old.png" not in prompt["user"]
@@ -696,9 +697,14 @@ async def test_reply_to_active_delivery_is_steering_not_a_second_turn() -> None:
 
     class Runner:
         async def run(
-            self, thread: str, prompt: str, user: str, workspace: str = ""
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress: Callable[[str], Awaitable[None]] | None = None,
         ) -> tuple[str, str, dict[str, object]]:
-            del thread, prompt, user, workspace
+            del thread, prompt, user, workspace, progress
             await gate.wait()
             return "codex", "answer", {}
 
@@ -770,9 +776,14 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
 async def test_failure_keeps_processing_reaction_and_records_error() -> None:
     class FailingRunner:
         async def run(
-            self, thread: str, prompt: str, user: str, workspace: str = ""
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress: Callable[[str], Awaitable[None]] | None = None,
         ) -> tuple[str, str, dict[str, object]]:
-            del thread, prompt, user, workspace
+            del thread, prompt, user, workspace, progress
             raise RuntimeError("runner down")  # noqa: TRY003
 
     engine = Engine(Phoenix(), FailingRunner())
@@ -841,9 +852,14 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
                 super().__init__("Server disconnected without sending a response")
 
         async def run(
-            self, thread: str, prompt: str, user: str, workspace: str = ""
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress: Callable[[str], Awaitable[None]] | None = None,
         ) -> tuple[str, str, dict[str, object]]:
-            del thread, prompt, user, workspace
+            del thread, prompt, user, workspace, progress
             self.attempts += 1
             if self.attempts == 1:
                 raise self.DisconnectionError
@@ -885,10 +901,15 @@ async def test_same_thread_turns_are_serialized() -> None:
 
     class Runner:
         async def run(
-            self, thread: str, prompt: str, user: str, workspace: str = ""
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress: Callable[[str], Awaitable[None]] | None = None,
         ) -> tuple[str, str, dict[str, object]]:
             nonlocal active, maximum
-            del prompt, user, workspace
+            del prompt, user, workspace, progress
             active += 1
             maximum = max(maximum, active)
             await __import__("asyncio").sleep(0)
@@ -910,10 +931,15 @@ async def test_new_turn_recovers_after_previous_failure() -> None:
 
     class Runner:
         async def run(
-            self, thread: str, prompt: str, user: str, workspace: str = ""
+            self,
+            thread: str,
+            prompt: str,
+            user: str,
+            workspace: str = "",
+            progress: Callable[[str], Awaitable[None]] | None = None,
         ) -> tuple[str, str, dict[str, object]]:
             nonlocal attempts
-            del prompt, user, workspace
+            del prompt, user, workspace, progress
             attempts += 1
             if attempts == 1:
                 raise RuntimeError("temporary runner failure")  # noqa: TRY003
@@ -1588,6 +1614,39 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
         publish_progress,
     ]
     assert wait_timeouts == [timedelta(minutes=60)]
+
+
+@pytest.mark.asyncio
+async def test_temporal_workflow_replays_legacy_activity_history(monkeypatch) -> None:
+    workflow = ThreadWorkflow()
+    activities: list[object] = []
+
+    async def execute(*args: object, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        activities.append(args[0])
+        return {"state": {"turn": 1}}
+
+    async def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TimeoutError
+
+    def patched(change_id: str) -> bool:
+        return change_id == "split-startup-activities"
+
+    monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", patched)
+    result = await workflow.run({"event": {"id": "legacy"}})
+
+    assert result == {"state": {"turn": 1}}
+    assert activities == [
+        publish_progress,
+        provision_workspace,
+        publish_progress,
+        start_codex,
+        publish_progress,
+        run_turn,
+    ]
 
 
 @pytest.mark.asyncio

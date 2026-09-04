@@ -30,7 +30,7 @@ Soul and runtime prompt components use the same Prompt Hub boundary, with local
 environment fallbacks; memories remain workspace data.
 
 The primary route is text-only DeepSeek V4 Flash. The sandbox provides a
-`wiseman-image` Codex command: the agent can pass an attachment URL to get a
+`wiseman-discord describe-image` Codex command: the agent can pass an attachment URL to get a
 generic description, or add `--question` to ask about the image. The command
 calls the authenticated gateway tool endpoint, which sends the image to the
 configured `WISEMAN_VISION_MODEL` (`z-ai/glm-5.3-flash`) through OpenRouter's
