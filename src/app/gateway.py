@@ -367,14 +367,13 @@ async def _history(
 
 def mention_ids(message: object) -> list[str]:
     values = getattr(message, "raw_mentions", ()) or getattr(message, "mentions", ())
-    return [str(getattr(value, "id", value)) for value in values] or re.findall(
+    return [str(getattr(value, "id", value)) for value in values] + re.findall(
         r"<@!?(\d+)>", str(getattr(message, "content", ""))
     )
 
 
 def _managed_thread(thread: object) -> bool:
-    name = str(getattr(thread, "name", ""))
-    return name.startswith(("Gurt ", "wiseman"))
+    return str(getattr(thread, "name", "")).startswith(("Gurt ", "wiseman"))
 
 
 def _last_message_time(thread: object) -> float:

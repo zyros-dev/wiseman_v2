@@ -284,6 +284,14 @@ def test_gateway_mention_fallback_reads_raw_discord_content() -> None:
     assert mention_ids(message) == ["42"]
 
 
+def test_gateway_mention_fallback_merges_parsed_and_raw_content() -> None:
+    other = type("Mention", (), {"id": 7})()
+    message = type(
+        "Message", (), {"raw_mentions": [other], "mentions": [], "content": "<@42> hi"}
+    )()
+    assert mention_ids(message) == ["7", "42"]
+
+
 @pytest.mark.asyncio
 async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     requests: list[dict[str, object]] = []
