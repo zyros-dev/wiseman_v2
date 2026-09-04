@@ -131,10 +131,7 @@ class Gateway(discord.Client):
         if self.profile_path is None:
             return
         try:
-            _atomic_write(
-                self.profile_path,
-                json.dumps({"reaction_emojis": self.engine.reaction_emojis}, sort_keys=True),
-            )
+            _atomic_write(self.profile_path, json.dumps({"reaction_emojis": self.engine.reaction_emojis}))
         except OSError:
             LOGGER.exception("Could not persist Wiseman profile state")
 
@@ -278,6 +275,7 @@ class Gateway(discord.Client):
 
     async def _eligible(self, message: discord.Message) -> bool:
         channel = message.channel
+        reply_to_self = await self._replies_to_self(message)
         if isinstance(channel, discord.Thread) and not self._is_self(message):
             if str(channel.id) in self.thread_activity:
                 self._touch_thread(str(channel.id))
@@ -290,17 +288,21 @@ class Gateway(discord.Client):
         eligible = (
             not self._is_self(message)
             and (not self.allowlist or guild_id in self.allowlist)
-            and str(getattr(self.user, "id", "")) in mention_ids(message)
+            and (str(getattr(self.user, "id", "")) in mention_ids(message) or reply_to_self)
         )
         if not eligible:
             LOGGER.warning(
-                "Discord message ignored id=%s reason=not-an-admitted-mention mentions=%s guild=%s allowlisted=%s",
+                "Discord message ignored id=%s reason=not-admitted mentions=%s guild=%s allowlisted=%s",
                 message.id,
                 mention_ids(message),
                 guild_id,
                 not self.allowlist or guild_id in self.allowlist,
             )
         return eligible
+
+    async def _replies_to_self(self, message: discord.Message) -> bool:
+        resolved = getattr(getattr(message, "reference", None), "resolved", None)
+        return resolved is not None and self._is_self(cast("discord.Message", resolved))
 
     def _is_self(self, message: discord.Message) -> bool:
         return message.author.bot and str(message.author.id) == str(getattr(self.user, "id", ""))

@@ -1815,6 +1815,37 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_gateway_admits_reply_to_bot_without_explicit_mention() -> None:
+    class Guild:
+        id = 1
+
+    class User:
+        id, name, bot = 7, "Nick", False
+
+    class BotMessage:
+        class Author:
+            id, bot = 7, True
+
+        author = Author()
+
+    class Reference:
+        message_id = 99
+        resolved = BotMessage()
+
+    class Channel:
+        guild = Guild()
+
+    class Message:
+        id, content, channel = 100, "continue", Channel()
+        author, raw_mentions, mentions, reference = User(), [], [], Reference()
+
+    gateway = Gateway(configured_engine(), {1})
+    gateway._connection.user = cast("discord.ClientUser", User())
+
+    assert await gateway._eligible(cast("discord.Message", Message()))
+
+
+@pytest.mark.asyncio
 async def test_gateway_persists_gurt_thread_sequence(tmp_path) -> None:
     sequence = tmp_path / "thread-sequence.json"
     first = Gateway(configured_engine(), {1}, sequence_path=sequence)
