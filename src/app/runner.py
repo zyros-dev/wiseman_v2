@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
 MESSAGE_ID: ContextVar[str] = ContextVar("wiseman_message_id", default="")
 STOPPED_STATUS = 499
+UNKNOWN_STATUS = 520
 
 
 class RunnerError(RuntimeError):
@@ -90,7 +91,8 @@ class HttpRunner:
                     await asyncio.sleep(0.75)
         if value.get("status") == "failed":
             error = str(value.get("error"))
-            raise RunnerError(STOPPED_STATUS if "turn stopped by user" in error.lower() else 503, error)
+            status = STOPPED_STATUS if "turn stopped by user" in error.lower() else UNKNOWN_STATUS if "outcome is unknown" in error.lower() else 503
+            raise RunnerError(status, error)
         result = value.get("result", value)
         if not isinstance(result, dict):
             raise RunnerError(502, "runner returned a non-object result")
