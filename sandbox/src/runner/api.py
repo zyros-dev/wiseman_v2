@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Response
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
-from openai_codex.generated import v2_all as v2
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     ItemCompletedNotification,
@@ -28,7 +27,7 @@ from openai_codex.generated.v2_all import (
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
-from runner.jobs import Jobs, RetryableTurnError
+from runner.jobs import Jobs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -46,8 +45,6 @@ CODEX_RUNTIME_OVERRIDES = (
     "model_providers.wiseman-relay.stream_max_retries=0",
 )
 PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", str(Path(__file__).parents[3] / "contracts")))
-RETRYABLE_HTTP_STATUSES = {408, 429}
-RETRYABLE_HTTP_SERVER = range(500, 600)
 
 
 class Turn(BaseModel):
@@ -192,26 +189,6 @@ def _auth(got: str | None, expected: str) -> None:
         raise HTTPException(401, "unauthorized")
 
 
-def _retryable(error: v2.TurnError) -> bool:
-    match error.codex_error_info.root if error.codex_error_info else None:
-        case v2.CodexErrorInfoValue.server_overloaded | v2.CodexErrorInfoValue.internal_server_error:
-            return True
-        case (
-            v2.HttpConnectionFailedCodexErrorInfo(http_connection_failed=detail)
-            | v2.ResponseStreamConnectionFailedCodexErrorInfo(response_stream_connection_failed=detail)
-            | v2.ResponseStreamDisconnectedCodexErrorInfo(response_stream_disconnected=detail)
-            | v2.ResponseTooManyFailedAttemptsCodexErrorInfo(response_too_many_failed_attempts=detail)
-        ):
-            status = detail.http_status_code
-            return status is None or status in RETRYABLE_HTTP_STATUSES or status in RETRYABLE_HTTP_SERVER
-        case _:
-            return False
-
-
-def _retryable_exception(error: BaseException) -> bool:
-    return any(marker in str(error).lower() for marker in ("disconnect", "connection", "timed out", "timeout"))
-
-
 class CodexRunner:
     def __init__(self) -> None:
         self.codex: dict[str, AsyncCodex] = {}
@@ -309,12 +286,7 @@ class CodexRunner:
         self.active_turns[turn.thread_id] = active_turn
         self.active_messages[turn.thread_id] = turn.message_id
         try:
-            try:
-                items, usage, completed = await _collect_events(active_turn, self._set_progress, turn.thread_id, turn_number)
-            except Exception as exc:
-                if turn.thread_id not in self.stop_requested and turn.codex_thread_id == thread.id and _retryable_exception(exc):
-                    raise RetryableTurnError(str(exc)) from exc
-                raise
+            items, usage, completed = await _collect_events(active_turn, self._set_progress, turn.thread_id, turn_number)
         finally:
             self.last_used[turn.thread_id] = time.monotonic()
             if completed is None and turn.thread_id not in self.stop_requested:
@@ -330,8 +302,6 @@ class CodexRunner:
         if completed is None:
             raise RuntimeError("turn completed event not received")
         if completed.turn.error is not None:
-            if turn.codex_thread_id == thread.id and _retryable(completed.turn.error):
-                raise RetryableTurnError(completed.turn.error.message)
             raise RuntimeError(completed.turn.error.message or "Codex turn failed")
         final_response = _final_response(items)
         return {

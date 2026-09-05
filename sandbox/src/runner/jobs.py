@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
@@ -13,17 +12,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-class RetryableTurnError(RuntimeError):
-    pass
-
-
 class Receipt(BaseModel):
     workspace: str
     status: Literal["running", "completed", "failed"] = "running"
     result: dict[str, object] = Field(default_factory=dict)
     error: str = ""
     attempt: int = Field(default=1, ge=1)
-    retryable: bool = False
 
 
 class Jobs:
@@ -53,7 +47,7 @@ class Jobs:
             receipt = self.get(key)
             if receipt.workspace != workspace:
                 raise ValueError("message ID belongs to a different workspace")
-            if receipt.status != "failed" or not receipt.retryable or attempt <= receipt.attempt:
+            if receipt.status != "failed" or attempt <= receipt.attempt:
                 return receipt
         receipt = Receipt(workspace=workspace, attempt=attempt)
         self._save(key, receipt)
@@ -64,10 +58,8 @@ class Jobs:
         try:
             receipt.result = await work()
             receipt.status = "completed"
-        except (Exception, asyncio.CancelledError) as exc:
-            logging.getLogger(__name__).exception("Runner job %s failed", key)
+        except BaseException as exc:
             receipt.status, receipt.error = "failed", str(exc) or type(exc).__name__
-            receipt.retryable = isinstance(exc, RetryableTurnError)
         finally:
             self._save(key, receipt)
             self.tasks.pop(key, None)
