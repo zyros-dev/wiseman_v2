@@ -5,11 +5,11 @@
 The compact suite covers the normalized Discord admission path, startup and
 follow-up context selection, Engine delivery and reactions, provider SSE
 forwarding, image/file/profile tools, the Temporal test server, duplicate
-messages, session retention, and retirement. The current run is 5 tests with
-56.18% application coverage and a checked-in 55% floor.
+messages, session retention, and retirement. The current run is 3 tests with
+60.06% application coverage and a checked-in 55% floor.
 
 Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,997/3,000`; no
+and `git diff --check` pass. The counted source budget is `2,999/3,000`; no
 production file exceeds 500 counted lines and application code contains no
 `Any` annotations.
 
@@ -30,7 +30,7 @@ being baked into the image.
 
 ## Live evidence
 
-On 2026-09-05, deployed revision `d0472eb` was verified through the raw
+On 2026-09-05, deployed revision `3bc1b84` was verified through the raw
 Discord REST API and live Temporal histories. The real parent-channel mention
 `1545705046547898388` created thread `1545705046547898388`, produced one
 startup banner and `INITIAL_OK` (`1545705063014735903`), then the real
@@ -38,7 +38,11 @@ in-thread mention `1545705897458671686` produced `FOLLOWUP_OK`
 (`1545705908926029854`) without repeating the startup banner. A plain
 non-ping remained silent, and the authenticated HTTP replay path also returned
 `ignored` for an ordinary message. The gateway and sandbox pods are both ready
-on image tag `d0472ebd1f345ee9557c0716c2d44e665b63eea9`, with zero restarts.
+on image tag `3bc1b848bbe9f38cb372840b6020c79c7eec4ade`, with zero restarts.
+
+The rollout retained the live Temporal session records for threads
+`1545760413390606336` and `1545760674452606996`; both report one completed turn,
+an empty active message, and a pinned Codex thread after the restart.
 
 ## Remaining acceptance evidence
 

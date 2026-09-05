@@ -153,7 +153,7 @@ class TurnWorkflow:
     @workflow.run
     async def run(self, payload: dict) -> dict:
         self.work = TurnWork.model_validate(payload)
-        self.work.state.progress = ["🛠️ Workspace provisioning..." if not self.work.state.codex_thread else "🤖 Codex resuming..."]
+        self.work.state.progress = ["🛠️ Workspace provisioning..."] if not self.work.state.codex_thread else []
         try:
             await self._node("render", durable=True)
             await self._node("react")
