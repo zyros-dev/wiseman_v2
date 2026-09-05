@@ -9,6 +9,7 @@
   "mem_mi": 4096,
   "storage_mi": 4096,
   "storage_mount_path": "/workspaces",
+  "metrics_path": "/metrics",
   "run_as_user": 0,
   "run_as_group": 0,
   "fs_group": 0,

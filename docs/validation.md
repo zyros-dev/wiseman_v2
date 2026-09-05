@@ -19,8 +19,9 @@ both paths passed and covered every modeled edge. The model includes queued
 questions, background context, steering, `/stop`, retries, restart recovery,
 delivery failure, unknown cancellation, and three-day retirement states.
 
-Both coordinator and sandbox images build on Thor. A sandbox container returns
-`{"status":"ok"}` from `/healthz`.
+Both coordinator and sandbox images build on Thor. The sandbox returns
+`{"status":"ok"}` from `/healthz` and exposes its low-cardinality Prometheus
+endpoint at `/metrics`.
 
 ## Live evidence
 
