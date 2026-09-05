@@ -250,7 +250,7 @@ class CodexRunner:
             env = {}
             if relay := os.getenv("WISEMAN_RELAY_URL"):
                 env["OPENAI_BASE_URL"] = relay
-            env["OPENAI_API_KEY"] = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
+            env["OPENAI_API_KEY"] = os.getenv("WISEMAN_RUNNER_API_TOKEN", "")
             env["WISEMAN_RELAY_URL"] = os.getenv("WISEMAN_RELAY_URL", "")
             env["WISEMAN_MCP_TOKEN"] = os.getenv("WISEMAN_MCP_TOKEN", env["OPENAI_API_KEY"])
             env["HOME"], env["CODEX_HOME"] = str(path), str(path / ".codex")

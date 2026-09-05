@@ -288,7 +288,7 @@ def _register_provider(app: FastAPI, context: _Context) -> None:
         return StreamingResponse(_provider_stream(context, upstream, payload, trace), status_code=upstream.status_code, headers=headers)
 
     app.add_api_route(
-        "/v1/responses", responses, methods=["POST"], dependencies=[Depends(_auth_dependency(context, "WISEMAN_PROVIDER_TOKEN", "invalid provider token"))]
+        "/v1/responses", responses, methods=["POST"], dependencies=[Depends(_auth_dependency(context, "WISEMAN_RELAY_TOKEN", "invalid relay token"))]
     )
 
 
