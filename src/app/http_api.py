@@ -183,6 +183,9 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
     if event.kind == "stop":
         accepted = await context.clients.temporal.stop(event)
         return {"status": "stopped" if accepted else "ignored", "message_id": event.trigger.id}
+    if event.kind == "steer":
+        accepted = await context.clients.temporal.steer(event)
+        return {"status": "steered" if accepted else "ignored", "message_id": event.trigger.id}
     bot_id = str(getattr(context.bot.user, "id", "") or os.getenv("WISEMAN_DISCORD_BOT_ID", ""))
     replies = (*event.parent_messages, *event.thread_messages)
     if bot_id and not admitted(

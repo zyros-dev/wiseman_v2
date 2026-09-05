@@ -14,7 +14,6 @@
   "fs_group": 0,
   "trusted": true,
   "health": "/healthz",
-  "metrics_path": "/metrics",
   "secrets": ["wiseman-v2-sandbox"],
   "env": {
     "WISEMAN_WORKSPACE_ROOT": "/workspaces",
