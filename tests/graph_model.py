@@ -1,4 +1,5 @@
 # Copyright (c) 2026 Nick van der Merwe
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -16,15 +17,22 @@ class Vertex(StrEnum):
 EDGES = (
     ("admit-question", Vertex.IDLE, Vertex.PREPARING),
     ("background-chatter", Vertex.IDLE, Vertex.IDLE),
+    ("duplicate-question", Vertex.IDLE, Vertex.IDLE),
+    ("idle-stop", Vertex.IDLE, Vertex.IDLE),
     ("context-ready", Vertex.PREPARING, Vertex.RUNNING),
     ("preparation-failed", Vertex.PREPARING, Vertex.ERROR),
     ("steer-active-turn", Vertex.RUNNING, Vertex.RUNNING),
+    ("repeat-steer", Vertex.RUNNING, Vertex.RUNNING),
     ("queue-question", Vertex.RUNNING, Vertex.RUNNING),
     ("worker-restart", Vertex.RUNNING, Vertex.RUNNING),
     ("inference-complete", Vertex.RUNNING, Vertex.DELIVERING),
     ("transient-failure", Vertex.RUNNING, Vertex.RECOVERING),
     ("resume-session", Vertex.RECOVERING, Vertex.RUNNING),
     ("stop-active-turn", Vertex.RUNNING, Vertex.CANCELLING),
+    ("stop-active-recovery", Vertex.RECOVERING, Vertex.CANCELLING),
+    ("stop-active-delivery", Vertex.DELIVERING, Vertex.CANCELLING),
+    ("duplicate-stop", Vertex.CANCELLING, Vertex.CANCELLING),
+    ("completion-race", Vertex.CANCELLING, Vertex.DELIVERING),
     ("stop-active-turn", Vertex.PREPARING, Vertex.CANCELLING),
     ("stop-confirmed", Vertex.CANCELLING, Vertex.IDLE),
     ("unknown-outcome", Vertex.CANCELLING, Vertex.ERROR),
@@ -34,6 +42,23 @@ EDGES = (
     ("idle-retirement", Vertex.IDLE, Vertex.RETIRED),
     ("fixture-reset", Vertex.RETIRED, Vertex.IDLE),
 )
+
+
+@dataclass
+class ModelState:
+    vertex: Vertex = Vertex.IDLE
+    pending: int = 0
+    turns: int = 0
+
+    def advance(self, name: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
+        assert self.vertex == source
+        assert any(target == item[2] for item in EDGES if item[1] == self.vertex)
+        self.vertex = target
+        if name in {"admit-question", "queue-question"} and message_id:
+            self.pending += 1
+        if target == Vertex.IDLE and self.pending:
+            self.pending -= 1
+            self.turns += 1
 
 
 def model() -> dict[str, object]:

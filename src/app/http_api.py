@@ -5,7 +5,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,6 +17,7 @@ import discord
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from httpx_sse import EventSource
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from app.models import Event
 
 from app.admission import admitted, normalize_event
-from app.clients import ClientContainer, ClientMode, ClientSettings
+from app.clients.client_interfaces import ClientContainer, ClientMode, ClientSettings
 from app.clients.discord_client import RealDiscord
 from app.clients.provider import OpenRouter
 from app.engine import Engine, EngineConfig
@@ -173,10 +173,10 @@ def _register_health(app: FastAPI, context: _Context) -> None:
     app.add_api_route("/metrics", metrics, methods=["GET"])
 
 
-def _replay_auth(context: _Context, supplied: str | None) -> None:
-    expected = os.getenv("WISEMAN_REPLAY_TOKEN", context.token)
-    if expected and not hmac.compare_digest(supplied or "", expected):
-        raise HTTPException(401, "invalid replay token")
+def _auth(context: _Context, supplied: str | None, variable: str, detail: str) -> None:
+    expected = os.getenv(variable, context.token)
+    if expected and not hmac.compare_digest(supplied or "", f"Bearer {expected}"):
+        raise HTTPException(401, detail)
 
 
 async def _admit(context: _Context, event: Event) -> dict[str, object]:
@@ -198,12 +198,12 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
 
 def _register_replay(app: FastAPI, context: _Context) -> None:
     async def replay(payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _replay_auth(context, x_replay_token)
+        _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
         event = _event(payload, "invalid Discord event")
         return await _admit(context, event)
 
     async def replay_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _replay_auth(context, x_replay_token)
+        _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
         artifact = _audit(context, audit_id)
         payload = artifact.get("raw_request")
         if not isinstance(payload, dict):
@@ -260,15 +260,18 @@ async def _provider_stream(context: _Context, response: httpx.Response, payload:
     served_model: object = None
     complete = False
     try:
-        async for line in response.aiter_lines():
-            if line.startswith("data:"):
-                try:
-                    value: object = json.loads(line[5:].strip())
-                    if isinstance(value, dict):
-                        usage, cost, served_model = provider_values(value, usage, cost, served_model)
-                except ValueError:
-                    pass
-            yield f"{line}\n".encode()
+        async for event in EventSource(response).aiter_sse():
+            try:
+                value: object = event.json()
+                if isinstance(value, dict):
+                    usage, cost, served_model = provider_values(value, usage, cost, served_model)
+            except ValueError:
+                pass
+            if event.event:
+                yield f"event: {event.event}\n".encode()
+            for line in event.data.splitlines() or [""]:
+                yield f"data: {line}\n".encode()
+            yield b"\n"
         complete = True
     finally:
         await asyncio.shield(response.aclose())
@@ -291,15 +294,9 @@ async def _external_record(context: _Context, trace: str, node: str = "provider"
         logging.getLogger("wiseman").exception("External telemetry failed trace=%s", trace)
 
 
-def _tool_auth(context: _Context, supplied: str | None) -> None:
-    expected = os.getenv("WISEMAN_MCP_TOKEN", os.getenv("WISEMAN_PROVIDER_TOKEN", context.token))
-    if expected and not hmac.compare_digest(supplied or "", f"Bearer {expected}"):
-        raise HTTPException(401, "invalid tool token")
-
-
 def _register_tools(app: FastAPI, context: _Context) -> None:
     async def describe_image(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _tool_auth(context, authorization)
+        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
         url = normalize_image_url(payload.get("url"))
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
@@ -314,7 +311,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         return result
 
     async def set_reactions(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _tool_auth(context, authorization)
+        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
         try:
             values = {phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload}
             configured = context.engine.set_reaction_emojis(values)
@@ -324,7 +321,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         return {"reaction_emojis": configured}
 
     async def set_profile(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _tool_auth(context, authorization)
+        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
         username, avatar = _profile_values(payload)
@@ -335,7 +332,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         return {"status": "updated", "username": username}
 
     async def send_file(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _tool_auth(context, authorization)
+        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
         thread_id, filename, data = _file_values(payload)
         try:
             receipt = await context.clients.discord.send_file(thread_id, Upload(filename, data), str(payload.get("caption") or "")[:2_000])
