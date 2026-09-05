@@ -195,7 +195,8 @@ def _register_health(app: FastAPI, context: _Context) -> None:
 
 def _auth(context: _Context, supplied: str | None, variable: str, detail: str) -> None:
     expected = os.getenv(variable, context.token)
-    if expected and not hmac.compare_digest(supplied or "", expected):
+    token = (supplied or "").removeprefix("Bearer ").strip()
+    if expected and not hmac.compare_digest(token, expected):
         raise HTTPException(401, detail)
 
 
