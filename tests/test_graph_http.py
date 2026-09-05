@@ -11,7 +11,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from app.clients.mock_clients import mock_container
+from app.clients.mock_clients import MockRunner, mock_container
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
@@ -70,6 +70,16 @@ class _TemporalBoundary:
             await self.client.get_workflow_handle(workflow_id).signal(ThreadWorkflow.submit, event)
         return {"status": "queued", "message_id": str(trigger["id"])}
 
+    async def stop(self, event) -> bool:
+        thread_id = event.trigger.thread_id or event.trigger.channel_id
+        state = await self.client.get_workflow_handle(f"wiseman-{thread_id}").query(ThreadWorkflow.session)
+        message_id = str(state.get("active_message", ""))
+        if not message_id:
+            return False
+        return bool(
+            await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("stop", event.model_dump(mode="json"), id=event.trigger.id)
+        )
+
 
 async def _child_result(client, message_id: str) -> dict[str, object]:
     for _ in range(100):
@@ -85,10 +95,10 @@ async def _child_result(client, message_id: str) -> dict[str, object]:
 async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
     clients = mock_container()
-    engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
+    runner = cast("MockRunner", clients.runner)
     async with await WorkflowEnvironment.start_time_skipping() as env:
         setattr(clients, "temporal", _TemporalBoundary(env.client))
-        activities = TurnActivities(engine, env.client)
+        activities = TurnActivities(Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord)), env.client)
         async with Worker(
             env.client,
             task_queue="graph",
@@ -103,11 +113,18 @@ async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
                 ):
                     event = _message(message_id, content, thread=thread)
                     payload = {"t": "MESSAGE_CREATE", "d": event, "thread_messages": messages}
-                    response = await client.post("/v1/replay/discord", json=payload)
-                    assert response.status_code == 200, response.text
+                    assert (await client.post("/v1/replay/discord", json=payload)).status_code == 200
                     await _child_result(env.client, message_id)
+                runner.run_gate, runner.stop_requested = asyncio.Event(), False
+                runner.run_started.clear()
+                await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("stop-q", "work", thread="thread")})
+                await asyncio.wait_for(runner.run_started.wait(), 2)
+                assert (
+                    await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("stop-c", "/stop", thread="thread"), "kind": "stop"})
+                ).json()["status"] == "stopped"
+                assert (await _child_result(env.client, "stop-q"))["error"] == "Turn stopped by user"
             state = await env.client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session)
-            assert state["turn"] == 2
+            assert state["turn"] == 3
 
 
 async def test_graph_boundary_covers_tools_and_provider(monkeypatch) -> None:

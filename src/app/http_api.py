@@ -19,6 +19,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from httpx_sse import EventSource
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
@@ -36,8 +37,6 @@ from app.phoenix import Phoenix, PromptHub, json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
-    MAX_DISCORD_USERNAME_LENGTH,
-    MIN_DISCORD_USERNAME_LENGTH,
     normalize_image_url,
 )
 from app.runner import HttpRunner
@@ -55,6 +54,25 @@ class _Context:
     discord_task: asyncio.Task[None] | None = None
 
 
+class ImageToolRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2_048)
+    question: str = Field(default="", max_length=2_000)
+    attachment_id: str | None = Field(default=None, max_length=200)
+    thread_id: str | None = Field(default=None, max_length=100)
+
+
+class ProfileRequest(BaseModel):
+    username: str | None = Field(default=None, min_length=2, max_length=32)
+    avatar_base64: str | None = None
+
+
+class FileRequest(BaseModel):
+    thread_id: str = Field(min_length=1, max_length=100)
+    filename: str = Field(min_length=1, max_length=255)
+    data_base64: str
+    caption: str = Field(default="", max_length=2_000)
+
+
 def create_app(clients: ClientContainer | None = None) -> FastAPI:
     context = _context(clients)
     app = FastAPI(
@@ -63,7 +81,6 @@ def create_app(clients: ClientContainer | None = None) -> FastAPI:
         redoc_url=None,
         lifespan=partial(_lifespan, context),
     )
-    app.state.gateway = context.bot
     app.state.clients = context.clients
     _register_health(app, context)
     _register_replay(app, context)
@@ -295,18 +312,17 @@ async def _external_record(context: _Context, trace: str, node: str = "provider"
 
 
 def _register_tools(app: FastAPI, context: _Context) -> None:
-    async def describe_image(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
+    async def describe_image(payload: ImageToolRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
-        url = normalize_image_url(payload.get("url"))
+        url = normalize_image_url(payload.url)
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
-        attachment_id = str(payload.get("attachment_id") or url)
         try:
-            result = await context.clients.provider.describe(url, str(payload.get("question") or "")[:2_000])
+            result = await context.clients.provider.describe(url, payload.question)
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise HTTPException(502, "Vision provider unavailable") from exc
-        result["attachments"] = [attachment_id]
-        trace = str(payload.get("thread_id") or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}")
+        result["attachments"] = [payload.attachment_id or url]
+        trace = payload.thread_id or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}"
         await _external_record(context, trace, "vision_tool", **result)
         return result
 
@@ -320,22 +336,29 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         context.bot.persist_profile()
         return {"reaction_emojis": configured}
 
-    async def set_profile(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
+    async def set_profile(payload: ProfileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
-        username, avatar = _profile_values(payload)
+        avatar = _decode_upload(payload.avatar_base64, "avatar_base64")
+        if payload.username is None and avatar is None:
+            raise HTTPException(422, "provide username or avatar")
         try:
-            username = await context.clients.discord.set_profile(username, avatar)
+            username = await context.clients.discord.set_profile(payload.username, avatar)
         except RuntimeError as exc:
             raise HTTPException(503, "Discord profile is unavailable") from exc
         return {"status": "updated", "username": username}
 
-    async def send_file(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
+    async def send_file(payload: FileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
-        thread_id, filename, data = _file_values(payload)
+        filename = Path(payload.filename).name
+        if filename in {".", ".."}:
+            raise HTTPException(422, "filename is invalid")
+        data = _decode_upload(payload.data_base64, "data_base64")
+        if data is None:
+            raise HTTPException(422, "file must be non-empty and no larger than 8 MiB")
         try:
-            receipt = await context.clients.discord.send_file(thread_id, Upload(filename, data), str(payload.get("caption") or "")[:2_000])
+            receipt = await context.clients.discord.send_file(payload.thread_id, Upload(filename, data), payload.caption)
         except (ValueError, discord.DiscordException) as exc:
             raise HTTPException(404, "Discord thread was not found") from exc
         except TypeError as exc:
@@ -348,36 +371,14 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
     app.add_api_route("/v1/tools/send-file", send_file, methods=["POST"])
 
 
-def _profile_values(payload: dict[str, object]) -> tuple[str | None, bytes | None]:
-    username = payload.get("username")
-    if username is not None and (not isinstance(username, str) or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH):
-        raise HTTPException(422, "username must be 2-32 characters")
-    avatar = payload.get("avatar_base64")
+def _decode_upload(encoded: str | None, name: str) -> bytes | None:
+    if encoded is None:
+        return None
     data: bytes | None = None
-    if avatar is not None:
-        if not isinstance(avatar, str):
-            raise HTTPException(422, "avatar_base64 must be a string")
-        try:
-            data = base64.b64decode(avatar, validate=True)
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(422, "avatar_base64 is invalid") from exc
-        if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
-            raise HTTPException(422, "avatar exceeds the 8 MiB limit")
-    if username is None and data is None:
-        raise HTTPException(422, "provide username or avatar")
-    return username, data
-
-
-def _file_values(payload: dict[str, object]) -> tuple[str, str, bytes]:
-    thread_id = str(payload.get("thread_id") or "")
-    filename = Path(str(payload.get("filename") or "")).name
-    encoded = payload.get("data_base64")
-    if not thread_id or not filename or filename in {".", ".."} or not isinstance(encoded, str):
-        raise HTTPException(422, "thread_id, filename, and data_base64 are required")
     try:
         data = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError) as exc:
-        raise HTTPException(422, "data_base64 is invalid") from exc
+        raise HTTPException(422, f"{name} is invalid") from exc
     if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
-        raise HTTPException(422, "file must be non-empty and no larger than 8 MiB")
-    return thread_id, filename, data
+        raise HTTPException(422, f"{name} exceeds the 8 MiB limit")
+    return data

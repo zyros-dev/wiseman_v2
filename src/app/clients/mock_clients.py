@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Nick van der Merwe
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -154,6 +155,9 @@ class MockPrompts(PromptClient):
 class MockRunner(RunnerClient):
     def __init__(self, state: MockState | None = None) -> None:
         self.state = state or MockState()
+        self.run_gate: asyncio.Event | None = None
+        self.run_started = asyncio.Event()
+        self.stop_requested = False
 
     async def acquire(self, user: str, workspace: str) -> None:
         self.state.call("runner", "acquire", user, workspace)
@@ -174,6 +178,11 @@ class MockRunner(RunnerClient):
         progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]:
         self.state.call("runner", "run", thread, user, workspace, prompt)
+        self.run_started.set()
+        if self.run_gate is not None:
+            await self.run_gate.wait()
+        if self.stop_requested:
+            raise RuntimeError("turn stopped by user")
         if progress is not None:
             for message in ("🤖 Codex turn started...", "✍️ Writing response..."):
                 await progress(message)
@@ -185,6 +194,9 @@ class MockRunner(RunnerClient):
 
     async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool:
         self.state.call("runner", "stop", thread, user, workspace, target_message_id, command_id)
+        self.stop_requested = True
+        if self.run_gate is not None:
+            self.run_gate.set()
         return True
 
 

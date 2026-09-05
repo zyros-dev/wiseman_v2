@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.models import Event, TurnWork
-from app.runner import MESSAGE_ID
+from app.runner import MESSAGE_ID, STOPPED_STATUS, RunnerError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -46,7 +47,10 @@ class TurnActivities:
         async def report(message: str) -> None:
             await handle.signal("progress", message)
 
-        return (await self.engine.execute(TurnWork.model_validate(payload), report)).model_dump(mode="json")
+        try:
+            return (await self.engine.execute(TurnWork.model_validate(payload), report)).model_dump(mode="json")
+        except RunnerError as exc:
+            raise ApplicationError(str(exc), non_retryable=exc.status == STOPPED_STATUS) from exc
 
     @activity.defn(name="wiseman.deliver")
     async def deliver(self, payload: dict) -> dict:
