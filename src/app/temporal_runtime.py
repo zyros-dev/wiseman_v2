@@ -108,6 +108,8 @@ class TurnWorkflow:
     async def stop(self, event: dict) -> bool:
         incoming = Event.model_validate(event)
         if self.work is None or incoming.trigger.id in self.stop_commands:
+            self.stop_requested = True
+            self.stop_commands.add(incoming.trigger.id)
             return True
         if not self.inferencing:
             self.stop_requested = True
