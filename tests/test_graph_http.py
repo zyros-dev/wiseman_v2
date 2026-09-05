@@ -70,7 +70,13 @@ class _TemporalBoundary:
 async def _child_result(client, message_id: str) -> dict[str, object]:
     for _ in range(100):
         try:
-            return await client.get_workflow_handle(f"wiseman-turn-{message_id}").result()
+            result = await client.get_workflow_handle(f"wiseman-turn-{message_id}").result()
+            for _ in range(100):
+                state = await client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session)
+                if message_id in state.get("processed", []):
+                    break
+                await asyncio.sleep(0.05)
+            return result  # noqa: TRY300
         except RPCError as exc:
             if exc.status != RPCStatusCode.NOT_FOUND:
                 raise
@@ -95,16 +101,8 @@ async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
                 for message_id, content, messages in (("q1", "one", []), ("q2", "two", [_message("chat", "background", mention=False)])):
                     if message_id == "q2":
-                        assert (
-                            await client.post(
-                                "/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("chat", "background", thread="thread", mention=False)}
-                            )
-                        ).json()["status"] == "ignored"
-                    assert (
-                        await client.post(
-                            "/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, content, thread="thread"), "thread_messages": messages}
-                        )
-                    ).status_code == 200
+                        assert (await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("chat", "background", thread="thread", mention=False)})).json()["status"] == "ignored"  # noqa: E501 # fmt: skip
+                    assert (await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, content, thread="thread"), "thread_messages": messages})).status_code == 200  # noqa: E501 # fmt: skip
                     await _child_result(env.client, message_id)
                 runner.run_gate, runner.run_started = asyncio.Event(), asyncio.Event()
                 await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("stop-q", "work", thread="thread")})
