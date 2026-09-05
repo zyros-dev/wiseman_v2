@@ -209,7 +209,7 @@ def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
         if request.url.path.endswith("/responses"):
             return httpx.Response(
                 200,
-                text='data: {"type":"response.completed","response":{"model":"mock"}}\n\n',
+                content=b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n',
                 headers={"content-type": "text/event-stream"},
             )
         return httpx.Response(200, json={"model": "mock-vision", "choices": [{"message": {"content": "mock image description"}}]})

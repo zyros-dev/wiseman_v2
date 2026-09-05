@@ -124,6 +124,7 @@ async def test_boundary_tools_and_provider(monkeypatch) -> None:
         requests = (("/v1/tools/describe-image", {"url": "https://cdn.test/a.png"}), ("/v1/tools/send-file", {"thread_id": "thread", "filename": "a.txt", "data_base64": "b2s="}), ("/v1/tools/set-profile", {"username": "Wiseman"}), ("/v1/responses", {"model": "mock", "input": "hi"}))  # noqa: E501 # fmt: skip
         responses = [await client.post(path, headers=headers, json=payload) for path, payload in requests]
         assert all(response.status_code == 200 for response in responses)
+        assert responses[-1].content == b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n'
 
 
 async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:

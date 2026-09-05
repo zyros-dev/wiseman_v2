@@ -57,6 +57,25 @@ class _Context:
     discord_task: asyncio.Task[None] | None = None
 
 
+class _ByteTee(httpx.AsyncByteStream):
+    def __init__(self, queue: asyncio.Queue[bytes | None], source: httpx.AsyncByteStream | None = None) -> None:
+        self.queue, self.source = queue, source
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.source is None:
+            while (chunk := await self.queue.get()) is not None:
+                yield chunk
+            return
+        async for chunk in self.source:
+            await self.queue.put(chunk)
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self.source is not None:
+            await self.source.aclose()
+        await self.queue.put(None)
+
+
 class ImageToolRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2_048)
     question: str = Field(default="", max_length=2_000)
@@ -78,12 +97,7 @@ class FileRequest(BaseModel):
 
 def create_app(clients: ClientContainer | None = None) -> FastAPI:
     context = _context(clients)
-    app = FastAPI(
-        title="wiseman-v2",
-        docs_url=None,
-        redoc_url=None,
-        lifespan=partial(_lifespan, context),
-    )
+    app = FastAPI(title="wiseman-v2", docs_url=None, redoc_url=None, lifespan=partial(_lifespan, context))
     app.state.clients = context.clients
     _register_health(app, context)
     _register_replay(app, context)
@@ -96,35 +110,18 @@ def _context(clients: ClientContainer | None) -> _Context:
     settings = clients.settings if clients is not None else ClientSettings.from_env()
     token, discord_token = settings.runner_token, settings.discord_token
     real = clients is None or clients.mode is ClientMode.REAL
-    if real and not all(
-        (
-            discord_token,
-            settings.temporal_address,
-            settings.runner_url,
-            token,
-            settings.phoenix_endpoint,
-            settings.prompt_hub_url,
-            settings.provider_key,
-        )
-    ):
+    required = (discord_token, settings.temporal_address, settings.runner_url, token, settings.phoenix_endpoint, settings.prompt_hub_url, settings.provider_key)
+    if real and not all(required):
         raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
-    services = None
     if clients is None:
-        services = (
-            Phoenix(
-                settings.phoenix_endpoint,
-                settings.phoenix_key,
-                settings.phoenix_project,
-                os.getenv("WISEMAN_AUDIT_DIR"),
-            ),
+        phoenix, prompts, runner = (
+            Phoenix(settings.phoenix_endpoint, settings.phoenix_key, settings.phoenix_project, os.getenv("WISEMAN_AUDIT_DIR")),
             PromptHub(settings.prompt_hub_url, settings.phoenix_key),
             HttpRunner(settings.runner_url, settings.runner_token),
         )
-    if clients is not None:
-        engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
     else:
-        assert services is not None
-        engine = Engine(EngineConfig(services[0], services[2], services[1]))
+        phoenix, prompts, runner = clients.phoenix, clients.prompts, clients.runner
+    engine = Engine(EngineConfig(phoenix, runner, prompts, discord=clients.discord if clients else None))
     configure_engine(engine)
     allowlist = {int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value}
     activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
@@ -293,26 +290,34 @@ def _register_provider(app: FastAPI, context: _Context) -> None:
 
 
 async def _provider_stream(context: _Context, response: httpx.Response, payload: JsonObject, trace: str) -> AsyncIterator[bytes]:
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    accounting = asyncio.create_task(_account_provider(context, response, payload, trace, queue))
+    tee = _ByteTee(queue, cast("httpx.AsyncByteStream", response.stream))
+    try:
+        async for chunk in tee:
+            yield chunk
+    finally:
+        await tee.aclose()
+        await accounting
+
+
+async def _account_provider(context: _Context, response: httpx.Response, payload: JsonObject, trace: str, queue: asyncio.Queue[bytes | None]) -> None:
     usage: object = None
     cost: object = None
     served_model: object = None
     complete = False
     try:
-        async for event in EventSource(response).aiter_sse():
+        parsed = httpx.Response(response.status_code, headers=response.headers, stream=_ByteTee(queue))
+        async for event in EventSource(parsed).aiter_sse():
             try:
                 value: object = event.json()
                 if isinstance(value, dict):
                     usage, cost, served_model = provider_values(value, usage, cost, served_model)
             except ValueError:
                 pass
-            if event.event:
-                yield f"event: {event.event}\n".encode()
-            for line in event.data.splitlines() or [""]:
-                yield f"data: {line}\n".encode()
-            yield b"\n"
         complete = True
     finally:
-        await asyncio.shield(response.aclose())
+        await asyncio.shield(parsed.aclose())
         await _external_record(
             context,
             trace,
