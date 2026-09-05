@@ -35,7 +35,7 @@ On 2026-09-05, deployed revision `cd21c16` created Discord thread `Gurt 7`
 startup banner and one edited `INITIAL_OK` answer, then one edited
 `FOLLOWUP_OK` answer for a real in-thread mention without repeating the
 startup banner. A plain non-ping remained silent. The current deployment is
-revision `57d7c815`, with one ready gateway pod and one ready sandbox pod.
+revision `d31b9d17`, with one ready gateway pod and one ready sandbox pod.
 
 ## Remaining acceptance evidence
 
