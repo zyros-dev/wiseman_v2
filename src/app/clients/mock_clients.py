@@ -118,11 +118,9 @@ class MockTemporal(TemporalClient):
     async def touch(self, event: Event) -> None:
         self.state.call("temporal", "touch", event.trigger.id)
 
-    async def start(self) -> None:
-        self.state.call("temporal", "start")
+    async def start(self) -> None: ...
 
-    async def close(self) -> None:
-        self.state.call("temporal", "close")
+    async def close(self) -> None: ...
 
     async def steer(self, event: Event) -> bool:
         self.state.call("temporal", "steer", event.trigger.id)

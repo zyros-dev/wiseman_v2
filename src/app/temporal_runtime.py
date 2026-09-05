@@ -95,7 +95,7 @@ class TurnWorkflow:
     @workflow.update
     async def steer(self, event: dict) -> bool:
         incoming = Event.model_validate(event)
-        if self.work is None or not self.inferencing or incoming.trigger.reply_to != self.work.state.delivery_id:
+        if self.work is None or not self.inferencing or incoming.trigger.reply_to != self.work.state.delivery_id or (incoming.anchor_id and incoming.anchor_id != self.work.event.trigger.id):  # noqa: E501 # fmt: skip
             return False
         if incoming.trigger.id in self.work.state.processed:
             return True
@@ -111,6 +111,8 @@ class TurnWorkflow:
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
             return True
+        if incoming.anchor_id and incoming.anchor_id != self.work.event.trigger.id:
+            return False
         if not self.inferencing:
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
@@ -371,7 +373,7 @@ class TemporalRuntime:
             return bool(
                 await client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update(
                     name,
-                    event.model_dump(mode="json"),
+                    event.model_dump(mode="json") | {"anchor_id": str(message_id)},
                     id=event.trigger.id,
                 )
             )
