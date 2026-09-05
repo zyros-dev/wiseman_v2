@@ -99,15 +99,10 @@ class TurnWorkflow:
             return False
         if incoming.trigger.id in self.work.state.processed:
             return True
-        result = await workflow.execute_activity(
-            "wiseman.steer",
-            {"work": self.work.model_dump(mode="json"), "event": event},
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=TRANSPORT_RETRY_POLICY,
-        )
-        if result["accepted"]:
+        if await self._control("steer", event):
             self.work.state.processed.add(incoming.trigger.id)
-        return bool(result["accepted"])
+            return True
+        return False
 
     @workflow.update
     async def stop(self, event: dict) -> bool:
@@ -118,15 +113,20 @@ class TurnWorkflow:
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
             return True
+        if await self._control("stop", event):
+            self.stop_requested = True
+            self.stop_commands.add(incoming.trigger.id)
+            return True
+        return False
+
+    async def _control(self, name: str, event: dict) -> bool:
+        assert self.work is not None
         result = await workflow.execute_activity(
-            "wiseman.stop",
+            f"wiseman.{name}",
             {"work": self.work.model_dump(mode="json"), "event": event},
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=TRANSPORT_RETRY_POLICY,
         )
-        if result["accepted"]:
-            self.stop_requested = True
-            self.stop_commands.add(incoming.trigger.id)
         return bool(result["accepted"])
 
     @workflow.signal
@@ -180,7 +180,7 @@ class TurnWorkflow:
                 self.work.stopped = True
                 self.work.error = "Turn stopped by user"
             else:
-                self.work.error = str(exc) or type(exc).__name__
+                self.work.error = _error_message(exc)
         self.inferencing = False
         await workflow.wait_condition(workflow.all_handlers_finished)
         await self._node("deliver", durable=True)
@@ -233,6 +233,10 @@ class ThreadWorkflow:
             return
         self.pending.append(dict(event))
 
+    @workflow.signal
+    async def touch(self, event: dict) -> None:
+        self.pending.append({"background": True, "event": event})
+
     @workflow.query
     def session(self) -> dict:
         return {**self.state, "active_message": self.active_message}
@@ -259,6 +263,8 @@ class ThreadWorkflow:
             if handled and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
                 workflow.continue_as_new({"state": self.state, "pending": self.pending})
             event = self.pending.pop(0)
+            if _object_map(event).get("background"):
+                continue
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
@@ -340,6 +346,17 @@ class TemporalRuntime:
         except WorkflowAlreadyStartedError:
             await client.get_workflow_handle(workflow_id).signal(ThreadWorkflow.submit, event)
 
+    async def touch(self, event: Event) -> None:
+        if self.client is None:
+            raise RuntimeError("Temporal is not connected")
+        if not (thread_id := event.trigger.thread_id):
+            return
+        try:
+            await cast("Client", self.client).get_workflow_handle(f"wiseman-{thread_id}").signal(ThreadWorkflow.touch, event.model_dump(mode="json"))
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+
     async def _update(self, name: str, event: Event) -> bool:
         if self.client is None:
             raise RuntimeError("Temporal is not connected")
@@ -403,3 +420,8 @@ def _merge_progress(existing: list[str], updates: list[str]) -> list[str]:
 
 def _sequence(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else []
+
+
+def _error_message(error: BaseException) -> str:
+    cause = getattr(error, "cause", None) or error.__cause__
+    return str(cause or error).strip() or type(error).__name__
