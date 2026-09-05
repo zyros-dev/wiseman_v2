@@ -107,11 +107,13 @@ async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
                 runner.run_gate, runner.run_started = asyncio.Event(), asyncio.Event()
                 await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("stop-q", "work", thread="thread")})
                 await asyncio.wait_for(runner.run_started.wait(), 2)
+                assert all(response.json()["status"] == "queued" for response in await asyncio.gather(*(client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "queued", thread="thread")}) for message_id in ("queued-1", "queued-2"))))  # noqa: E501 # fmt: skip
                 assert (
                     await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("stop-c", "/stop", thread="thread"), "kind": "stop"})
                 ).json()["status"] == "stopped"
                 assert (await _child_result(env.client, "stop-q"))["error"] == "Turn stopped by user"
-            assert (await env.client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session))["turn"] == 3
+                await asyncio.gather(*(_child_result(env.client, message_id) for message_id in ("queued-1", "queued-2")))  # fmt: skip
+            assert (await env.client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session))["turn"] == 5
 
 
 async def test_boundary_tools_and_provider(monkeypatch) -> None:
