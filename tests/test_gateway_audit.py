@@ -28,8 +28,7 @@ async def test_dispatch_audits_match_interleaved_messages_before_any_await(monke
         return True
 
     async def incoming(message, raw):
-        event = Event(trigger=Message(id=message.id, author_id="u", channel_id="c"), raw_payload=raw)
-        return SimpleNamespace(event=event)
+        return Event(trigger=Message(id=message.id, author_id="u", channel_id="c"), raw_payload=raw)
 
     async def submit(value):
         received[value["trigger"]["id"]] = value["raw_payload"]

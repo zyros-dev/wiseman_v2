@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import discord
 import httpx
@@ -34,18 +34,18 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.admission import ContextConfig, context, image_tool_instruction, normalize_event
 from app.clients.client_interfaces import RunnerClient
+from app.clients.discord_client import mention_ids
+from app.clients.mock_clients import MockDiscord, mock_container
 from app.engine import Engine, EngineConfig
-from app.gateway import Gateway, _history, mention_ids
+from app.gateway import Gateway, _history
 from app.http_api import create_app
 from app.models import Event
 from app.phoenix import Phoenix, PromptHub, provider_values
 from app.presentation import (
     banner,
-    deliver_content,
     describe_images,
     normalize_image_url,
     render_progress,
-    split_discord_content,
     thread_name,
 )
 from app.runner import FakeRunner, HttpRunner
@@ -123,7 +123,20 @@ def discord_message(mid: str, content: str, channel: str = "parent", thread: str
 
 
 def configured_engine(phoenix: Phoenix | None = None, runner: RunnerClient | None = None) -> Engine:
-    return Engine(EngineConfig(phoenix or Phoenix(), runner or FakeRunner(), PromptHub()))
+    return Engine(
+        EngineConfig(phoenix or Phoenix(), runner or FakeRunner(), PromptHub(), discord=mock_container().discord)
+    )
+
+
+def mock_app(engine=None, **options):
+    engine = engine or configured_engine(phoenix=Phoenix(audit_dir=os.getenv("WISEMAN_AUDIT_DIR")))
+    clients = mock_container()
+    clients.phoenix, clients.runner, clients.prompts = (
+        engine.config.phoenix,
+        engine.config.runner,
+        engine.config.prompts,
+    )
+    return create_app(engine, clients=clients, **options)
 
 
 def test_temporal_payload_round_trip_preserves_nested_event() -> None:
@@ -140,7 +153,7 @@ def test_temporal_payload_round_trip_preserves_nested_event() -> None:
 
 def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     engine = configured_engine()
-    app = create_app(engine)
+    app = mock_app(engine)
     client = TestClient(app)
     headers = {"x-replay-token": ""}
     assert client.get("/metrics").status_code == 200
@@ -359,43 +372,9 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     assert not phoenix.roots
 
 
-def test_discord_content_splits_long_answers_at_readable_boundaries() -> None:
-    content = "first paragraph\n\n" + ("word " * 600)
-    chunks = split_discord_content(content)
-    assert len(chunks) > 1
-    assert all(len(chunk) <= 2_000 for chunk in chunks)
-    assert "".join(chunks).replace(" ", "") == content.replace(" ", "")
-
-
 def test_image_url_normalization_accepts_model_wrappers() -> None:
     assert normalize_image_url(" <https://cdn.example/image.png> ") == ("https://cdn.example/image.png")
     assert normalize_image_url("attachment://image.png") == ""
-
-
-@pytest.mark.asyncio
-async def test_long_delivery_edits_first_chunk_and_sends_overflow() -> None:
-    class Channel:
-        def __init__(self) -> None:
-            self.sent: list[str] = []
-
-        async def send(self, content: str = "") -> object:
-            index = len(self.sent)
-            self.sent.append(content)
-            channel = self
-
-            class Delivery:
-                async def edit(self, *, content: str) -> None:
-                    channel.sent[index] = content
-
-            return Delivery()
-
-    channel = Channel()
-    progress = await channel.send("working")
-    content = "paragraph\n\n" + ("word " * 600)
-    await deliver_content(progress, channel, content)
-    assert len(channel.sent) >= 2
-    assert all(len(chunk) <= 2_000 for chunk in channel.sent)
-    assert "".join(channel.sent).replace(" ", "") == content.replace(" ", "")
 
 
 @pytest.mark.asyncio
@@ -408,7 +387,7 @@ async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> Non
         return {"text": "description", "attachments": ["image"], "question": question or None}
 
     monkeypatch.setattr("app.http_api.describe_images", describe)
-    response = TestClient(create_app(configured_engine())).post(
+    response = TestClient(mock_app(configured_engine())).post(
         "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
     )
     assert response.status_code == 200
@@ -448,7 +427,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
     monkeypatch.setattr("app.gateway.discord.Thread", Thread)
     engine = configured_engine()
-    app = create_app(engine, token="secret")
+    app = mock_app(engine, token="secret")
     app.state.gateway._connection.user = User()
 
     with TestClient(app) as client:
@@ -502,7 +481,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
 
 
 def test_discord_tools_require_authentication() -> None:
-    client = TestClient(create_app(configured_engine(), token="secret"))
+    client = TestClient(mock_app(configured_engine(), token="secret"))
     assert client.post("/v1/tools/set-reactions", json={"success": "🎉"}).status_code == 401
     assert client.post("/v1/tools/send-file", json={}).status_code == 401
 
@@ -745,48 +724,20 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
 
 @pytest.mark.asyncio
 async def test_discord_reaction_failures_are_visible_to_activity_retry() -> None:
-    class Delivery:
-        async def edit(self, *, content: str) -> None:
-            del content
-
-    class Channel:
-        async def send(self, content: str = "", **kwargs: object) -> Delivery:
-            del content, kwargs
-            return Delivery()
-
-    class Live:
-        channel = Channel()
-
-        async def add_reaction(self, emoji: str) -> None:
-            del emoji
-            raise discord.DiscordException
-
-        async def remove_reaction(self, emoji: str, member: object) -> None:
-            del emoji, member
-            raise discord.DiscordException
-
     engine = configured_engine()
-    engine.reaction_user = object()
-    with pytest.raises(discord.DiscordException):
-        await engine.handle(
-            normalize_event(discord_message("reaction-failure", "hello", thread="t")),
-            cast("discord.Message", Live()),
-        )
+    assert isinstance(engine.discord, MockDiscord)
+    engine.discord.state.failures.append("discord.add_reaction")
+    with pytest.raises(RuntimeError, match=r"discord\.add_reaction"):
+        await engine.handle(normalize_event(discord_message("reaction-failure", "hello", thread="t")))
 
 
 @pytest.mark.asyncio
 async def test_discord_delivery_failure_does_not_report_success() -> None:
-    class Channel:
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            del content, kwargs
-            raise discord.DiscordException
-
     engine = configured_engine()
-    with pytest.raises(discord.DiscordException):
-        await engine.handle(
-            normalize_event(discord_message("delivery-failure", "hello", thread="t")),
-            delivery_channel=Channel(),
-        )
+    assert isinstance(engine.discord, MockDiscord)
+    engine.discord.state.failures.append("discord.send")
+    with pytest.raises(RuntimeError, match=r"discord\.send"):
+        await engine.handle(normalize_event(discord_message("delivery-failure", "hello", thread="t")))
 
 
 @pytest.mark.asyncio
@@ -812,38 +763,14 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
                 raise self.DisconnectionError
             return "codex", "answer", {}
 
-    class Delivery:
-        id = "progress"
-
-        async def edit(self, *, content: str) -> None:
-            del content
-
-    class Channel:
-        def __init__(self) -> None:
-            self.embeds = 0
-            self.progress = 0
-            self.nonces = set()
-
-        async def send(self, content: str = "", **kwargs: object) -> Delivery:
-            del content
-            if kwargs["nonce"] in self.nonces:
-                return Delivery()
-            self.nonces.add(kwargs["nonce"])
-            if kwargs.get("embed") is not None:
-                self.embeds += 1
-            else:
-                self.progress += 1
-            return Delivery()
-
-    channel = Channel()
     engine = configured_engine(runner=Runner())
     event = normalize_event(discord_message("retry-delivery", "hello", thread="t"))
     with pytest.raises(RuntimeError, match="disconnected"):
-        await engine.handle(event, delivery_channel=channel, state_data={}, retry_transport=True)
-    result = await engine.handle(event, delivery_channel=channel, state_data={})
+        await engine.handle(event, state_data={}, retry_transport=True)
+    result = await engine.handle(event, state_data={})
     assert result["output"] == "answer"
-    assert channel.embeds == 1
-    assert channel.progress == 1
+    assert isinstance(engine.discord, MockDiscord)
+    assert list(engine.discord.state.messages.values()) == ["", "answer"]
 
 
 @pytest.mark.asyncio
@@ -896,43 +823,20 @@ async def test_same_thread_turns_are_serialized() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed", [False, True])
 async def test_followup_preserves_previous_answer(failed):
-    messages = {}
-
-    class Delivery:
-        def __init__(self, identifier):
-            self.id = identifier
-
-        async def edit(self, *, content):
-            messages[self.id] = content
-
-    class Channel:
-        async def send(self, content="", **kwargs):
-            identifier = str(len(messages))
-            messages[identifier] = content
-            return Delivery(identifier)
-
     engine = configured_engine()
-    channel = Channel()
-
-    async def restore(event, identifier):
-        return Delivery(identifier)
-
-    async def lookup_channel(event):
-        return channel
-
-    engine.lookup_delivery = restore
-    engine.lookup_channel = lookup_channel
+    assert isinstance(engine.discord, MockDiscord)
+    messages = engine.discord.state.messages
     first = normalize_event(discord_message("first", "one", thread="t"))
     state = await engine.preflight(first, "working")
     if failed:
         result = await engine.fail(first, "test failure", cast("JsonObject", state))
     else:
-        result = await engine.handle(first, delivery_channel=channel, state_data=cast("JsonObject", state))
+        result = await engine.handle(first, state_data=cast("JsonObject", state))
     assert result["state"]["delivery_id"] is None
     assert result["state"]["progress"] == []
     previous = dict(messages)
     second = normalize_event(discord_message("second", "two", thread="t"))
-    await engine.handle(second, delivery_channel=channel, state_data=cast("JsonObject", result["state"]))
+    await engine.handle(second, state_data=cast("JsonObject", result["state"]))
     assert all(messages[key] == content for key, content in previous.items())
 
 
@@ -1077,81 +981,19 @@ async def test_temporal_submit_without_client_is_explicit() -> None:
 @pytest.mark.asyncio
 async def test_live_delivery_sendsbanner_progress_and_answer(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_ROUTE_INFO", json.dumps({"requested_model": "model"}))
-
-    class Channel:
-        def __init__(self) -> None:
-            self.sent: list[str] = []
-            self.embeds: list[object] = []
-
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            index = len(self.sent)
-            self.sent.append(content)
-            self.embeds.append(kwargs.get("embed"))
-
-            class Delivery:
-                async def edit(self, *, content: str) -> None:
-                    channel.sent[index] = content
-
-            channel = self
-            return Delivery()
-
-    class Live:
-        def __init__(self) -> None:
-            self.channel = Channel()
-            self.reactions: list[str] = []
-
-        async def add_reaction(self, emoji: str) -> None:
-            self.reactions.append(emoji)
-
-        async def remove_reaction(self, emoji: str, member: object) -> None:
-            del member
-            self.reactions.remove(emoji)
-
-    live = Live()
     engine = configured_engine()
-    engine.reaction_user = object()
-    result = await engine.handle(
-        normalize_event(discord_message("live", "hello", thread="t")),
-        cast("discord.Message", live),
-    )
+    result = await engine.handle(normalize_event(discord_message("live", "hello", thread="t")))
+    assert isinstance(engine.discord, MockDiscord)
+    state = engine.discord.state
     assert result["reactions"] == ["✅"]
-    assert live.reactions == ["✅"]
-    assert live.channel.sent[0] == ""
-    assert live.channel.sent[1].startswith("Codex received: ")
-    assert live.channel.embeds[0] is not None
-    assert cast("discord.Embed", live.channel.embeds[0]).title == "⚡ Wiseman thread startup"
+    assert state.reactions["live"] == ["✅"]
+    assert next(iter(state.messages.values())) == ""
+    assert list(state.messages.values())[1].startswith("Codex received: ")
+    assert next(iter(state.embeds.values()))["title"] == "⚡ Wiseman thread startup"
 
 
 @pytest.mark.asyncio
 async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None:
-    class Channel:
-        def __init__(self) -> None:
-            self.sent: list[str] = []
-
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            del kwargs
-            index = len(self.sent)
-            self.sent.append(content)
-            channel = self
-
-            class Delivery:
-                async def edit(self, *, content: str) -> None:
-                    channel.sent[index] = content
-
-            return Delivery()
-
-    class Live:
-        def __init__(self) -> None:
-            self.channel = Channel()
-            self.reactions: list[str] = []
-
-        async def add_reaction(self, emoji: str) -> None:
-            self.reactions.append(emoji)
-
-        async def remove_reaction(self, emoji: str, member: object) -> None:
-            del member
-            self.reactions.remove(emoji)
-
     class ProgressRunner(HttpRunner):
         async def run(
             self,
@@ -1168,15 +1010,14 @@ async def test_live_delivery_edits_progress_for_http_runner(monkeypatch) -> None
             await progress("✍️ Writing response...")
             return thread or "codex", "answer", {}
 
-    live = Live()
     engine = configured_engine(runner=ProgressRunner("http://runner"))
-    engine.reaction_user = object()
-    result = await engine.handle(
-        normalize_event(discord_message("progress", "hello", thread="t")),
-        cast("discord.Message", live),
-    )
+    result = await engine.handle(normalize_event(discord_message("progress", "hello", thread="t")))
     assert result["output"] == "answer"
-    assert live.channel.sent[-1] == "answer"
+    assert isinstance(engine.discord, MockDiscord)
+    assert list(engine.discord.state.messages.values())[-1] == "answer"
+    edits = [call.values[1] for call in engine.discord.state.calls if call.operation == "edit"]
+    assert any("⚙️ Running command..." in edit for edit in edits[:-1])
+    assert any("✍️ Writing response..." in edit for edit in edits[:-1])
     assert "⚙️ Running command..." in result["progress"]
     assert "✍️ Writing response..." in result["progress"]
 
@@ -1213,7 +1054,7 @@ async def test_history_normalizes_discord_fields() -> None:
 
 
 def test_app_health_and_replay_authentication() -> None:
-    client = TestClient(create_app(configured_engine(), token="secret"))
+    client = TestClient(mock_app(configured_engine(), token="secret"))
     assert client.get("/healthz").json() == {"status": "ok"}
     assert client.get("/readyz").json() == {"status": "ready"}
     assert client.get("/v1/phoenix/events").json() == []
@@ -1228,7 +1069,7 @@ def test_app_starts_discord_with_discord_token_not_replay_token(monkeypatch) -> 
         received.append(token)
 
     monkeypatch.setattr(Gateway, "run_forever", fake_run)
-    with TestClient(create_app(configured_engine(), token="replay", discord_token="discord")):
+    with TestClient(mock_app(configured_engine(), token="replay", discord_token="discord")):
         pass
     assert received == ["discord"]
 
@@ -1287,11 +1128,9 @@ async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> Non
     class OtherThread(Thread):
         owner_id, name = 99, "wiseman"
 
-    class Guild:
-        async def fetch_active_threads(self) -> object:
-            return SimpleNamespace(threads=[Thread(), OtherThread()])
-
-    cast("dict[int, object]", bot._connection._guilds)[1] = Guild()
+    guild = Mock(spec_set=discord.Guild)
+    guild.active_threads = AsyncMock(return_value=[Thread(), OtherThread()])
+    cast("dict[int, object]", bot._connection._guilds)[1] = guild
     await bot._discover_managed_threads()
     assert edited == [42]
 
@@ -1329,7 +1168,7 @@ def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
     engine = configured_engine()
-    response = TestClient(create_app(engine)).post("/v1/responses", json={"model": "requested"})
+    response = TestClient(mock_app(engine)).post("/v1/responses", json={"model": "requested"})
     assert response.status_code == 200
     provider = engine.config.phoenix.records[-1]
     assert provider["served_model"] == "served"
@@ -1372,7 +1211,7 @@ def test_provider_relay_propagates_disconnect_for_temporal_retry(monkeypatch) ->
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: client)
     with pytest.raises(httpx.RemoteProtocolError, match="disconnected"):
-        TestClient(create_app(configured_engine())).post("/v1/responses", json={"model": "requested"})
+        TestClient(mock_app(configured_engine())).post("/v1/responses", json={"model": "requested"})
     assert client.attempts == 1
 
 
@@ -1561,60 +1400,32 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_engine_preflight_reuses_progress_delivery() -> None:
-    class Delivery:
-        def __init__(self) -> None:
-            self.id = "delivery"
-            self.content = ""
-
-        async def edit(self, *, content: str) -> None:
-            self.content = content
-
-    class Channel:
-        def __init__(self) -> None:
-            self.sends: list[tuple[str, object | None]] = []
-            self.delivery = Delivery()
-
-        async def send(self, content: str = "", **kwargs: object) -> Delivery:
-            self.sends.append((content, kwargs.get("embed")))
-            return self.delivery
-
-    channel = Channel()
     engine = configured_engine()
-
-    async def lookup(_event: Event) -> Channel:
-        return channel
-
-    engine.lookup_channel = lookup
+    assert isinstance(engine.discord, MockDiscord)
+    state = engine.discord.state
     event = Event(
         trigger=message("preflight", "hello", thread="thread"),
         kind="startup",
     )
     persisted = await engine.preflight(event, "🛠️ Workspace provisioning...", {"turn": 2})
     persisted = cast("StateData", persisted)
-    engine.lookup_delivery = AsyncMock(return_value=channel.delivery)
     persisted = await engine.preflight(event, "🤖 Codex starting...", persisted)
-    assert len(channel.sends) == 2
-    assert channel.sends[0][1] is not None
-    assert channel.delivery.content.startswith("⏳ Working · Gurt 3")
-    assert channel.delivery.content.endswith("🤖 Codex starting...")
-    assert persisted["delivery_id"] == "delivery"
+    assert len(state.messages) == 2
+    assert len(state.embeds) == 1
+    delivery_id = persisted["delivery_id"]
+    assert isinstance(delivery_id, str)
+    assert state.messages[delivery_id].startswith("⏳ Working · Gurt 3")
+    assert state.messages[delivery_id].endswith("🤖 Codex starting...")
     assert persisted["banner_sent"] is True
 
-    restored = configured_engine()
-    restored.lookup_channel = lookup
-
-    async def lookup_delivery(_event: Event, delivery_id: str) -> Delivery:
-        assert delivery_id == "delivery"
-        return channel.delivery
-
-    restored.lookup_delivery = lookup_delivery
+    restored = Engine(engine.config)
     resumed = await restored.preflight(event, "resumed", persisted)
-    assert resumed["delivery_id"] == "delivery"
-    assert len(channel.sends) == 2
-    assert channel.delivery.content.endswith("resumed")
+    assert resumed["delivery_id"] == delivery_id
+    assert len(state.messages) == 2
+    assert state.messages[delivery_id].endswith("resumed")
     failed = await engine.fail(event, "runner unavailable", {"turn": 2})
     assert failed["error"] == "runner unavailable"
-    assert channel.delivery.content == "Codex failed: runner unavailable"
+    assert state.messages[delivery_id] == "Codex failed: runner unavailable"
 
 
 @pytest.mark.asyncio
@@ -1835,16 +1646,17 @@ async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) ->
     followup.author.id = 8
     await bot.on_message(cast("discord.Message", followup))
     assert bot.fallback_state["2"]["turn"] == 2
-    assert startup.reactions == ["✅"]
-    assert followup.reactions == ["✅"]
-    assert len(parent.thread.sent) == 3
-    assert parent.thread.sent[0] == ""
-    assert parent.thread.sent[1].startswith("Codex received: ")
-    assert parent.thread.sent[2].startswith("Codex received: ")
+    assert isinstance(engine.discord, MockDiscord)
+    state = engine.discord.state
+    assert state.reactions == {"start": ["✅"], "follow": ["✅"]}
+    sent = list(state.messages.values())
+    assert len(sent) == 3
+    assert sent[0] == ""
+    assert sent[1].startswith("Codex received: ")
+    assert sent[2].startswith("Codex received: ")
     assert not parent.sent
-    assert parent.thread.embeds[0] is not None
-    assert cast("discord.Embed", parent.thread.embeds[0]).title == "⚡ Wiseman thread startup"
-    assert parent.thread.sent[-1].startswith("Codex received: ")
+    assert next(iter(state.embeds.values()))["title"] == "⚡ Wiseman thread startup"
+    assert [call.values[0] for call in state.calls if call.operation == "send"] == ["2", "2", "2"]
 
     rejected = Channel()
     rejected.guild = Guild(2)
@@ -1909,7 +1721,7 @@ async def test_gateway_persists_gurt_thread_sequence(tmp_path) -> None:
 
 def test_replay_accepts_discord_message_json() -> None:
     engine = configured_engine()
-    client = TestClient(create_app(engine))
+    client = TestClient(mock_app(engine))
     payload = {
         "id": "discord-1",
         "author": {"id": "u", "username": "nick"},
@@ -1931,7 +1743,7 @@ def test_replay_accepts_discord_message_json() -> None:
 
 def test_admission_audit_is_exact_and_replayable() -> None:
     engine = configured_engine()
-    client = TestClient(create_app(engine, token="replay-secret"))
+    client = TestClient(mock_app(engine, token="replay-secret"))
     payload = {
         "t": "MESSAGE_CREATE",
         "d": {
@@ -1971,13 +1783,13 @@ def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
         "parent_messages": [],
     }
     first = Phoenix(audit_dir=tmp_path)
-    first_client = TestClient(create_app(configured_engine(phoenix=first), token="secret"))
+    first_client = TestClient(mock_app(configured_engine(phoenix=first), token="secret"))
     assert (
         first_client.post("/v1/replay/discord", headers={"x-replay-token": "secret"}, json=payload).status_code == 200
     )
 
     restarted = Phoenix(audit_dir=tmp_path)
-    client = TestClient(create_app(configured_engine(phoenix=restarted), token="secret"))
+    client = TestClient(mock_app(configured_engine(phoenix=restarted), token="secret"))
     audit = client.get(
         "/v1/phoenix/audits/discord-persisted-audit-1",
         headers={"x-replay-token": "secret"},
@@ -2002,7 +1814,7 @@ def test_default_app_persists_admission_audit(tmp_path: Path, monkeypatch) -> No
         },
         "kind": "startup",
     }
-    client = TestClient(create_app(token="secret"))
+    client = TestClient(mock_app(token="secret"))
     assert client.post("/v1/replay/discord", headers={"x-replay-token": "secret"}, json=payload).status_code == 200
     assert list(tmp_path.glob("*.json"))
 

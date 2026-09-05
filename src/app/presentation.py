@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
 import discord
@@ -15,13 +13,9 @@ from jinja2 import Environment, StrictUndefined
 from app.models import is_image_attachment
 from app.phoenix import route_info
 
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from app.models import Messageable
-
 DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
 MAX_DISCORD_CONTENT_LENGTH = 2_000
+MAX_PROGRESS_PREVIEW_LENGTH = 200
 MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
@@ -131,14 +125,6 @@ def _vision_question(question: str) -> str:
     return template.render(question=question)
 
 
-async def edit_delivery(message: object | None, content: str) -> bool:
-    edit = getattr(message, "edit", None)
-    if not callable(edit):
-        return False
-    await cast("Callable[..., Awaitable[object]]", edit)(content=content)
-    return True
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
@@ -155,40 +141,11 @@ def normalize_image_url(value: object) -> str:
     return candidate if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
 
-def split_discord_content(content: str) -> list[str]:
-    if len(content) <= MAX_DISCORD_CONTENT_LENGTH:
-        return [content]
-    chunks: list[str] = []
-    remaining = content
-    while remaining:
-        if len(remaining) <= MAX_DISCORD_CONTENT_LENGTH:
-            chunks.append(remaining)
-            break
-        boundary = remaining.rfind("\n", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
-        if boundary < MAX_DISCORD_CONTENT_LENGTH // 2:
-            boundary = remaining.rfind(" ", 0, MAX_DISCORD_CONTENT_LENGTH + 1)
-        if boundary <= 0:
-            boundary = MAX_DISCORD_CONTENT_LENGTH
-        chunks.append(remaining[:boundary].rstrip())
-        remaining = remaining[boundary:].lstrip()
-    return chunks
-
-
 def render_progress(steps: list[str], turn_number: int | None = None) -> str:
     count = turn_number if turn_number is not None else 0
-    visible = "\n".join(steps).splitlines()[-8:]
+    visible = [
+        line if len(line) <= MAX_PROGRESS_PREVIEW_LENGTH else line[: MAX_PROGRESS_PREVIEW_LENGTH - 3] + "..."
+        for line in "\n".join(steps).splitlines()[-8:]
+    ]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])
-
-
-async def deliver_content(message: object | None, channel: Messageable, content: str) -> None:
-    chunks = split_discord_content(content)
-    edited = False
-    if message is not None:
-        with suppress(discord.DiscordException):
-            edited = await edit_delivery(message, chunks[0])
-    with suppress(discord.DiscordException):
-        if not edited:
-            await channel.send(chunks[0])
-        for chunk in chunks[1:]:
-            await channel.send(chunk)

@@ -20,17 +20,13 @@ from app.clients.mock_clients import (
     MockState,
 )
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message, State, TurnWork
+from app.models import Event, Message, MessageRef, State, TurnWork
 from app.phoenix import PromptHub
 from app.temporal_runtime import TurnWorkflow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    import discord
-
-    from app.clients.client_interfaces import RunnerClient
-    from app.phoenix import Phoenix
     from app.types import JsonObject
 
 
@@ -111,19 +107,19 @@ class DiscordClientMachine(RuleBasedStateMachine):
             message_id = self.message_ids[-1]
             before = self.state.messages[message_id]
             expected_failure = bool(self.state.failures and self.state.failures[0] == "discord.edit")
-            run_safely(self.client.edit(message_id, "updated"))
+            run_safely(self.client.edit(MessageRef("channel", message_id), "updated"))
             if expected_failure:
                 assert self.state.messages[message_id] == before
 
     @rule(emoji=st.sampled_from(("👀", "✅", "❌")))
     def adds_reactions(self, emoji: str) -> None:
         if self.message_ids:
-            run_safely(self.client.add_reaction(self.message_ids[-1], emoji))
+            run_safely(self.client.add_reaction(MessageRef("channel", self.message_ids[-1]), emoji))
 
     @rule(emoji=st.sampled_from(("👀", "✅", "❌")))
     def removes_reactions_idempotently(self, emoji: str) -> None:
         if self.message_ids:
-            run_safely(self.client.remove_reaction(self.message_ids[-1], emoji))
+            run_safely(self.client.remove_reaction(MessageRef("channel", self.message_ids[-1]), emoji))
 
     @rule()
     def archives_threads(self) -> None:
@@ -196,9 +192,9 @@ def test_failed_discord_mutation_is_atomic(operation: str) -> None:
     actions: dict[str, Callable[[], Awaitable[object]]] = {
         "discord.create_thread": lambda: client.create_thread("channel", "Gurt 2", 60),
         "discord.send": lambda: client.send(thread, "new"),
-        "discord.edit": lambda: client.edit(message, "new"),
-        "discord.add_reaction": lambda: client.add_reaction(message, "👀"),
-        "discord.remove_reaction": lambda: client.remove_reaction(message, "👀"),
+        "discord.edit": lambda: client.edit(MessageRef("channel", message), "new"),
+        "discord.add_reaction": lambda: client.add_reaction(MessageRef("channel", message), "👀"),
+        "discord.remove_reaction": lambda: client.remove_reaction(MessageRef("channel", message), "👀"),
         "discord.archive_thread": lambda: client.archive_thread(thread),
         "discord.lock_thread": lambda: client.lock_thread(thread),
         "discord.send_file": lambda: client.send_file(thread, "artifact.bin"),
@@ -266,61 +262,12 @@ def test_raw_discord_message_create_normalizes_deterministically(
     assert first.raw_payload == payload
 
 
-class _LiveMessage:
-    def __init__(self, client: MockDiscord, message_id: str) -> None:
-        self.client, self.id = client, message_id
-
-    async def edit(self, *, content: str) -> None:
-        await self.client.edit(self.id, content)
-
-    async def add_reaction(self, emoji: str) -> None:
-        await self.client.add_reaction(self.id, emoji)
-
-    async def remove_reaction(self, emoji: str, _user: object) -> None:
-        await self.client.remove_reaction(self.id, emoji)
-
-
-class _DeliveryChannel:
-    def __init__(self, client: MockDiscord, channel_id: str) -> None:
-        self.client, self.channel_id = client, channel_id
-
-    async def send(self, content: str = "", *, embed: object | None = None, nonce: str = "") -> _LiveMessage:
-        del nonce
-        message_id = await self.client.send(self.channel_id, content, embed=cast("JsonObject | None", embed))
-        return _LiveMessage(self.client, message_id)
-
-
-class _EngineRunner:
-    def __init__(self, state: MockState) -> None:
-        self.client = MockRunner(state)
-
-    async def acquire(self, user: str, workspace: str) -> None:
-        await self.client.acquire(user, workspace)
-
-    async def start(self, thread: str, user: str, workspace: str = "") -> str:
-        return await self.client.start(thread, user, workspace)
-
-    async def run(
-        self,
-        thread: str,
-        prompt: str,
-        user: str,
-        workspace: str = "",
-        progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str, str, dict[str, object]]:
-        return await self.client.run(thread, prompt, user, workspace, progress=progress)
-
-    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        return await self.client.steer(thread, prompt, user, workspace)
-
-
 class EngineLifecycleMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
         self.state = MockState()
         self.discord = MockDiscord(self.state)
-        self.runner = _EngineRunner(self.state)
-        self.channel = _DeliveryChannel(self.discord, "thread")
+        self.runner = MockRunner(self.state)
         self.engine = self._new_engine()
         self.started = False
         self.next_message = 0
@@ -344,27 +291,19 @@ class EngineLifecycleMachine(RuleBasedStateMachine):
         )
 
     def _new_engine(self) -> Engine:
-        engine = Engine(
+        return Engine(
             EngineConfig(
-                cast("Phoenix", MockPhoenix(self.state)),
-                cast("RunnerClient", self.runner),
+                MockPhoenix(self.state),
+                self.runner,
                 PromptHub(),
+                discord=self.discord,
             )
         )
-        engine.reaction_user = cast("discord.User", object())
-        return engine
 
     def _submit(self, event: Event) -> dict[str, object]:
         result = cast(
             "dict[str, object]",
-            run(
-                self.engine.handle(
-                    event,
-                    cast("discord.Message", _LiveMessage(self.discord, event.trigger.id)),
-                    self.channel,
-                    self.durable,
-                )
-            ),
+            run(self.engine.handle(event, state_data=self.durable)),
         )
         if isinstance(result.get("state"), dict):
             self.durable = cast("JsonObject", result["state"])

@@ -8,6 +8,7 @@ import httpx
 import pytest
 from openai_codex import ApprovalMode, Sandbox
 
+from app.clients.mock_clients import mock_container
 from app.engine import Engine, EngineConfig
 from app.models import Event, Message
 from app.phoenix import Phoenix, PromptHub
@@ -28,7 +29,7 @@ async def test_followup_keeps_original_workspace_owner():
             owners.append(user)
             return await super().run(thread, prompt, user, workspace, progress)
 
-    engine = Engine(EngineConfig(Phoenix(), Runner(), PromptHub()))
+    engine = Engine(EngineConfig(Phoenix(), Runner(), PromptHub(), discord=mock_container().discord))
     first = await engine.handle(Event(trigger=Message(id="1", author_id="alice", channel_id="c", thread_id="t")))
     second = await engine.handle(
         Event(trigger=Message(id="2", author_id="bob", channel_id="c", thread_id="t")), state_data=first["state"]

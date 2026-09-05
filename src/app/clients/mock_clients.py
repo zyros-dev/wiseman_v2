@@ -18,6 +18,7 @@ from app.clients.client_interfaces import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from app.models import MessageRef, Upload
     from app.types import JsonObject
 
 type Failure = str
@@ -35,6 +36,7 @@ class MockState:
     calls: list[MockCall] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
     messages: dict[str, str] = field(default_factory=dict)
+    embeds: dict[str, JsonObject] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
     threads: dict[str, str] = field(default_factory=dict)
     thread_activity: dict[str, float] = field(default_factory=dict)
@@ -47,6 +49,7 @@ class MockState:
     turn_ids: dict[str, str] = field(default_factory=dict)
     profile: dict[str, str] = field(default_factory=dict)
     files: dict[str, str] = field(default_factory=dict)
+    nonces: dict[str, str] = field(default_factory=dict)
 
     def call(self, client: str, operation: str, *values: str) -> None:
         self.calls.append(MockCall(client, operation, tuple(values)))
@@ -73,28 +76,40 @@ class MockDiscord(DiscordClient):
         self.state.thread_activity[thread_id] = self.state.fake_time
         return thread_id
 
-    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None) -> str:
-        del embed
+    async def send(
+        self, channel_id: str, content: str = "", *, embed: JsonObject | None = None, nonce: str = ""
+    ) -> str:
         self.state.call("discord", "send", channel_id, content)
+        if nonce and nonce in self.state.nonces:
+            return self.state.nonces[nonce]
         message_id = f"message-{self.next_id}"
         self.next_id += 1
         self.state.messages[message_id] = content
+        if embed is not None:
+            self.state.embeds[message_id] = embed
+        if nonce:
+            self.state.nonces[nonce] = message_id
         self.state.channel_history.setdefault(channel_id, []).append(
             {"id": message_id, "channel_id": channel_id, "content": content}
         )
         return message_id
 
-    async def edit(self, message_id: str, content: str) -> None:
-        self.state.call("discord", "edit", message_id)
+    async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None:
+        message_id = ref.message_id
+        self.state.call("discord", "edit", message_id, content)
         self.state.messages[message_id] = content
+        if upload is not None:
+            self.state.files[message_id] = upload.name
 
-    async def add_reaction(self, message_id: str, emoji: str) -> None:
+    async def add_reaction(self, ref: MessageRef, emoji: str) -> None:
+        message_id = ref.message_id
         self.state.call("discord", "add_reaction", message_id, emoji)
         reactions = self.state.reactions.setdefault(message_id, [])
         if emoji not in reactions:
             reactions.append(emoji)
 
-    async def remove_reaction(self, message_id: str, emoji: str) -> None:
+    async def remove_reaction(self, ref: MessageRef, emoji: str) -> None:
+        message_id = ref.message_id
         self.state.call("discord", "remove_reaction", message_id, emoji)
         reactions = self.state.reactions.setdefault(message_id, [])
         if emoji in reactions:

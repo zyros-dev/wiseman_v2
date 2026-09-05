@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from app.clients.client_interfaces import (
-        DiscordClient,
         PhoenixClient,
         PromptClient,
         RunnerClient,
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
 
 from app.admission import normalize_event
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
+from app.clients.discord_client import RealDiscord
 from app.clients.real_clients import RealDependencies, real_services
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
@@ -125,14 +125,16 @@ def _context(engine: Engine | None, token: str, discord_token: str, clients: Cli
             ClientMode.REAL,
             settings,
             RealDependencies(
-                discord=cast("DiscordClient", bot),
+                discord=RealDiscord(bot),
                 temporal=cast("TemporalClient", temporal),
                 phoenix=cast("PhoenixClient", engine.config.phoenix),
                 prompts=cast("PromptClient", engine.config.prompts),
                 runner=cast("RunnerClient", engine.config.runner),
             ),
         )
-    engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context)
+    engine.config = EngineConfig(
+        clients.phoenix, clients.runner, clients.prompts, engine.config.context, clients.discord
+    )
     assert clients is not None
     return _Context(engine, bot, clients, temporal, token, discord_token)
 

@@ -4,8 +4,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.clients.client_interfaces import DiscordClient
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message, State, TurnWork
+from app.models import Event, Message, MessageRef, State, TurnWork
 from app.nodes import TurnActivities
 from app.phoenix import Phoenix, PromptHub
 from app.runner import FakeRunner
@@ -19,7 +20,7 @@ def work():
 
 
 def engine():
-    return Engine(EngineConfig(Phoenix(), FakeRunner(), PromptHub()))
+    return Engine(EngineConfig(Phoenix(), FakeRunner(), PromptHub(), discord=AsyncMock(spec=DiscordClient)))
 
 
 @pytest.mark.asyncio
@@ -42,13 +43,10 @@ async def test_restarted_delivery_uses_recorded_answer_without_inference():
     executed = await first.execute(prepared, AsyncMock())
     restored = TurnWork.model_validate_json(executed.model_dump_json())
     second = engine()
+    assert isinstance(second.discord, AsyncMock)
     second.config.runner.run = AsyncMock(side_effect=AssertionError("repeated inference"))
-    answer = AsyncMock()
-    second.lookup_delivery = AsyncMock(return_value=answer)
-    second.lookup_channel = AsyncMock(return_value=AsyncMock())
     await second.deliver(restored)
-    answer.edit.assert_awaited_once_with(content=executed.output)
-    second.lookup_delivery.assert_awaited_once_with(restored.event, "answer")
+    second.discord.edit.assert_awaited_once_with(MessageRef("thread", "answer"), executed.output, upload=None)
 
 
 @pytest.mark.asyncio
@@ -56,25 +54,18 @@ async def test_reaction_retry_reconciles_on_fresh_worker():
     request = work()
     request.processing_emoji = "eyes"
     request.terminal_emoji = "done"
-    live = AsyncMock()
     for _ in range(2):
         service = engine()
-        service.lookup = AsyncMock(return_value=live)
-        service.reaction_user = object()
+        assert isinstance(service.discord, AsyncMock)
         await service.reconcile(request)
-    assert live.add_reaction.await_count == 2
-    assert live.remove_reaction.await_count == 2
-    assert live.mock_calls[0].args == ("done",)
-    assert live.mock_calls[1].args[0] == "eyes"
+        service.discord.add_reaction.assert_awaited_once_with(MessageRef("parent", "trigger"), "done")
+        service.discord.remove_reaction.assert_awaited_once_with(MessageRef("parent", "trigger"), "eyes")
+        assert [call[0] for call in service.discord.mock_calls] == ["add_reaction", "remove_reaction"]
 
 
 async def test_registered_nodes_use_recorded_state_and_emit_live_progress(monkeypatch):
     service, client = engine(), AsyncMock()
-    live, answer, channel = AsyncMock(), AsyncMock(), AsyncMock()
-    service.lookup = AsyncMock(return_value=live)
-    service.lookup_channel = AsyncMock(return_value=channel)
-    service.lookup_delivery = AsyncMock(return_value=answer)
-    service.reaction_user = object()
+    assert isinstance(service.discord, AsyncMock)
     info = SimpleNamespace(workflow_id="turn", workflow_run_id="run")
     monkeypatch.setattr("app.nodes.activity.info", lambda: info)
 
@@ -91,9 +82,9 @@ async def test_registered_nodes_use_recorded_state_and_emit_live_progress(monkey
     for name in ("context", "prompt", "render", "react", "infer", "deliver", "react", "observe"):
         payload = await getattr(nodes, name)(payload)
     handle.signal.assert_awaited_once_with("progress", "tool completed")
-    answer.edit.assert_any_await(content="answer content")
-    assert [call.args[0] for call in live.add_reaction.await_args_list] == ["👀", "✅"]
-    live.remove_reaction.assert_awaited_once()
+    service.discord.edit.assert_any_await(MessageRef("thread", "answer"), "answer content", upload=None)
+    assert [call.args[1] for call in service.discord.add_reaction.await_args_list] == ["👀", "✅"]
+    service.discord.remove_reaction.assert_awaited_once()
     assert service.config.phoenix.records[-1]["node"] == "completed"
     assert isinstance(service.config.phoenix, Phoenix)
     assert not service.config.phoenix.roots

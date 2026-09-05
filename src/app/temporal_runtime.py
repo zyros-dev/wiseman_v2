@@ -13,6 +13,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event, TurnWork
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
+DELIVERY_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30))
 HISTORY_COMPACTION_TURNS = 20
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ class TurnWorkflow:
     def current(self) -> dict:
         return self.work.model_dump(mode="json") if self.work is not None else {}
 
-    async def _node(self, name: str) -> None:
+    async def _node(self, name: str, *, durable: bool = False) -> None:
         assert self.work is not None
         self.work.state.progress = [*self.work.state.progress, *self.pending_progress][-32:]
         self.pending_progress.clear()
@@ -156,7 +157,7 @@ class TurnWorkflow:
                 f"wiseman.{name}",
                 self.work.model_dump(mode="json"),
                 start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=TRANSPORT_RETRY_POLICY,
+                retry_policy=DELIVERY_RETRY_POLICY if durable else TRANSPORT_RETRY_POLICY,
             )
         )
         result.state.processed.update(self.work.state.processed)
@@ -170,8 +171,11 @@ class TurnWorkflow:
         self.work.state.progress = [
             "🛠️ Workspace provisioning..." if not self.work.state.codex_thread else "🤖 Codex resuming..."
         ]
-        await self._node("render")
-        await self._node("react")
+        await self._node("render", durable=True)
+        try:
+            await self._node("react")
+        except Exception:
+            workflow.logger.exception("Processing reaction unavailable; continuing the turn")
         try:
             await self._node("context")
             await self._node("prompt")
@@ -188,8 +192,8 @@ class TurnWorkflow:
             self.work.error = str(exc) or type(exc).__name__
         self.inferencing = False
         await workflow.wait_condition(workflow.all_handlers_finished)
-        await self._node("deliver")
-        await self._node("react")
+        await self._node("deliver", durable=True)
+        await self._node("react", durable=True)
         try:
             await self._node("observe")
         except Exception:

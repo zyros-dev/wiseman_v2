@@ -11,7 +11,7 @@ from app.clients import ClientContainer, ClientMode, ClientSettings, build_clien
 from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message
+from app.models import Event, Message, MessageRef
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -22,10 +22,11 @@ async def test_mock_container_records_complete_discord_lifecycle() -> None:
     container = build_clients(ClientMode.MOCK, ClientSettings())
     thread = await container.discord.create_thread("channel", "Gurt 1", 60)
     message = await container.discord.send(thread, "working")
-    await container.discord.add_reaction(message, "👀")
-    await container.discord.add_reaction(message, "✅")
-    await container.discord.remove_reaction(message, "👀")
-    await container.discord.remove_reaction(message, "👀")
+    ref = MessageRef(thread, message)
+    await container.discord.add_reaction(ref, "👀")
+    await container.discord.add_reaction(ref, "✅")
+    await container.discord.remove_reaction(ref, "👀")
+    await container.discord.remove_reaction(ref, "👀")
 
     state = container.discord.state  # type: ignore[attr-defined]
     assert isinstance(state, MockState)

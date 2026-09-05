@@ -30,7 +30,7 @@ async def test_delivery_retry_and_cold_worker_do_not_repeat_inference():
             calls["deliver"] += 1
             assert payload["output"] == "verified output"
             assert payload["state"]["delivery_id"] == "recorded-answer"
-            if calls["deliver"] == 1:
+            if calls["deliver"] <= 3:
                 first_delivery.set()
                 raise RuntimeError("Discord disconnected after inference completed")
             return payload
@@ -72,7 +72,7 @@ async def test_delivery_retry_and_cold_worker_do_not_repeat_inference():
             assert result["state"]["codex_thread"] == "sdk"
             assert result["state"]["turn"] == 1
             assert result["output"] == "verified output"
-        assert calls == {"infer": 1, "deliver": 2}
+        assert calls == {"infer": 1, "deliver": 4}
         history = await handle.fetch_history()
         names = [
             event.activity_task_scheduled_event_attributes.activity_type.name

@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Nick van der Merwe
-from typing import Protocol
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,18 @@ IMAGE_SUFFIXES = (
     ".tiff",
     ".webp",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRef:
+    channel_id: str
+    message_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Upload:
+    name: str
+    data: bytes
 
 
 def is_image_attachment(value: object) -> bool:
@@ -51,10 +63,6 @@ class Event(BaseModel):
     seen_ids: list[str] = Field(default_factory=list)
     anchor_id: str | None = None
     raw_payload: JsonObject = Field(default_factory=dict)
-
-
-class Messageable(Protocol):
-    async def send(self, content: str = "") -> object: ...
 
 
 class State(BaseModel):
