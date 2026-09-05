@@ -33,9 +33,13 @@ jobs:
       - name: GraphWalker model
         run: |
           set -eu
-          curl -L --fail --silent --show-error \
-            https://github.com/GraphWalker/graphwalker-project/releases/download/4.3.3/graphwalker-cli-4.3.3.jar \
-            -o /tmp/graphwalker-cli-4.3.3.jar
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            const url = "https://github.com/GraphWalker/graphwalker-project/releases/download/4.3.3/graphwalker-cli-4.3.3.jar";
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`GraphWalker download failed: ${response.status}`);
+            writeFileSync("/tmp/graphwalker-cli-4.3.3.jar", Buffer.from(await response.arrayBuffer()));
+          '
           echo '8300b4ad7faf2ad2c0acde9ec0a6ffbbafe59ce51d05b5e00e971272c9364317  /tmp/graphwalker-cli-4.3.3.jar' | sha256sum -c -
           uv run python -c 'import json; from pathlib import Path; from tests.graph_model import model; Path("/tmp/wiseman.json").write_text(json.dumps(model()))'
           for seed in 42 2026; do
