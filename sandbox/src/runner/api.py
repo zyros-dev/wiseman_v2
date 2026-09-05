@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 from openai_codex.generated import v2_all as v2
 from openai_codex.generated.v2_all import (
@@ -25,6 +25,7 @@ from openai_codex.generated.v2_all import (
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
 )
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from runner.jobs import Jobs, RetryableTurnError
@@ -459,6 +460,10 @@ def _register_health(app: FastAPI) -> None:
     @app.get("/healthz")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _register_workspace(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
