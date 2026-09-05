@@ -20,7 +20,6 @@
     "WISEMAN_WORKSPACE_ROOT": "/workspaces",
     "WISEMAN_MANAGE_ACCOUNTS": "1",
     "WISEMAN_RELAY_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1",
-    "WISEMAN_MCP_URL": "http://wiseman-v2-gateway.midgard-apps.svc.cluster.local:8080/v1/mcp",
     "WISEMAN_CODEX_BIN": "/usr/local/bin/codex-as-user",
     "WISEMAN_MODEL": "deepseek/deepseek-v4-flash",
     "WISEMAN_MAX_CONCURRENT_TURNS": "4"

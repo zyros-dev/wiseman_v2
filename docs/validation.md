@@ -9,7 +9,7 @@ messages, session retention, and retirement. The current run is 5 tests with
 55.93% application coverage and a checked-in 55% floor.
 
 Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,988/3,000`; no
+and `git diff --check` pass. The counted source budget is `2,996/3,000`; no
 production file exceeds 500 counted lines and application code contains no
 `Any` annotations.
 
@@ -25,7 +25,7 @@ endpoint at `/metrics`.
 
 ## Live evidence
 
-On 2026-09-05, deployed revision `a431ca6` created Discord thread `Gurt 7`
+On 2026-09-05, deployed revision `cd21c16` created Discord thread `Gurt 7`
 (`1545705046547898388`) from a real parent-channel mention. It produced one
 startup banner and one edited `INITIAL_OK` answer, then one edited
 `FOLLOWUP_OK` answer for a real in-thread mention without repeating the
