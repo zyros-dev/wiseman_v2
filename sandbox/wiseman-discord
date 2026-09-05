@@ -13,7 +13,7 @@ MAX_BYTES = 8 * 1024 * 1024
 
 def _post(route: str, payload: dict[str, object]) -> dict[str, object]:
     base = os.getenv("WISEMAN_RELAY_URL", "").rstrip("/")
-    token = os.getenv("WISEMAN_MCP_TOKEN", os.getenv("WISEMAN_PROVIDER_TOKEN", ""))
+    token = os.getenv("WISEMAN_MCP_TOKEN", "")
     if not base or not token:
         raise RuntimeError("wiseman-discord is not configured")  # noqa: TRY003
     request = urllib.request.Request(
