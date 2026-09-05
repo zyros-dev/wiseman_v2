@@ -15,14 +15,15 @@ from typing import TYPE_CHECKING, Annotated, cast
 
 import discord
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Security
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from httpx_sse import EventSource
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from app.models import Event
 
@@ -42,6 +43,8 @@ from app.presentation import (
 from app.runner import HttpRunner
 from app.temporal_runtime import TemporalRuntime, configure_engine
 from app.types import JsonObject
+
+BEARER = HTTPBearer(auto_error=False)
 
 
 @dataclass(slots=True)
@@ -192,8 +195,15 @@ def _register_health(app: FastAPI, context: _Context) -> None:
 
 def _auth(context: _Context, supplied: str | None, variable: str, detail: str) -> None:
     expected = os.getenv(variable, context.token)
-    if expected and not hmac.compare_digest(supplied or "", f"Bearer {expected}"):
+    if expected and not hmac.compare_digest(supplied or "", expected):
         raise HTTPException(401, detail)
+
+
+def _auth_dependency(context: _Context, variable: str, detail: str) -> Callable[[], None]:
+    def check(credentials: Annotated[HTTPAuthorizationCredentials | None, Security(BEARER)] = None) -> None:
+        _auth(context, credentials.credentials if credentials else None, variable, detail)
+
+    return check
 
 
 async def _admit(context: _Context, event: Event) -> dict[str, object]:
@@ -252,10 +262,7 @@ def _event(payload: dict[str, object], detail: str) -> Event:
 
 
 def _register_provider(app: FastAPI, context: _Context) -> None:
-    async def responses(payload: JsonObject, authorization: Annotated[str | None, Header()] = None) -> Response:
-        expected = os.getenv("WISEMAN_PROVIDER_TOKEN", context.token)
-        if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
-            raise HTTPException(401, "invalid provider token")
+    async def responses(payload: JsonObject) -> Response:
         trace = f"provider-{hashlib.sha256(json_text(payload).encode()).hexdigest()[:16]}"
         try:
             upstream = await context.clients.provider.responses(payload)
@@ -272,7 +279,9 @@ def _register_provider(app: FastAPI, context: _Context) -> None:
                 await upstream.aclose()
         return StreamingResponse(_provider_stream(context, upstream, payload, trace), status_code=upstream.status_code, headers=headers)
 
-    app.add_api_route("/v1/responses", responses, methods=["POST"])
+    app.add_api_route(
+        "/v1/responses", responses, methods=["POST"], dependencies=[Depends(_auth_dependency(context, "WISEMAN_PROVIDER_TOKEN", "invalid provider token"))]
+    )
 
 
 async def _provider_stream(context: _Context, response: httpx.Response, payload: JsonObject, trace: str) -> AsyncIterator[bytes]:
@@ -316,8 +325,9 @@ async def _external_record(context: _Context, trace: str, node: str = "provider"
 
 
 def _register_tools(app: FastAPI, context: _Context) -> None:
-    async def describe_image(payload: ImageToolRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    auth = Depends(_auth_dependency(context, "WISEMAN_MCP_TOKEN", "invalid tool token"))
+
+    async def describe_image(payload: ImageToolRequest) -> dict[str, object]:
         url = normalize_image_url(payload.url)
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
@@ -330,8 +340,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         await _external_record(context, trace, "vision_tool", **result)
         return result
 
-    async def set_reactions(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def set_reactions(payload: dict[str, object]) -> dict[str, object]:
         try:
             values = {phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload}
             configured = context.engine.set_reaction_emojis(values)
@@ -340,8 +349,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         context.bot.persist_profile()
         return {"reaction_emojis": configured}
 
-    async def set_profile(payload: ProfileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def set_profile(payload: ProfileRequest) -> dict[str, object]:
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
         avatar = _decode_upload(payload.avatar_base64, "avatar_base64")
@@ -353,8 +361,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
             raise HTTPException(503, "Discord profile is unavailable") from exc
         return {"status": "updated", "username": username}
 
-    async def send_file(payload: FileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def send_file(payload: FileRequest) -> dict[str, object]:
         filename = Path(payload.filename).name
         if filename in {".", ".."}:
             raise HTTPException(422, "filename is invalid")
@@ -369,10 +376,10 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
             raise HTTPException(422, str(exc)) from exc
         return {"status": "sent", "message_id": receipt.message_id, "url": receipt.url}
 
-    app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"])
-    app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"])
-    app.add_api_route("/v1/tools/set-profile", set_profile, methods=["POST"])
-    app.add_api_route("/v1/tools/send-file", send_file, methods=["POST"])
+    app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/set-profile", set_profile, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/send-file", send_file, methods=["POST"], dependencies=[auth])
 
 
 def _decode_upload(encoded: str | None, name: str) -> bytes | None:
