@@ -56,6 +56,18 @@ jobs:
           uv run ruff format --check .
       - name: Source budget
         run: uv run python tools/check_source_budget.py
+      - name: Compile and sandbox smoke
+        run: |
+          uv run python -m compileall -q src sandbox/src tests tools
+          docker build -t wiseman-v2-sandbox:ci -f sandbox/Dockerfile .
+          container=$(docker run -d -p 18090:8090 wiseman-v2-sandbox:ci)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18090/healthz && exit 0
+            sleep 1
+          done
+          docker logs "$container"
+          exit 1
       - name: Pyrefly
         run: uv run pyrefly check src sandbox/src tests tools
       - name: Tests and coverage
