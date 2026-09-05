@@ -141,11 +141,16 @@ class Workspace:
         with suppress(FileNotFoundError):
             shutil.chown(base, user=account, group=account)
             marker = path / ".wiseman-owned"
-            if not marker.exists():
+            owner = marker.stat().st_uid if marker.exists() else None
+            current = pwd.getpwnam(account).pw_uid
+            if owner != current:
                 self._own_tree(shared, account)
                 self._own_tree(path, account)
                 marker.touch()
                 shutil.chown(marker, user=account, group=account)
+            for item in (path / ".codex" / "config.toml", path / "AGENTS.md"):
+                with suppress(FileNotFoundError):
+                    shutil.chown(item, user=account, group=account)
 
     def release(self, user: str, thread: str) -> None:
         path = self.root / "users" / user / "threads" / thread
