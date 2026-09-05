@@ -187,12 +187,10 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
         accepted = await context.clients.temporal.steer(event)
         return {"status": "steered" if accepted else "ignored", "message_id": event.trigger.id}
     bot_id = str(getattr(context.bot.user, "id", "") or os.getenv("WISEMAN_DISCORD_BOT_ID", ""))
+    if not bot_id:
+        raise HTTPException(503, "Discord identity is unavailable")
     replies = (*event.parent_messages, *event.thread_messages)
-    if bot_id and not admitted(
-        event.trigger,
-        bot_id,
-        reply_to_bot=any(item.id == event.trigger.reply_to and item.bot for item in replies),
-    ):
+    if not admitted(event.trigger, bot_id, reply_to_bot=any(item.id == event.trigger.reply_to and item.bot for item in replies)):
         return {"status": "ignored", "message_id": event.trigger.id}
     result = await context.clients.temporal.submit(event.model_dump(mode="json"))
     return result or {"status": "queued", "message_id": event.trigger.id}
