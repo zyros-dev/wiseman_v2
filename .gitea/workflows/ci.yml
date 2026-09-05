@@ -46,7 +46,7 @@ jobs:
           test -s /tmp/wiseman-path-coverage.jsonl
           GRAPHWALKER_PATH=/tmp/wiseman-path-coverage.jsonl GRAPHWALKER_COVERAGE=1 uv run pytest -q tests/test_graph_http.py
           for seed in 2026 2027; do
-            java -jar /tmp/graphwalker-cli-4.3.3.jar offline -g /tmp/wiseman.json -d "$seed" -n 100 > "/tmp/wiseman-path-$seed.jsonl"
+            java -jar /tmp/graphwalker-cli-4.3.3.jar offline -d "$seed" -m /tmp/wiseman.json "random(length(100))" > "/tmp/wiseman-path-$seed.jsonl"
             test -s "/tmp/wiseman-path-$seed.jsonl"
             GRAPHWALKER_PATH="/tmp/wiseman-path-$seed.jsonl" uv run pytest -q tests/test_graph_http.py
           done
