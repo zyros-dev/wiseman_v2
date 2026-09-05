@@ -32,6 +32,7 @@ from temporalio.converter import JSONPlainPayloadConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.admission import ContextConfig, context, image_tool_instruction, normalize_event
+from app.clients.client_interfaces import RunnerClient
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway, _history, mention_ids
 from app.http_api import create_app
@@ -46,7 +47,7 @@ from app.presentation import (
     split_discord_content,
     thread_name,
 )
-from app.runner import FakeRunner, HttpRunner, Runner
+from app.runner import FakeRunner, HttpRunner
 from app.temporal_runtime import (
     TRANSPORT_RETRY_POLICY,
     TemporalRuntime,
@@ -55,6 +56,7 @@ from app.temporal_runtime import (
     fail_turn,
     provision_workspace,
     publish_progress,
+    retire_session,
     run_turn,
     start_codex,
 )
@@ -119,7 +121,7 @@ def discord_message(mid: str, content: str, channel: str = "parent", thread: str
     }
 
 
-def configured_engine(phoenix: Phoenix | None = None, runner: Runner | None = None) -> Engine:
+def configured_engine(phoenix: Phoenix | None = None, runner: RunnerClient | None = None) -> Engine:
     return Engine(EngineConfig(phoenix or Phoenix(), runner or FakeRunner(), PromptHub()))
 
 
@@ -688,7 +690,7 @@ async def test_reply_to_active_delivery_is_steering_not_a_second_turn() -> None:
 
             return Delivery()
 
-    class Runner:
+    class Runner(FakeRunner):
         async def run(
             self,
             thread: str,
@@ -772,7 +774,7 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_failure_keeps_processing_reaction_and_records_error() -> None:
-    class FailingRunner:
+    class FailingRunner(FakeRunner):
         async def run(
             self,
             thread: str,
@@ -842,7 +844,7 @@ async def test_discord_delivery_failure_does_not_fail_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
-    class Runner:
+    class Runner(FakeRunner):
         attempts = 0
 
         class DisconnectionError(RuntimeError):
@@ -911,7 +913,7 @@ async def test_empty_http_timeout_remains_retryable():
 async def test_same_thread_turns_are_serialized() -> None:
     active = maximum = 0
 
-    class Runner:
+    class Runner(FakeRunner):
         async def run(
             self,
             thread: str,
@@ -987,7 +989,7 @@ async def test_followup_preserves_previous_answer(failed):
 async def test_new_turn_recovers_after_previous_failure() -> None:
     attempts = 0
 
-    class Runner:
+    class Runner(FakeRunner):
         async def run(
             self,
             thread: str,
@@ -1446,7 +1448,6 @@ def test_provider_relay_propagates_disconnect_for_temporal_retry(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) -> None:
     workflow = ThreadWorkflow()
-    await workflow.submit({"id": "queued"})
     activities: list[object] = []
     child_states: list[dict[str, object]] = []
     turns = 0
@@ -1467,6 +1468,8 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
         return {"state": {"turn": turns}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
         raise TimeoutError
 
@@ -1475,7 +1478,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
-    assert result == {"state": {"turn": 1}}
+    assert result == {"state": {"turn": 1, "closed": True}}
     assert child_states == [{"turn": 1}]
     assert activities == [
         publish_progress,
@@ -1484,6 +1487,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
         start_codex,
         publish_progress,
         TurnWorkflow.run,
+        retire_session,
     ]
 
 
@@ -1495,6 +1499,8 @@ async def test_temporal_thread_compacts_history_with_pending_signal(monkeypatch)
 
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
         del kwargs
+        if args[0] is retire_session:
+            return {"state": cast("dict", args[1])["state"]}
         if args[0] is start_codex:
             return {"state": {"codex_thread": "codex"}}
         return {"state": {"codex_thread": "codex"}}
@@ -1506,6 +1512,8 @@ async def test_temporal_thread_compacts_history_with_pending_signal(monkeypatch)
         return {"state": {"codex_thread": "codex", "turn": turns}}
 
     async def wait_for_signal(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
         if turns > 20:
             raise TimeoutError
@@ -1533,12 +1541,14 @@ async def test_temporal_thread_compacts_history_with_pending_signal(monkeypatch)
     ]
 
     async def timeout(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
         raise TimeoutError
 
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     resumed = await ThreadWorkflow().run(continuation[0])
-    assert resumed == {"state": {"codex_thread": "codex", "turn": 21}}
+    assert resumed == {"state": {"codex_thread": "codex", "turn": 21, "closed": True}}
 
 
 @pytest.mark.asyncio
@@ -1550,6 +1560,8 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
     async def execute(*args: object, **kwargs: object) -> dict[str, object]:
         del kwargs
         activities.append(args[0])
+        if args[0] is retire_session:
+            return {"state": cast("dict", args[1])["state"]}
         if args[0] is start_codex:
             return {"state": {"codex_thread": "codex-thread"}}
         return {"state": {"turn": len(activities)}}
@@ -1562,17 +1574,19 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
         return {"state": {"codex_thread": "codex-thread", "turn": turns}}
 
     async def wait_for_signal(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
-        workflow.pending.append({"id": "followup"})
         if turns > 1:
             raise TimeoutError
+        workflow.pending.append({"id": "followup"})
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "first"}})
-    assert result == {"state": {"codex_thread": "codex-thread", "turn": 2}}
+    assert result == {"state": {"codex_thread": "codex-thread", "turn": 2, "closed": True}}
     assert activities == [
         publish_progress,
         provision_workspace,
@@ -1582,6 +1596,7 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
         TurnWorkflow.run,
         publish_progress,
         TurnWorkflow.run,
+        retire_session,
     ]
 
 
@@ -1683,6 +1698,8 @@ async def test_temporal_setup_failure_uses_failure_activity(monkeypatch) -> None
         return {"error": "runner unavailable", "state": {}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
         raise TimeoutError
 
@@ -1691,7 +1708,7 @@ async def test_temporal_setup_failure_uses_failure_activity(monkeypatch) -> None
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "failed"}})
     assert result["error"] == "runner unavailable"
-    assert activities == [publish_progress, provision_workspace, fail_turn]
+    assert activities == [publish_progress, provision_workspace, fail_turn, retire_session]
 
 
 @pytest.mark.asyncio
@@ -1706,6 +1723,8 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
         return {"state": {"turn": 1}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args
         wait_timeouts.append(cast("timedelta", kwargs["timeout"]))
         raise TimeoutError
@@ -1719,15 +1738,16 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
     monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
     result = await workflow.run({"event": {"id": "old"}})
-    assert result == {"state": {"turn": 1}}
+    assert result == {"state": {"turn": 1, "closed": True}}
     assert activities == [
         publish_progress,
         provision_workspace,
         publish_progress,
         start_codex,
         publish_progress,
+        retire_session,
     ]
-    assert wait_timeouts == [timedelta(minutes=60)]
+    assert wait_timeouts == [timedelta(days=3)]
 
 
 @pytest.mark.asyncio
@@ -1741,6 +1761,8 @@ async def test_temporal_workflow_replays_legacy_activity_history(monkeypatch) ->
         return {"state": {"turn": 1}}
 
     async def timeout(*args: object, **kwargs: object) -> None:
+        if cast("Callable[[], bool]", args[0])():
+            return
         del args, kwargs
         raise TimeoutError
 
@@ -2063,11 +2085,12 @@ def test_runner_requires_bearer_and_materializes_shared_files(tmp_path, monkeypa
     assert (tmp_path / "users/u/shared/memories.md").exists()
 
 
-def test_cleanup_removes_old_thread_but_keeps_shared(tmp_path) -> None:
+def test_release_removes_thread_but_keeps_shared(tmp_path) -> None:
     workspace = Workspace(str(tmp_path))
     path = workspace.thread("user", "old")
     os.utime(path, (0, 0))
-    assert workspace.cleanup(1) == 1
+    workspace.release("user", "old")
+    assert not path.exists()
     assert (tmp_path / "users/user/shared").exists()
 
 
@@ -2076,7 +2099,7 @@ def test_managed_account_name_is_stable_without_touching_host_accounts(tmp_path,
     workspace = Workspace(str(tmp_path))
     commands: list[list[str]] = []
     monkeypatch.setattr("runner.api.pwd.getpwnam", lambda name: (_ for _ in ()).throw(KeyError))
-    monkeypatch.setattr(workspace, "_admin", commands.append)
+    monkeypatch.setattr("runner.api.subprocess.run", lambda command, **_kwargs: commands.append(command))
     monkeypatch.setattr("runner.api.shutil.chown", lambda *args, **kwargs: None)
     workspace.thread("discord-user", "thread")
     assert commands[0][0].endswith("groupadd")

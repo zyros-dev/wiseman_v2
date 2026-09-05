@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Nick van der Merwe
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,16 +58,16 @@ class Messageable(Protocol):
     async def send(self, content: str = "") -> object: ...
 
 
-@dataclass
-class State:
+class State(BaseModel):
+    owner_id: str = ""
     codex_thread: str | None = None
-    seen: set[str] = field(default_factory=set)
-    processed: set[str] = field(default_factory=set)
+    seen: set[str] = Field(default_factory=set)
+    processed: set[str] = Field(default_factory=set)
     turn: int = 0
     closed: bool = False
     delivery_id: str | None = None
     banner_sent: bool = False
-    progress: list[str] = field(default_factory=list)
+    progress: list[str] = Field(default_factory=list)
 
 
 @dataclass

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import httpx
@@ -16,30 +16,22 @@ if TYPE_CHECKING:
     from app.types import JsonObject
 
 
-class Runner(Protocol):
-    async def run(
-        self,
-        thread: str,
-        prompt: str,
-        user: str,
-        workspace: str = "",
-        progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str, str, dict[str, object]]: ...
-
-
 TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
 MESSAGE_ID: ContextVar[str] = ContextVar("wiseman_message_id", default="")
-
-
-class LifecycleRunner(Runner, Protocol):
-    async def acquire(self, user: str, workspace: str) -> None: ...
-
-    async def start(self, thread: str, user: str, workspace: str = "") -> str: ...
 
 
 class RunnerError(RuntimeError):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"runner returned HTTP {status}: {detail}")
+
+
+def _payload(thread: str, user: str, workspace: str, prompt: str = "") -> dict[str, object]:
+    return {
+        "thread_id": workspace or thread or f"thread-{user}",
+        "codex_thread_id": thread or None,
+        "user_id": user,
+        "input": prompt,
+    }
 
 
 class HttpRunner:
@@ -60,16 +52,11 @@ class HttpRunner:
     async def acquire(self, user: str, workspace: str) -> None:
         await self._post("/acquire", {"thread_id": workspace, "user_id": user, "input": ""})
 
+    async def release(self, user: str, workspace: str) -> None:
+        await self._post("/release", {"thread_id": workspace, "user_id": user, "input": ""})
+
     async def start(self, thread: str, user: str, workspace: str = "") -> str:
-        data = await self._post(
-            "/start",
-            {
-                "thread_id": workspace or thread or f"thread-{user}",
-                "codex_thread_id": thread or None,
-                "user_id": user,
-                "input": "",
-            },
-        )
+        data = await self._post("/start", _payload(thread, user, workspace))
         return str(data.get("thread_id", thread))
 
     async def run(
@@ -80,14 +67,8 @@ class HttpRunner:
         workspace: str = "",
         progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]:
-        payload: dict[str, object] = {
-            "thread_id": workspace or thread or f"thread-{user}",
-            "codex_thread_id": thread or None,
-            "user_id": user,
-            "input": prompt,
-            "turn_number": TURN_NUMBER.get(),
-            "message_id": MESSAGE_ID.get() or uuid4().hex,
-        }
+        payload = _payload(thread, user, workspace, prompt)
+        payload.update(turn_number=TURN_NUMBER.get(), message_id=MESSAGE_ID.get() or uuid4().hex)
         value = await self._post("/turn", payload)
         cursor = 0
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
@@ -114,22 +95,21 @@ class HttpRunner:
         return str(result.get("thread_id", thread)), str(result.get("output", "")), billing
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        data = await self._post(
-            "/steer",
-            {
-                "thread_id": workspace or thread or f"thread-{user}",
-                "codex_thread_id": thread or None,
-                "user_id": user,
-                "input": prompt,
-            },
-        )
+        data = await self._post("/steer", _payload(thread, user, workspace, prompt))
         return bool(data.get("steered", False))
 
 
 class FakeRunner:
+    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
+        del thread, prompt, user, workspace
+        return False
+
     async def acquire(self, user: str, workspace: str) -> None: ...
 
-    async def start(self, thread: str, user: str, _workspace: str = "") -> str:
+    async def release(self, user: str, workspace: str) -> None: ...
+
+    async def start(self, thread: str, user: str, workspace: str = "") -> str:
+        del workspace
         return thread or f"codex-{user}"
 
     async def run(

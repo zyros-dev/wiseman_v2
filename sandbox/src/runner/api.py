@@ -12,6 +12,7 @@ import subprocess
 import time
 from contextlib import asynccontextmanager, suppress
 from functools import partial
+from itertools import chain
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Annotated
@@ -52,8 +53,7 @@ class Turn(BaseModel):
 
 
 class WorkspaceError(ValueError):
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
+    pass
 
 
 class Workspace:
@@ -65,10 +65,6 @@ class Workspace:
     def username(user: str) -> str:
         return f"wsm_{hashlib.sha256(user.encode()).hexdigest()[:20]}"
 
-    @staticmethod
-    def _admin(args: list[str]) -> None:
-        subprocess.run(args, check=True)
-
     def _ensure_account(self, user: str) -> str:
         name = self.username(user)
         if os.getenv("WISEMAN_MANAGE_ACCOUNTS") != "1":
@@ -76,8 +72,8 @@ class Workspace:
         try:
             pwd.getpwnam(name)
         except KeyError:
-            self._admin(["/usr/sbin/groupadd", "--system", name])
-            self._admin(
+            subprocess.run(["/usr/sbin/groupadd", "--system", name], check=True)
+            subprocess.run(
                 [
                     "/usr/sbin/useradd",
                     "--system",
@@ -90,30 +86,16 @@ class Workspace:
                     "--shell",
                     "/bin/bash",
                     name,
-                ]
+                ],
+                check=True,
             )
         return name
 
     @staticmethod
     def _own_tree(path: Path, user: str) -> None:
-        # Existing Codex SQLite files may have been created by a stale account
-        # after an interrupted provisioning race. Repair the complete local
-        # tree, but never follow symlinks into another workspace.
-        if not os.path.lexists(path):
-            return
-        try:
-            shutil.chown(path, user=user, group=user, follow_symlinks=False)
-            for root, directories, files in os.walk(path, followlinks=False):
-                children = [Path(root) / name for name in (*directories, *files)]
-                for child in children:
-                    try:
-                        shutil.chown(child, user=user, group=user, follow_symlinks=False)
-                    except FileNotFoundError:
-                        # Codex cleanup can remove a file between walk and chown.
-                        continue
-        except FileNotFoundError:
-            # A top-level entry may still be removed concurrently.
-            return
+        for entry in chain((path,), path.rglob("*")):
+            with suppress(FileNotFoundError):
+                shutil.chown(entry, user=user, group=user, follow_symlinks=False)
 
     def thread(self, user: str, thread: str) -> Path:
         with self.lock:
@@ -164,10 +146,8 @@ class Workspace:
                 'wire_api = "responses"\n',
                 encoding="utf-8",
             )
-        (path / "AGENTS.md").write_text(
-            "Read shared/AGENTS.md and shared/memories.md before acting.\n",
-            encoding="utf-8",
-        )
+        if not (path / "AGENTS.md").exists():
+            (path / "AGENTS.md").write_text("Read shared/AGENTS.md and shared/memories.md before acting.\n")
         (path / "AGENTS.md").chmod(0o600)
         if account:
             try:
@@ -178,19 +158,14 @@ class Workspace:
             self._own_tree(path, account)
         return path
 
-    def cleanup(self, idle_seconds: int = 259200) -> int:
-        removed = 0
-        users = self.root / "users"
-        for path in users.glob("*/threads/*"):
-            if path.is_dir() and time.time() - path.stat().st_mtime >= idle_seconds:
-                for child in sorted(path.rglob("*"), reverse=True):
-                    if child.is_symlink() or child.is_file():
-                        child.unlink()
-                    elif child.is_dir():
-                        child.rmdir()
-                path.rmdir()
-                removed += 1
-        return removed
+    def release(self, user: str, thread: str) -> None:
+        path = self.root / "users" / user / "threads" / thread
+        if any(not value or Path(value).name != value or value in {".", ".."} for value in (user, thread)):
+            raise WorkspaceError("workspace path escapes owner")
+        if path.resolve() != path:
+            raise WorkspaceError("workspace path escapes owner")
+        if path.exists():
+            shutil.rmtree(path)
 
 
 def _auth(got: str | None, expected: str) -> None:
@@ -207,6 +182,8 @@ class CodexRunner:
         self.progress_steps: dict[str, list[str]] = {}
         self.active_turns: dict[str, object] = {}
         self.turn_counts: dict[str, int] = {}
+        self.last_used: dict[str, float] = {}
+        self.cache_limit = max(1, int(os.getenv("WISEMAN_MAX_IDLE_CLIENTS", "64")))
         limit = max(1, int(os.getenv("WISEMAN_MAX_CONCURRENT_TURNS", "4")))
         self.capacity = asyncio.Semaphore(limit)
 
@@ -216,29 +193,27 @@ class CodexRunner:
             return await self._start_locked(turn, path, account)
 
     async def _start_locked(self, turn: Turn, path: Path, account: str) -> dict[str, object]:
+        self.last_used[turn.thread_id] = time.monotonic()
         existing = self.threads.get(turn.thread_id)
         if existing is not None and (not turn.codex_thread_id or getattr(existing, "id", None) == turn.codex_thread_id):
             return {"thread_id": getattr(existing, "id", "")}
         client = self._client(turn, path, account)
         if turn.codex_thread_id:
-            thread = await client.thread_resume(
-                turn.codex_thread_id,
-                approval_mode=ApprovalMode.deny_all,
-                sandbox=Sandbox.full_access,
-                cwd=str(path),
-                model=os.getenv("WISEMAN_MODEL") or None,
-                model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
-            )
+            start = partial(client.thread_resume, turn.codex_thread_id)
         else:
-            thread = await client.thread_start(
-                approval_mode=ApprovalMode.deny_all,
-                sandbox=Sandbox.full_access,
-                cwd=str(path),
+            start = partial(
+                client.thread_start,
                 developer_instructions=(PROMPT_ROOT / "sandbox-developer-instructions.j2").read_text(encoding="utf-8"),
-                model=os.getenv("WISEMAN_MODEL") or None,
-                model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
             )
+        thread = await start(
+            approval_mode=ApprovalMode.deny_all,
+            sandbox=Sandbox.full_access,
+            cwd=str(path),
+            model=os.getenv("WISEMAN_MODEL") or None,
+            model_provider="wiseman-relay" if os.getenv("WISEMAN_RELAY_URL") else None,
+        )
         self.threads[turn.thread_id] = thread
+        await self.expire()
         return {"thread_id": thread.id}
 
     def _client(self, turn: Turn, path: Path, account: str) -> AsyncCodex:
@@ -301,12 +276,12 @@ class CodexRunner:
                 elif isinstance(payload, TurnCompletedNotification):
                     completed = payload
         finally:
+            self.last_used[turn.thread_id] = time.monotonic()
             if completed is None:
                 with suppress(Exception):
                     async with asyncio.timeout(5):
                         await active_turn.interrupt()
-                await self.codex.pop(turn.thread_id).close()
-                self.threads.pop(turn.thread_id, None)
+                await self.close(turn.thread_id)
             self.active_turns.pop(turn.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")
@@ -319,6 +294,23 @@ class CodexRunner:
             "model": os.getenv("WISEMAN_MODEL", "codex"),
             "usage": usage.model_dump(mode="json") if usage is not None else None,
         }
+
+    async def expire(self, now: float | None = None) -> None:
+        cutoff = (time.monotonic() if now is None else now) - 900
+        for key, used in sorted(self.last_used.items(), key=lambda item: item[1]):
+            lock = self.locks.setdefault(key, asyncio.Lock())
+            fresh = used > cutoff and len(self.codex) <= self.cache_limit
+            if fresh or lock.locked() or key in self.active_turns:
+                continue
+            async with lock:
+                await self.close(key)
+
+    async def close(self, key: str) -> None:
+        client = self.codex.pop(key, None)
+        for data in (self.threads, self.last_used, self.progress, self.progress_steps, self.turn_counts):
+            data.pop(key, None)
+        if client is not None:
+            await client.close()
 
     async def steer(self, turn: Turn, path: Path, account: str = "") -> bool:
         del path, account
@@ -375,7 +367,7 @@ def create_app() -> FastAPI:
         title="wiseman-sandbox",
         docs_url=None,
         redoc_url=None,
-        lifespan=partial(_lifespan, workspaces, jobs, codex),
+        lifespan=partial(_lifespan, jobs, codex),
     )
 
     @app.get("/healthz")
@@ -386,16 +378,23 @@ def create_app() -> FastAPI:
     async def metrics() -> PlainTextResponse:
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/cleanup")
-    async def cleanup(authorization: Annotated[str | None, Header()] = None) -> dict[str, int]:
-        _auth(authorization, secret)
-        return {"removed": workspaces.cleanup()}
-
     @app.post("/acquire")
     async def acquire(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
         path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         return {"thread_id": turn.thread_id, "path": str(path), "shared": str(path / "shared")}
+
+    @app.post("/release")
+    async def release(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
+        _auth(authorization, secret)
+        lock = codex.locks.setdefault(turn.thread_id, asyncio.Lock())
+        busy = any(jobs.get(key).workspace == f"{turn.user_id}/{turn.thread_id}" for key in jobs.tasks)
+        if lock.locked() or busy:
+            raise HTTPException(409, "workspace is active")
+        async with lock:
+            await codex.close(turn.thread_id)
+            await asyncio.to_thread(workspaces.release, turn.user_id, turn.thread_id)
+        return {"released": True}
 
     @app.post("/start")
     async def start(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
@@ -451,11 +450,11 @@ def create_app() -> FastAPI:
 
 
 @asynccontextmanager
-async def _lifespan(workspaces: Workspace, jobs: Jobs, codex: CodexRunner, _app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(jobs: Jobs, codex: CodexRunner, _app: FastAPI) -> AsyncIterator[None]:
     async def sweep() -> None:
         while True:
-            await asyncio.to_thread(workspaces.cleanup)
-            await asyncio.sleep(3600)
+            await codex.expire()
+            await asyncio.sleep(60)
 
     cleaner = asyncio.create_task(sweep())
     try:

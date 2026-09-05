@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from temporalio.client import Client
 
     from app.engine import Engine
-    from app.runner import LifecycleRunner
     from app.types import JsonObject
 
 
@@ -62,7 +61,8 @@ async def run_turn(payload: dict) -> dict:
 async def provision_workspace(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    await cast("LifecycleRunner", _engine().config.runner).acquire(event.trigger.author_id, workspace)
+    owner = str(_object_map(payload.get("state")).get("owner_id") or event.trigger.author_id)
+    await _engine().config.runner.acquire(owner, workspace)
     return {"workspace": workspace}
 
 
@@ -71,8 +71,8 @@ async def start_codex(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     state = _object_map(payload.get("state"))
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await cast("LifecycleRunner", _engine().config.runner).start(
-        str(state.get("codex_thread") or ""), event.trigger.author_id, workspace
+    thread = await _engine().config.runner.start(
+        str(state.get("codex_thread") or ""), str(state.get("owner_id") or event.trigger.author_id), workspace
     )
     state["codex_thread"] = thread
     return {"state": state, "workspace": workspace, "codex_thread": thread}
@@ -91,6 +91,16 @@ async def fail_turn(payload: dict) -> dict:
     event = Event.model_validate(payload["event"])
     error = str(payload.get("error", "unknown failure"))
     return dict(await _engine().fail(event, error, _object_map(payload.get("state"))))
+
+
+@activity.defn(name="wiseman.retire")
+async def retire_session(payload: dict) -> dict:
+    event = Event.model_validate(payload["event"])
+    state = _object_map(payload["state"])
+    await _engine().config.runner.release(
+        str(state.get("owner_id") or event.trigger.author_id), event.trigger.thread_id or event.trigger.channel_id
+    )
+    return {"state": {**state, "closed": True}}
 
 
 async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, duration: timedelta) -> dict:
@@ -115,10 +125,20 @@ class ThreadWorkflow:
     def __init__(self) -> None:
         self.pending: list[dict] = []
         self.state: JsonObject = {}
+        self.active_message = ""
 
     @workflow.signal
     async def submit(self, event: dict) -> None:
+        message_id = _object_map(event.get("trigger")).get("id")
+        known = [self.active_message, *_sequence(self.state.get("processed"))]
+        known.extend(_object_map(item.get("trigger")).get("id") for item in self.pending)
+        if message_id and message_id in known:
+            return
         self.pending.append(dict(event))
+
+    @workflow.query
+    def session(self) -> dict:
+        return dict(self.state)
 
     @workflow.run
     async def run(self, first: dict) -> dict:
@@ -129,11 +149,28 @@ class ThreadWorkflow:
         workflow.patched("split-startup-activities")
         child_workflow = workflow.patched("child-turn-workflow")
         compact_history = workflow.patched("thread-history-compaction")
+        durable_session = workflow.patched("durable-session-lifetime")
+        self.result = {"state": self.state}
+        handled = 0
         while True:
+            try:
+                await workflow.wait_condition(
+                    lambda: bool(self.pending),
+                    timeout=timedelta(days=3) if durable_session else timedelta(minutes=THREAD_AUTO_ARCHIVE_MINUTES),
+                )
+            except TimeoutError:
+                if durable_session:
+                    await self._retire(event)
+                return self.result
+            turn = self.state.get("turn")
+            if compact_history and handled and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
+                workflow.continue_as_new({"state": self.state, "pending": self.pending})
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
+            self.active_message = message_id
+            self.state.setdefault("owner_id", _object_map(event.get("trigger")).get("author_id", ""))
             try:
                 if not self.state.get("codex_thread"):
                     self.state = await _setup(event, self.state)
@@ -158,16 +195,15 @@ class ThreadWorkflow:
                     timedelta(seconds=30),
                 )
             self.state = _object_map(self.result.get("state", self.state))
-            try:
-                await workflow.wait_condition(
-                    lambda: bool(self.pending),
-                    timeout=timedelta(minutes=THREAD_AUTO_ARCHIVE_MINUTES),
-                )
-            except TimeoutError:
-                return self.result
-            turn = self.state.get("turn")
-            if compact_history and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
-                workflow.continue_as_new({"state": self.state, "pending": self.pending})
+            self.active_message = ""
+            handled += 1
+
+    async def _retire(self, event: dict) -> None:
+        await _activity(retire_session, {"event": event, "state": self.state}, timedelta(minutes=5))
+        self.state["closed"] = True
+        self.result["state"] = self.state
+        if self.pending:
+            workflow.continue_as_new({"state": {"owner_id": self.state.get("owner_id", "")}, "pending": self.pending})
 
 
 async def _setup(event: dict, state: JsonObject) -> JsonObject:
@@ -201,7 +237,7 @@ class TemporalRuntime:
             cast("Client", self.client),
             task_queue=self.queue,
             workflows=[ThreadWorkflow, TurnWorkflow],
-            activities=[provision_workspace, start_codex, publish_progress, fail_turn, run_turn],
+            activities=[provision_workspace, start_codex, publish_progress, fail_turn, run_turn, retire_session],
         ):
             await asyncio.Event().wait()
 

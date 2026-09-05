@@ -6,7 +6,7 @@ type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValu
 type JsonObject = dict[str, JsonValue]
 
 
-type StateData = dict[str, JsonValue | list[str]]
+type StateData = JsonObject
 
 
 class EngineResult(TypedDict, total=False):
