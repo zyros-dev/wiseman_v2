@@ -17,6 +17,8 @@ def _activity(name: str):
         if name == "codex_start":
             state["codex_thread"] = state.get("codex_thread") or "sdk-session"
             result["codex_thread"] = state["codex_thread"]
+        elif name == "infer" and result["event"]["trigger"]["id"] == "q2":
+            raise RuntimeError("inference failed")
         elif name == "infer":
             result["output"] = f"answer:{result['event']['trigger']['id']}"
         elif name == "retire":
@@ -47,7 +49,7 @@ async def test_temporal_graph_keeps_session_order_and_retires() -> None:
         await handle.signal(ThreadWorkflow.submit, {"trigger": {**first, "id": "q2", "author_id": "bob"}})
         await _wait_turn(handle, 2)
         state = await handle.query(ThreadWorkflow.session)
-        assert state["owner_id"] == "alice"
+        assert (state["owner_id"], state["turn"]) == ("alice", 2)
         assert state["codex_thread"] == "sdk-session"
         assert set(state["processed"]) == {"q1", "q2"}
         await env.sleep(timedelta(days=3))

@@ -60,14 +60,6 @@ async def start_codex(payload: dict) -> dict:
     return {"state": state, "workspace": workspace, "codex_thread": thread}
 
 
-@activity.defn(name="wiseman.progress")
-async def publish_progress(payload: dict) -> dict:
-    event = _event(payload)
-    phase = str(payload.get("phase", "⏳ Working..."))
-    state = await _engine().preflight(event, phase, _state(payload))
-    return {"phase": phase, "state": state}
-
-
 @activity.defn(name="wiseman.failure")
 async def fail_turn(payload: dict) -> dict:
     event = _event(payload)
@@ -197,7 +189,7 @@ class TurnWorkflow:
         except Exception:
             workflow.logger.exception("Terminal telemetry exhausted retries")
         self.work.state.processed.add(self.work.event.trigger.id)
-        self.work.state.turn += int(not self.work.error)
+        self.work.state.turn += 1
         self.work.state.delivery_id = None
         self.work.state.progress = []
         return {"state": self.work.state.model_dump(mode="json"), "output": self.work.output, "error": self.work.error}
@@ -322,7 +314,6 @@ class TemporalRuntime:
             activities=[
                 provision_workspace,
                 start_codex,
-                publish_progress,
                 fail_turn,
                 retire_session,
                 *TurnActivities(_engine(), cast("Client", self.client)).registered(),

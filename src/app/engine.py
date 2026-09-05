@@ -20,7 +20,7 @@ from app.presentation import (
 from app.runner import MESSAGE_ID, TURN_NUMBER
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
     from app.clients.client_interfaces import DiscordClient, PhoenixClient, PromptClient, RunnerClient
     from app.types import JsonObject, StateData
@@ -174,14 +174,8 @@ class Engine:
         await self.reconcile(work)
         await self.config.phoenix.record(work.trace, "reaction", operations=[f"add:{work.terminal_emoji}", f"remove:{work.processing_emoji}"])
         work.state.processed.add(work.event.trigger.id)
-        work.state.turn += int(not work.error)
+        work.state.turn += 1
         return {"state": _state_data(work.state, finished=True), **({"error": work.error} if work.error else {"output": work.output})}
-
-    async def preflight(self, event: Event, phase: str, state_data: Mapping[str, object] | None = None) -> StateData:
-        work = TurnWork(event=event, state=State.model_validate(state_data or {}))
-        work.state.progress = [*work.state.progress, phase]
-        await self.render(work)
-        return _state_data(work.state)
 
     async def fail(self, event: Event, error: str, state_data: JsonObject | None = None) -> dict[str, object]:
         return await self.finish(
