@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from typing import TYPE_CHECKING, TypeVar, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from hypothesis import given, settings
@@ -19,8 +20,9 @@ from app.clients.mock_clients import (
     MockState,
 )
 from app.engine import Engine, EngineConfig
-from app.models import ActiveTurn, Event, Message
+from app.models import Event, Message, State, TurnWork
 from app.phoenix import PromptHub
+from app.temporal_runtime import TurnWorkflow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -162,11 +164,10 @@ class DiscordClientMachine(RuleBasedStateMachine):
         assert all(call.client == "discord" for call in self.state.calls)
 
     @invariant()
-    def idle_threads_are_closed(self) -> None:
+    def idle_threads_are_archived(self) -> None:
         for thread_id, created in self.state.thread_activity.items():
             if self.state.fake_time - created >= 3_600:
                 assert thread_id in self.state.archived
-                assert thread_id in self.state.locked
 
 
 TestDiscordClientMachine = DiscordClientMachine.TestCase
@@ -283,7 +284,8 @@ class _DeliveryChannel:
     def __init__(self, client: MockDiscord, channel_id: str) -> None:
         self.client, self.channel_id = client, channel_id
 
-    async def send(self, content: str = "", *, embed: object | None = None) -> _LiveMessage:
+    async def send(self, content: str = "", *, embed: object | None = None, nonce: str = "") -> _LiveMessage:
+        del nonce
         message_id = await self.client.send(self.channel_id, content, embed=cast("JsonObject | None", embed))
         return _LiveMessage(self.client, message_id)
 
@@ -419,12 +421,20 @@ class EngineLifecycleMachine(RuleBasedStateMachine):
 
     @rule()
     def steers_only_the_active_delivery(self) -> None:
-        before = sum(call.operation == "steer" for call in self.state.calls)
-        self.engine.active_turns["thread"] = ActiveTurn("active", "delivery")
-        assert run(self.engine.steer_if_active("thread", "delivery", "redirect", "user"))
-        assert not run(self.engine.steer_if_active("thread", "other", "queue", "user"))
-        assert not run(self.engine.steer_if_active("other", "delivery", "queue", "user"))
-        assert sum(call.operation == "steer" for call in self.state.calls) == before + 1
+        instance = TurnWorkflow()
+        instance.work = TurnWork(event=self._event("startup", "active"), state=State(delivery_id="delivery"))
+        instance.inferencing = True
+        reply = self._event("followup", "steering")
+        reply.trigger.reply_to = "delivery"
+        steer = cast("Callable[[dict], Awaitable[bool]]", instance.steer)
+        with patch(
+            "app.temporal_runtime.workflow.execute_activity", new=AsyncMock(return_value={"accepted": True})
+        ) as node:
+            assert run(steer(reply.model_dump(mode="json")))
+            assert run(steer(reply.model_dump(mode="json")))
+            reply.trigger.reply_to = "unrelated"
+            assert not run(steer(reply.model_dump(mode="json")))
+        assert node.await_count == 1
 
     @rule()
     def restarts_from_durable_state(self) -> None:

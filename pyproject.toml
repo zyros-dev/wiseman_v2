@@ -87,10 +87,6 @@ source = ["app"]
 [tool.coverage.report]
 fail_under = 80
 show_missing = true
-omit = [
-  # Network/process adapters are covered by contract and container tests.
-  "src/app/temporal_runtime.py",
-]
 
 [tool.vulture]
 min_confidence = 100

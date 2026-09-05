@@ -83,7 +83,7 @@ class Phoenix:
             span.set_attribute("openinference.session.id", trace)
             for key, value in item.items():
                 span.set_attribute(f"wiseman.{key}", json_text(value) if not isinstance(value, str) else value)
-        terminal = node in {"failure", "provider", "vision_tool"} or (
+        terminal = node in {"completed", "failure", "provider", "vision_tool"} or (
             node == "reaction" and "✅" in json_text(data.get("operations", []))
         )
         if terminal:

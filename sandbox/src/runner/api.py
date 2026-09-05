@@ -56,6 +56,10 @@ class WorkspaceError(ValueError):
     pass
 
 
+class SteeringTurn(Turn):
+    message_id: str = Field(min_length=1)
+
+
 class Workspace:
     def __init__(self, root: str = "/workspaces") -> None:
         self.root = Path(root).resolve()
@@ -430,11 +434,16 @@ def create_app() -> FastAPI:
         return {**receipt.model_dump(), "steps": codex.progress_steps.get(receipt.workspace.split("/", 1)[1], [])}
 
     @app.post("/steer")
-    async def steer(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
+    async def steer(turn: SteeringTurn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
         _auth(authorization, secret)
-        path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
-        try:
+
+        async def execute() -> dict[str, object]:
+            path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
             return {"steered": await codex.steer(turn, path, workspaces.username(turn.user_id))}
+
+        try:
+            result = await jobs.execute_once(f"steer:{turn.message_id}", f"{turn.user_id}/{turn.thread_id}", execute)
+            return {"steered": bool(result.get("steered"))}
         except Exception as exc:
             raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 

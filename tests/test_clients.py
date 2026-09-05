@@ -43,7 +43,7 @@ async def test_mock_container_records_complete_discord_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mock_discord_models_history_files_and_one_hour_closure() -> None:
+async def test_mock_discord_models_history_files_and_native_one_hour_archive() -> None:
     container = mock_container()
     discord = cast("MockDiscord", container.discord)
     thread = await discord.create_thread("channel", "Gurt 1", 60)
@@ -54,6 +54,8 @@ async def test_mock_discord_models_history_files_and_one_hour_closure() -> None:
     discord.advance(3_600)
     state = discord.state  # type: ignore[attr-defined]
     assert thread in state.archived
+    assert thread not in state.locked
+    await discord.lock_thread(thread)
     assert thread in state.locked
 
 

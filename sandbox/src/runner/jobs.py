@@ -64,6 +64,16 @@ class Jobs:
             self._save(key, receipt)
             self.tasks.pop(key, None)
 
+    async def execute_once(
+        self, key: str, workspace: str, work: Callable[[], Awaitable[dict[str, object]]]
+    ) -> dict[str, object]:
+        receipt = self.submit(key, workspace, work)
+        if task := self.tasks.get(key):
+            await asyncio.shield(task)
+        if receipt.status != "completed":
+            raise RuntimeError(receipt.error)
+        return receipt.result
+
     async def close(self) -> None:
         tasks = tuple(self.tasks.values())
         for task in tasks:

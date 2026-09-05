@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self, cast
+from unittest.mock import AsyncMock
 
 import discord
 import httpx
@@ -174,7 +175,7 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     surrounding = cast("list[dict[str, object]]", normalized["surrounding"])
     assert ancestors[0]["id"] == "1"
     assert "1" not in {item["id"] for item in surrounding}
-    assert engine.reactions["1"] == ["✅"]
+    assert first.json()["reactions"] == ["✅"]
     duplicate = client.post("/v1/discord/events", headers=headers, json=startup)
     assert duplicate.json()["status"] == "duplicate"
     assert duplicate.json()["state"]["turn"] == 2
@@ -356,13 +357,6 @@ async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
     phoenix = Phoenix()
     await phoenix.record("vision-tool", "vision_tool", **generic)
     assert not phoenix.roots
-
-
-def test_reaction_state_is_idempotent() -> None:
-    engine = configured_engine()
-    assert engine._react("message", "👀")
-    assert not engine._react("message", "👀")
-    assert engine.reactions["message"] == ["👀"]
 
 
 def test_discord_content_splits_long_answers_at_readable_boundaries() -> None:
@@ -634,6 +628,7 @@ async def test_http_runner_steers_active_turn(monkeypatch) -> None:
             assert url.endswith("/steer")
             body = kwargs["json"]
             assert isinstance(body, dict)
+            assert body.pop("message_id")
             assert body == {
                 "thread_id": "workspace",
                 "codex_thread_id": "codex",
@@ -674,55 +669,10 @@ def test_progress_message_names_only_actual_turn_starts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reply_to_active_delivery_is_steering_not_a_second_turn() -> None:
-    gate = asyncio.Event()
-    steers: list[str] = []
-
-    class Channel:
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            del kwargs
-
-            class Delivery:
-                id = "delivery"
-
-                async def edit(self, *, content: str) -> None:
-                    del content
-
-            return Delivery()
-
-    class Runner(FakeRunner):
-        async def run(
-            self,
-            thread: str,
-            prompt: str,
-            user: str,
-            workspace: str = "",
-            progress: Callable[[str], Awaitable[None]] | None = None,
-        ) -> tuple[str, str, dict[str, object]]:
-            del thread, prompt, user, workspace, progress
-            await gate.wait()
-            return "codex", "answer", {}
-
-        async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-            del thread, user, workspace
-            steers.append(prompt)
-            return True
-
-    engine = configured_engine(runner=Runner())
-    task = asyncio.create_task(
-        engine.handle(
-            normalize_event(discord_message("trigger", "hello", thread="t")),
-            delivery_channel=Channel(),
-        )
-    )
-    for _ in range(10):
-        if "t" in engine.active_turns:
-            break
-        await asyncio.sleep(0)
-    assert await engine.steer_if_active("t", "delivery", "change direction", "user")
-    gate.set()
-    await task
-    assert steers == ["change direction"]
+async def test_steering_rejects_an_inactive_workflow() -> None:
+    instance = TurnWorkflow()
+    steer = cast("Callable[[dict], Awaitable[bool]]", instance.steer)
+    assert not await steer({"trigger": message("reply", "change direction", thread="t")})
 
 
 @pytest.mark.asyncio
@@ -794,7 +744,7 @@ async def test_failure_keeps_processing_reaction_and_records_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_discord_reaction_failures_do_not_abort_terminal_delivery() -> None:
+async def test_discord_reaction_failures_are_visible_to_activity_retry() -> None:
     class Delivery:
         async def edit(self, *, content: str) -> None:
             del content
@@ -817,29 +767,26 @@ async def test_discord_reaction_failures_do_not_abort_terminal_delivery() -> Non
 
     engine = configured_engine()
     engine.reaction_user = object()
-    result = await engine.handle(
-        normalize_event(discord_message("reaction-failure", "hello", thread="t")),
-        cast("discord.Message", Live()),
-    )
-    assert result["output"].startswith("Codex received: ")
-    assert result["reactions"] == ["✅"]
+    with pytest.raises(discord.DiscordException):
+        await engine.handle(
+            normalize_event(discord_message("reaction-failure", "hello", thread="t")),
+            cast("discord.Message", Live()),
+        )
 
 
 @pytest.mark.asyncio
-async def test_discord_delivery_failure_does_not_fail_turn() -> None:
+async def test_discord_delivery_failure_does_not_report_success() -> None:
     class Channel:
         async def send(self, content: str = "", **kwargs: object) -> object:
             del content, kwargs
             raise discord.DiscordException
 
     engine = configured_engine()
-    result = await engine.handle(
-        normalize_event(discord_message("delivery-failure", "hello", thread="t")),
-        delivery_channel=Channel(),
-    )
-    assert result["output"].startswith("Codex received: ")
-    assert result["reactions"] == ["✅"]
-    assert any(item["node"] == "delivery" for item in engine.config.phoenix.records)
+    with pytest.raises(discord.DiscordException):
+        await engine.handle(
+            normalize_event(discord_message("delivery-failure", "hello", thread="t")),
+            delivery_channel=Channel(),
+        )
 
 
 @pytest.mark.asyncio
@@ -875,9 +822,13 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
         def __init__(self) -> None:
             self.embeds = 0
             self.progress = 0
+            self.nonces = set()
 
         async def send(self, content: str = "", **kwargs: object) -> Delivery:
             del content
+            if kwargs["nonce"] in self.nonces:
+                return Delivery()
+            self.nonces.add(kwargs["nonce"])
             if kwargs.get("embed") is not None:
                 self.embeds += 1
             else:
@@ -1312,40 +1263,25 @@ def test_gateway_requests_only_enabled_discord_intents() -> None:
     assert not bot.intents.presences
 
 
-@pytest.mark.asyncio
-async def test_gateway_persists_managed_threads_and_expires_only_idle_threads(tmp_path, monkeypatch) -> None:
+def test_gateway_uses_native_archive_without_a_local_expiry_clock(tmp_path) -> None:
     activity_file = tmp_path / "activity.json"
+    activity_file.write_text('{"old-thread": 0}')
     bot = Gateway(configured_engine(), {1}, activity_file)
-    bot._touch_thread("123", timestamp=0)
-    restored = Gateway(configured_engine(), {1}, activity_file)
-    assert restored.thread_activity == {"123": 0.0}
-    restored.thread_activity["123"] = 7_200.0
-
-    restored.thread_activity["456"] = 1
-
-    class Thread:
-        async def edit(self, **kwargs: object) -> None:
-            assert kwargs == {"archived": True, "locked": True}
-
-    async def fetch_channel(thread_id: int) -> Thread:
-        assert thread_id == 456
-        return Thread()
-
-    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
-    monkeypatch.setattr(restored, "fetch_channel", fetch_channel)
-    await restored._expire_once(now=7_201)
-    assert restored.thread_activity == {"123": 7_200.0}
+    assert not hasattr(bot, "thread_activity")
+    assert not hasattr(bot, "expiry_task")
 
 
 @pytest.mark.asyncio
 async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> None:
     bot = Gateway(configured_engine(), {1})
     bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=42))
+    edited = []
 
     class Thread:
         id, owner_id, last_message_id, name, auto_archive_duration = 9, 42, 9, "rust", 1440
 
         async def edit(self, **kwargs: object) -> None:
+            edited.append(self.owner_id)
             assert kwargs == {"auto_archive_duration": 60}
 
     class OtherThread(Thread):
@@ -1357,12 +1293,7 @@ async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> Non
 
     cast("dict[int, object]", bot._connection._guilds)[1] = Guild()
     await bot._discover_managed_threads()
-    assert set(bot.thread_activity) == {"9"}
-
-
-def test_gateway_does_not_track_unmanaged_threads() -> None:
-    bot = Gateway(configured_engine(), {1})
-    assert bot.thread_activity == {}
+    assert edited == [42]
 
 
 def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
@@ -1476,7 +1407,7 @@ async def test_temporal_workflow_processes_one_turn_then_times_out(monkeypatch) 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda change: change != "durable-turn-nodes")
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"turn": 1, "closed": True}}
     assert child_states == [{"turn": 1}]
@@ -1529,7 +1460,7 @@ async def test_temporal_thread_compacts_history_with_pending_signal(monkeypatch)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda change: change != "durable-turn-nodes")
     monkeypatch.setattr("app.temporal_runtime.workflow.continue_as_new", continue_as_new)
     with pytest.raises(ContinuedError):
         await workflow.run({"event": {"id": "message-1"}})
@@ -1584,7 +1515,7 @@ async def test_temporal_followup_skips_workspace_and_codex_start(monkeypatch) ->
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", wait_for_signal)
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda change: change != "durable-turn-nodes")
     result = await workflow.run({"event": {"id": "first"}})
     assert result == {"state": {"codex_thread": "codex-thread", "turn": 2, "closed": True}}
     assert activities == [
@@ -1660,6 +1591,7 @@ async def test_engine_preflight_reuses_progress_delivery() -> None:
     )
     persisted = await engine.preflight(event, "🛠️ Workspace provisioning...", {"turn": 2})
     persisted = cast("StateData", persisted)
+    engine.lookup_delivery = AsyncMock(return_value=channel.delivery)
     persisted = await engine.preflight(event, "🤖 Codex starting...", persisted)
     assert len(channel.sends) == 2
     assert channel.sends[0][1] is not None
@@ -1705,7 +1637,7 @@ async def test_temporal_setup_failure_uses_failure_activity(monkeypatch) -> None
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda change: change != "durable-turn-nodes")
     result = await workflow.run({"event": {"id": "failed"}})
     assert result["error"] == "runner unavailable"
     assert activities == [publish_progress, provision_workspace, fail_turn, retire_session]
@@ -1736,7 +1668,7 @@ async def test_temporal_workflow_always_runs_split_startup_activities(monkeypatc
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_child_workflow", child)
     monkeypatch.setattr("app.temporal_runtime.workflow.wait_condition", timeout)
-    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: True)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda change: change != "durable-turn-nodes")
     result = await workflow.run({"event": {"id": "old"}})
     assert result == {"state": {"turn": 1, "closed": True}}
     assert activities == [
@@ -1794,6 +1726,7 @@ async def test_temporal_turn_workflow_owns_activity_retry_policy(monkeypatch) ->
         return {"status": "ok"}
 
     monkeypatch.setattr("app.temporal_runtime.workflow.execute_activity", execute)
+    monkeypatch.setattr("app.temporal_runtime.workflow.patched", lambda _: False)
     result = await TurnWorkflow().run({"event": {}, "state": {}})
 
     assert result == {"status": "ok"}
@@ -1960,7 +1893,7 @@ async def test_gateway_preserves_raw_message_create_envelope() -> None:
     gateway = Gateway(configured_engine(), {1})
     await gateway.on_socket_raw_receive('{"op":0,"t":"MESSAGE_CREATE","d":{"id":"42"}}')
 
-    assert gateway.raw_gateway_payload == {"op": 0, "t": "MESSAGE_CREATE", "d": {"id": "42"}}
+    assert gateway.raw_gateway_payloads["42"] == {"op": 0, "t": "MESSAGE_CREATE", "d": {"id": "42"}}
 
 
 @pytest.mark.asyncio

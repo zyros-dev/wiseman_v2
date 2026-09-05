@@ -12,7 +12,7 @@ import discord
 import httpx
 from jinja2 import Environment, StrictUndefined
 
-from app.models import THREAD_AUTO_ARCHIVE_MINUTES, is_image_attachment
+from app.models import is_image_attachment
 from app.phoenix import route_info
 
 if TYPE_CHECKING:
@@ -26,7 +26,6 @@ MAX_DISCORD_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_REACTION_LENGTH = 32
 MIN_DISCORD_USERNAME_LENGTH = 2
 MAX_DISCORD_USERNAME_LENGTH = 32
-THREAD_CLOSE_AFTER_SECONDS = THREAD_AUTO_ARCHIVE_MINUTES * 60
 
 
 def banner() -> str:

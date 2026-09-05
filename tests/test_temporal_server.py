@@ -22,7 +22,12 @@ def fake_node(name):
             state["processed"] = [*state.get("processed", []), payload["event"]["trigger"]["id"]]
         if name == "wiseman.retire":
             state["closed"] = True
-        return {"state": state}
+        result = {**payload, "state": state}
+        if name == "wiseman.codex_start":
+            result["codex_thread"] = state["codex_thread"]
+        if name == "wiseman.infer":
+            result["output"] = "answer"
+        return result
 
     return node
 
@@ -47,6 +52,13 @@ async def test_temporal_retains_session_across_archive_duplicates_and_worker_res
             "wiseman.turn",
             "wiseman.failure",
             "wiseman.retire",
+            "wiseman.context",
+            "wiseman.prompt",
+            "wiseman.render",
+            "wiseman.infer",
+            "wiseman.deliver",
+            "wiseman.react",
+            "wiseman.observe",
         )
     ]
     async with asyncio.timeout(60), await WorkflowEnvironment.start_time_skipping() as env:

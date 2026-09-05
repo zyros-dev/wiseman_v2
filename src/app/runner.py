@@ -95,7 +95,9 @@ class HttpRunner:
         return str(result.get("thread_id", thread)), str(result.get("output", "")), billing
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        data = await self._post("/steer", _payload(thread, user, workspace, prompt))
+        payload = _payload(thread, user, workspace, prompt)
+        payload["message_id"] = MESSAGE_ID.get() or uuid4().hex
+        data = await self._post("/steer", payload)
         return bool(data.get("steered", False))
 
 

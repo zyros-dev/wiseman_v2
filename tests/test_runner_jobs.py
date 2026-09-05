@@ -9,6 +9,26 @@ from runner.api import create_app
 from runner.jobs import Jobs
 
 
+async def test_steering_receipt_survives_response_loss_and_runner_restart(tmp_path, monkeypatch):
+    calls = []
+
+    async def steer(self, turn, path, account):
+        calls.append((turn.message_id, turn.user_id, turn.thread_id, turn.input))
+        return True
+
+    monkeypatch.setenv("WISEMAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("WISEMAN_RUNNER_API_TOKEN", "secret")
+    monkeypatch.setattr("runner.api.CodexRunner.steer", steer)
+    headers = {"authorization": "Bearer secret"}
+    payload = {"thread_id": "thread", "user_id": "owner", "message_id": "steering", "input": "redirect"}
+    for _ in range(2):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://runner"
+        ) as client:
+            assert (await client.post("/steer", json=payload, headers=headers)).json() == {"steered": True}
+    assert calls == [("steering", "owner", "thread", "redirect")]
+
+
 @pytest.mark.asyncio
 async def test_job_survives_caller_disconnect_and_replays_result(tmp_path):
     jobs = Jobs(tmp_path)

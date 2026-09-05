@@ -1,5 +1,4 @@
 # Copyright (c) 2026 Nick van der Merwe
-from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -70,7 +69,22 @@ class State(BaseModel):
     progress: list[str] = Field(default_factory=list)
 
 
-@dataclass
-class ActiveTurn:
-    trigger_id: str
-    delivery_id: str | None = None
+class TurnWork(BaseModel):
+    event: Event
+    state: State
+    current: dict[str, object] = Field(default_factory=dict)
+    grammar: dict[str, object] = Field(default_factory=dict)
+    prompt: str = ""
+    output: str = ""
+    billing: dict[str, object] = Field(default_factory=dict)
+    error: str = ""
+    processing_emoji: str = ""
+    terminal_emoji: str = ""
+
+    @property
+    def trace(self) -> str:
+        return f"discord-{self.event.trigger.id}"
+
+    @property
+    def kind(self) -> str:
+        return "followup" if self.state.turn else "startup"

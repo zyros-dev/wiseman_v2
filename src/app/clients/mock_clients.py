@@ -122,7 +122,6 @@ class MockDiscord(DiscordClient):
         for thread_id, touched in self.state.thread_activity.items():
             if self.state.fake_time - touched >= 60 * 60:
                 self.state.archived.add(thread_id)
-                self.state.locked.add(thread_id)
 
     async def set_profile(self, username: str | None, avatar: str | None) -> None:
         self.state.call("discord", "set_profile", username or "", avatar or "")

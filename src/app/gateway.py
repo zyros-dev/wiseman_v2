@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import re
-import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,12 +19,13 @@ if TYPE_CHECKING:
     from app.engine import Engine
     from app.temporal_runtime import TemporalRuntime
     from app.types import JsonObject
-from app.models import Event, Message, Messageable
-from app.presentation import THREAD_AUTO_ARCHIVE_MINUTES, THREAD_CLOSE_AFTER_SECONDS, thread_name
+from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event, Message, Messageable
+from app.presentation import thread_name
 
 LOGGER = logging.getLogger("wiseman")
 DISCORD_CONNECTED = Gauge("wiseman_discord_connected", "Discord gateway connection state")
 DISCORD_MESSAGES = Counter("wiseman_discord_messages_received", "Discord messages received")
+RAW_CAPTURE_LIMIT = 1024
 
 
 @dataclass(slots=True)
@@ -46,10 +46,10 @@ class Gateway(discord.Client):
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(intents=intents)
+        super().__init__(intents=intents, enable_debug_events=True)
         self.engine, self.allowlist = engine, allowlist
         self.fallback_state: dict[str, JsonObject] = {}
-        self.raw_gateway_payload: JsonObject | None = None
+        self.raw_gateway_payloads: dict[str, JsonObject] = {}
         self.temporal: TemporalRuntime | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
@@ -59,15 +59,10 @@ class Gateway(discord.Client):
             else self.activity_path and self.activity_path.with_name("thread-sequence.json")
         )
         self.thread_sequence = self._load_thread_sequence()
-        self.thread_activity = self._load_thread_activity()
         self._load_profile()
-        self.expiry_task: asyncio.Task[None] | None = None
         engine.lookup = self.resolve
         engine.lookup_channel = self.resolve_channel
         engine.lookup_delivery = self.resolve_delivery
-
-    async def setup_hook(self) -> None:
-        self.expiry_task = asyncio.create_task(self._expire_threads())
 
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
@@ -79,25 +74,11 @@ class Gateway(discord.Client):
     async def on_socket_raw_receive(self, payload: str) -> None:
         value: object = json.loads(payload)
         if isinstance(value, dict) and value.get("t") == "MESSAGE_CREATE":
-            self.raw_gateway_payload = cast("JsonObject", value)
-
-    def _load_thread_activity(self) -> dict[str, float]:
-        if self.activity_path is None or not self.activity_path.exists():
-            return {}
-        try:
-            value = json.loads(self.activity_path.read_text(encoding="utf-8"))
-            return {str(key): float(timestamp) for key, timestamp in value.items()}
-        except (OSError, TypeError, ValueError, AttributeError):
-            LOGGER.warning("Ignoring invalid Wiseman thread activity state")
-            return {}
-
-    def _persist_thread_activity(self) -> None:
-        if self.activity_path is None:
-            return
-        try:
-            _atomic_write(self.activity_path, json.dumps(self.thread_activity, sort_keys=True))
-        except OSError:
-            LOGGER.exception("Could not persist Wiseman thread activity state")
+            data = value.get("d")
+            if isinstance(data, dict) and isinstance(data.get("id"), str):
+                self.raw_gateway_payloads[data["id"]] = cast("JsonObject", value)
+                if len(self.raw_gateway_payloads) > RAW_CAPTURE_LIMIT:
+                    self.raw_gateway_payloads.pop(next(iter(self.raw_gateway_payloads)))
 
     def _load_thread_sequence(self) -> int:
         if self.sequence_path is None or not self.sequence_path.exists():
@@ -113,13 +94,6 @@ class Gateway(discord.Client):
         if self.sequence_path is not None:
             _atomic_write(self.sequence_path, str(self.thread_sequence))
         return thread_name(self.thread_sequence)
-
-    def _touch_thread(self, thread_id: str, timestamp: float | None = None) -> None:
-        self.thread_activity[thread_id] = timestamp if timestamp is not None else time.time()
-        self._persist_thread_activity()
-
-    def _forget_thread(self, thread_id: str) -> None:
-        self.thread_activity.pop(thread_id, None) is not None and self._persist_thread_activity()
 
     def _load_profile(self) -> None:
         if self.profile_path is None or not self.profile_path.exists():
@@ -155,11 +129,6 @@ class Gateway(discord.Client):
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60.0)
 
-    async def _expire_threads(self) -> None:
-        while True:
-            await asyncio.sleep(60)
-            await self._expire_once()
-
     async def _discover_managed_threads(self) -> None:
         for guild in self.guilds:
             fetch = getattr(guild, "fetch_active_threads", None)
@@ -175,7 +144,6 @@ class Gateway(discord.Client):
                 thread_id = str(getattr(thread, "id", ""))
                 if not thread_id or str(getattr(thread, "owner_id", "")) != str(getattr(self.user, "id", "")):
                     continue
-                self.thread_activity.setdefault(thread_id, _last_message_time(thread))
                 edit = getattr(thread, "edit", None)
                 try:
                     if callable(edit) and getattr(thread, "auto_archive_duration", None) != THREAD_AUTO_ARCHIVE_MINUTES:
@@ -184,31 +152,9 @@ class Gateway(discord.Client):
                         )
                 except discord.DiscordException:
                     LOGGER.warning("Could not set one-hour archive on thread %s", thread_id)
-        self._persist_thread_activity()
-
-    async def _expire_once(self, now: float | None = None) -> None:
-        cutoff = (time.time() if now is None else now) - THREAD_CLOSE_AFTER_SECONDS
-        for thread_id, last_activity in list(self.thread_activity.items()):
-            if last_activity > cutoff:
-                continue
-            try:
-                channel = await self.fetch_channel(int(thread_id))
-                if isinstance(channel, discord.Thread):
-                    await channel.edit(archived=True, locked=True)
-                else:
-                    LOGGER.warning("Managed thread %s was not returned as a Discord thread", thread_id)
-                    continue
-            except (discord.ClientException, discord.DiscordException, ValueError):
-                LOGGER.warning("Could not close managed thread %s; retaining it for retry", thread_id)
-                continue
-            if self.thread_activity.pop(thread_id, None) is not None:
-                self._persist_thread_activity()
 
     async def close(self) -> None:
         DISCORD_CONNECTED.set(0)
-        if self.expiry_task is not None:
-            self.expiry_task.cancel()
-            await asyncio.gather(self.expiry_task, return_exceptions=True)
         await super().close()
 
     async def resolve(self, event: Event) -> discord.Message | None:
@@ -244,11 +190,12 @@ class Gateway(discord.Client):
         return value if isinstance(value, discord.Message) else None
 
     async def on_message(self, message: discord.Message) -> None:
+        raw = self.raw_gateway_payloads.pop(str(message.id), {})
         DISCORD_MESSAGES.inc()
         LOGGER.warning("Discord message received id=%s mentions=%s", message.id, mention_ids(message))
         if not await self._eligible(message):
             return
-        incoming = await self._incoming(message)
+        incoming = await self._incoming(message, raw)
         if incoming is None:
             return
         event = incoming.event
@@ -274,11 +221,11 @@ class Gateway(discord.Client):
         channel = message.channel
         reply_to_self = await self._replies_to_self(message)
         if isinstance(channel, discord.Thread) and not self._is_self(message):
-            if str(channel.id) in self.thread_activity:
-                self._touch_thread(str(channel.id))
             reference_id = getattr(message.reference, "message_id", None)
-            if reference_id is not None and await self.engine.steer_if_active(
-                str(channel.id), str(reference_id), message.content, str(message.author.id)
+            if (
+                reference_id is not None
+                and self.temporal is not None
+                and await self.temporal.steer(Event(trigger=_message(message, str(channel.parent_id), str(channel.id))))
             ):
                 return False
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
@@ -312,12 +259,11 @@ class Gateway(discord.Client):
     def _is_self(self, message: discord.Message) -> bool:
         return message.author.bot and str(message.author.id) == str(getattr(self.user, "id", ""))
 
-    async def _incoming(self, message: discord.Message) -> _Incoming | None:
+    async def _incoming(self, message: discord.Message, raw: JsonObject) -> _Incoming | None:
         channel = message.channel
         if isinstance(channel, discord.Thread):
             thread_id, parent_id, kind = str(channel.id), str(channel.parent_id), "followup"
             delivery_channel = channel
-            self._touch_thread(thread_id)
             thread_messages = await _history(channel, 100)
             parent_messages = await _history(channel.parent, 100) if channel.parent else []
         else:
@@ -331,17 +277,14 @@ class Gateway(discord.Client):
                 return None
             thread_id, parent_id, kind = str(thread.id), str(channel.id), "startup"
             delivery_channel = thread
-            self._touch_thread(thread_id)
             thread_messages, parent_messages = [], await _history(channel, 100, before=message)
         trigger = _message(message, parent_id, thread_id)
-        raw_payload = self.raw_gateway_payload or trigger.model_dump(mode="json")
-        self.raw_gateway_payload = None
         event = Event(
             trigger=trigger,
             kind=kind,
             parent_messages=parent_messages,
             thread_messages=thread_messages,
-            raw_payload=raw_payload,
+            raw_payload=raw or trigger.model_dump(mode="json"),
         )
         return _Incoming(event, delivery_channel, message)
 
@@ -404,11 +347,3 @@ def mention_ids(message: object) -> list[str]:
     return [str(getattr(value, "id", value)) for value in values] + re.findall(
         r"<@!?(\d+)>", str(getattr(message, "content", ""))
     )
-
-
-def _last_message_time(thread: object) -> float:
-    value = getattr(thread, "last_message_id", None) or getattr(thread, "id", 0)
-    try:
-        return discord.utils.snowflake_time(int(value)).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return time.time()
