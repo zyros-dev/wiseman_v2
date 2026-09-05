@@ -14,6 +14,7 @@ class Vertex(StrEnum):
     RETIRED = "retired"
 
 
+# fmt: off
 EDGES = (
     ("admit-question", Vertex.IDLE, Vertex.PREPARING),
     ("background-chatter", Vertex.IDLE, Vertex.IDLE),
@@ -27,21 +28,23 @@ EDGES = (
     ("worker-restart", Vertex.RUNNING, Vertex.RUNNING),
     ("inference-complete", Vertex.RUNNING, Vertex.DELIVERING),
     ("transient-failure", Vertex.RUNNING, Vertex.RECOVERING),
-    ("resume-session", Vertex.RECOVERING, Vertex.RUNNING),
+    ("resume-session", Vertex.RECOVERING, Vertex.RUNNING), ("retry-exhausted", Vertex.RECOVERING, Vertex.ERROR),
     ("stop-active-turn", Vertex.RUNNING, Vertex.CANCELLING),
     ("stop-active-recovery", Vertex.RECOVERING, Vertex.CANCELLING),
     ("stop-active-delivery", Vertex.DELIVERING, Vertex.CANCELLING),
-    ("duplicate-stop", Vertex.CANCELLING, Vertex.CANCELLING),
+    ("duplicate-stop", Vertex.CANCELLING, Vertex.CANCELLING), ("worker-restart-cancelling", Vertex.CANCELLING, Vertex.CANCELLING),
     ("completion-race", Vertex.CANCELLING, Vertex.DELIVERING),
     ("stop-active-turn", Vertex.PREPARING, Vertex.CANCELLING),
     ("stop-confirmed", Vertex.CANCELLING, Vertex.IDLE),
     ("unknown-outcome", Vertex.CANCELLING, Vertex.ERROR),
     ("error-finalized", Vertex.ERROR, Vertex.IDLE),
     ("delivery-finalized", Vertex.DELIVERING, Vertex.IDLE),
-    ("delivery-retry", Vertex.DELIVERING, Vertex.DELIVERING),
+    ("delivery-retry", Vertex.DELIVERING, Vertex.DELIVERING), ("worker-restart-delivery", Vertex.DELIVERING, Vertex.DELIVERING),
+    ("worker-restart-error", Vertex.ERROR, Vertex.ERROR),
     ("idle-retirement", Vertex.IDLE, Vertex.RETIRED),
     ("fixture-reset", Vertex.RETIRED, Vertex.IDLE),
 )
+# fmt: on
 
 
 @dataclass
