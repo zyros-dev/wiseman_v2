@@ -51,18 +51,22 @@ async def test_graphwalker_edges_use_the_discord_admission_boundary(monkeypatch)
             if edge not in {"background-chatter", "steer-active-turn", "stop-active-turn", "admit-question", "queue-question"}:
                 continue
             if edge == "background-chatter":
-                response = await client.post("/v1/discord/events", json={"trigger": _message(message_id, "background", mention=False)})
+                response = await client.post("/v1/discord/events", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "background", mention=False)})
             elif edge == "steer-active-turn":
                 response = await client.post(
                     "/v1/replay/discord",
-                    json={"trigger": _message(message_id, "steer", thread="thread", reply_to="answer"), "kind": "steer"},
+                    json={"t": "MESSAGE_CREATE", "d": _message(message_id, "steer", thread="thread", reply_to="answer"), "kind": "steer"},
                 )
             elif edge == "stop-active-turn":
-                response = await client.post("/v1/discord/events", json={"trigger": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
+                response = await client.post(
+                    "/v1/discord/events", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"}
+                )
             else:
                 thread = None if edge == "admit-question" else "thread"
                 kind = "startup" if edge == "admit-question" else "followup"
-                response = await client.post("/v1/replay/discord", json={"trigger": _message(message_id, "question", thread=thread), "kind": kind})
+                response = await client.post(
+                    "/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread=thread), "kind": kind}
+                )
             assert response.status_code == 200
             assert response.json()["message_id"] == message_id
     assert isinstance(clients.discord, MockDiscord)
