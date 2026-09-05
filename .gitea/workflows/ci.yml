@@ -5,7 +5,7 @@ on:
   push:
 
 jobs:
-  checks:
+  quality:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -14,7 +14,7 @@ jobs:
       - name: Install TLS trust store
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates default-jre-headless curl docker.io
+          apt-get install -y --no-install-recommends ca-certificates default-jre-headless
       - name: Install uv
         run: |
           set -eu
@@ -56,9 +56,27 @@ jobs:
           uv run ruff format --check .
       - name: Source budget
         run: uv run python tools/check_source_budget.py
+      - name: Pyrefly
+        run: uv run pyrefly check src sandbox/src tests tools
+      - name: Tests and coverage
+        run: uv run pytest --cov --cov-report=term-missing
+      - name: Dead code
+        run: uv run vulture src sandbox/src tests tools --min-confidence 100
+      - name: Dependency audit
+        run: uv run pip-audit
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates docker.io
       - name: Compile and sandbox smoke
         run: |
-          uv run python -m compileall -q src sandbox/src tests tools
+          python -m compileall -q src sandbox/src tests tools
           docker build -t wiseman-v2-gateway:ci .
           docker build -t wiseman-v2-sandbox:ci -f sandbox/Dockerfile .
           container=$(docker run -d wiseman-v2-sandbox:ci)
@@ -69,11 +87,3 @@ jobs:
           done
           docker logs "$container"
           exit 1
-      - name: Pyrefly
-        run: uv run pyrefly check src sandbox/src tests tools
-      - name: Tests and coverage
-        run: uv run pytest --cov --cov-report=term-missing
-      - name: Dead code
-        run: uv run vulture src sandbox/src tests tools --min-confidence 100
-      - name: Dependency audit
-        run: uv run pip-audit
