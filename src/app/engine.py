@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 import discord
+from httpx import TransportError
 from prometheus_client import Counter
 
 if TYPE_CHECKING:
@@ -144,7 +145,6 @@ class Engine:
         retry_transport: bool = False,
     ) -> EngineResult:
         trigger = event.trigger
-        key = trigger.thread_id or trigger.channel_id
         state = self._state(state_data)
         if trigger.id in state.processed:
             return {
@@ -206,7 +206,7 @@ class Engine:
                 raise
             return await self._failure(lifecycle, exc)
         finally:
-            self.active_turns.pop(key, None)
+            self.active_turns.pop(trigger.thread_id or trigger.channel_id, None)
         return await self._success(
             _Success(
                 lifecycle=lifecycle,
@@ -391,13 +391,14 @@ class Engine:
 
     async def _failure(self, lifecycle: _Lifecycle, error: Exception) -> EngineResult:
         trigger = lifecycle.trigger
+        detail = str(error) or type(error).__name__
         TURN_FAILURES.inc()
-        await self.config.phoenix.record(lifecycle.trace, "failure", error=str(error))
+        await self.config.phoenix.record(lifecycle.trace, "failure", error=detail)
         failure_emoji = self.reaction_emojis["failure"]
         if self._react(trigger.id, failure_emoji):
             await self._ensure_live_reaction(lifecycle.live, failure_emoji)
             if lifecycle.channel is not None:
-                await deliver_content(lifecycle.progress_message, lifecycle.channel, f"Codex failed: {error}")
+                await deliver_content(lifecycle.progress_message, lifecycle.channel, f"Codex failed: {detail}")
             await self._remove_working_reaction(trigger.id, lifecycle.live)
         await self.config.phoenix.record(
             lifecycle.trace,
@@ -408,7 +409,7 @@ class Engine:
         return {
             "trace": lifecycle.trace,
             "kind": lifecycle.kind,
-            "error": str(error),
+            "error": detail,
             "reactions": self.reactions[trigger.id],
             "state": _state_data(lifecycle.state, finished=True),
         }
@@ -520,6 +521,6 @@ def _strings(value: object) -> set[str]:
 
 
 def _transport_error(error: Exception) -> bool:
-    return isinstance(error, RunnerError) or any(
+    return isinstance(error, (RunnerError, TransportError)) or any(
         marker in str(error).lower() for marker in ("disconnect", "transport error", "http 5")
     )

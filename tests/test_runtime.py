@@ -894,6 +894,20 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_http_timeout_remains_retryable():
+    class TimeoutRunner(FakeRunner):
+        async def run(self, *args, **kwargs):
+            raise httpx.ReadTimeout("")
+
+    engine = configured_engine(runner=TimeoutRunner())
+    event = normalize_event(discord_message("timeout", "hello", thread="t"))
+    with pytest.raises(httpx.ReadTimeout):
+        await engine.handle(event, retry_transport=True)
+    result = await engine.handle(event)
+    assert result["error"] == "ReadTimeout"
+
+
+@pytest.mark.asyncio
 async def test_same_thread_turns_are_serialized() -> None:
     active = maximum = 0
 
