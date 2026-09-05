@@ -58,8 +58,7 @@ def normalize_image_url(value: object) -> str:
 def render_progress(steps: list[str], turn_number: int | None = None) -> str:
     count = turn_number if turn_number is not None else 0
     visible = [
-        line if len(line) <= MAX_PROGRESS_PREVIEW_LENGTH else line[: MAX_PROGRESS_PREVIEW_LENGTH - 3] + "..."
-        for line in "\n".join(steps).splitlines()[-8:]
+        line if len(line) <= MAX_PROGRESS_PREVIEW_LENGTH else line[: MAX_PROGRESS_PREVIEW_LENGTH - 3] + "..." for line in "\n".join(steps).splitlines()[-8:]
     ]
     header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])

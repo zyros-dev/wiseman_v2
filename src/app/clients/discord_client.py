@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import re
 import secrets
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import discord
 
@@ -26,26 +26,7 @@ class RealDiscord:
             raise TypeError("Discord channel is not a text channel or thread")
         return value
 
-    async def history(self, channel_id: str, limit: int) -> list[JsonObject]:
-        channel = await self.channel(channel_id)
-        thread_id = channel_id if isinstance(channel, discord.Thread) else None
-        return [
-            normalize_message(item, channel_id, thread_id).model_dump(mode="json")
-            async for item in channel.history(limit=limit)
-        ]
-
-    async def create_thread(self, channel_id: str, name: str, auto_archive_minutes: Literal[60]) -> str:
-        channel = await self.channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            raise TypeError("A thread requires a parent text channel")
-        thread = await channel.create_thread(
-            name=name, type=discord.ChannelType.public_thread, auto_archive_duration=auto_archive_minutes
-        )
-        return str(thread.id)
-
-    async def send(
-        self, channel_id: str, content: str = "", *, embed: JsonObject | None = None, nonce: str = ""
-    ) -> str:
+    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None, nonce: str = "") -> str:
         channel = await self.channel(channel_id)
         message = await channel.send(
             content or None,
@@ -59,9 +40,7 @@ class RealDiscord:
         if upload is None:
             await message.edit(content=content)
         else:
-            await message.edit(
-                content=content, attachments=[discord.File(io.BytesIO(upload.data), filename=upload.name)]
-            )
+            await message.edit(content=content, attachments=[discord.File(io.BytesIO(upload.data), filename=upload.name)])
 
     async def add_reaction(self, ref: MessageRef, emoji: str) -> None:
         await (await self.channel(ref.channel_id)).get_partial_message(int(ref.message_id)).add_reaction(emoji)
@@ -69,23 +48,7 @@ class RealDiscord:
     async def remove_reaction(self, ref: MessageRef, emoji: str) -> None:
         if self.gateway.user is None:
             raise RuntimeError("Discord bot identity is unavailable")
-        await (
-            (await self.channel(ref.channel_id))
-            .get_partial_message(int(ref.message_id))
-            .remove_reaction(emoji, self.gateway.user)
-        )
-
-    async def archive_thread(self, thread_id: str) -> None:
-        channel = await self.channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            raise TypeError("Only a thread can be archived")
-        await channel.edit(archived=True)
-
-    async def lock_thread(self, thread_id: str) -> None:
-        channel = await self.channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            raise TypeError("Only a thread can be locked")
-        await channel.edit(locked=True)
+        await (await self.channel(ref.channel_id)).get_partial_message(int(ref.message_id)).remove_reaction(emoji, self.gateway.user)
 
     async def send_file(self, channel_id: str, upload: Upload, caption: str = "") -> DeliveryReceipt:
         channel = await self.channel(channel_id)
@@ -104,10 +67,6 @@ class RealDiscord:
         else:
             updated = await self.gateway.user.edit(avatar=avatar)
         return updated.name
-
-    async def set_reactions(self, values: dict[str, str]) -> None:
-        self.gateway.engine.set_reaction_emojis(values)
-        self.gateway.persist_profile()
 
 
 def normalize_message(item: discord.Message, channel_id: str, thread_id: str | None) -> Message:
@@ -139,6 +98,4 @@ def normalize_message(item: discord.Message, channel_id: str, thread_id: str | N
 
 def mention_ids(message: object) -> list[str]:
     values = getattr(message, "raw_mentions", ()) or getattr(message, "mentions", ())
-    return [str(getattr(value, "id", value)) for value in values] + re.findall(
-        r"<@!?(\d+)>", str(getattr(message, "content", ""))
-    )
+    return [str(getattr(value, "id", value)) for value in values] + re.findall(r"<@!?(\d+)>", str(getattr(message, "content", "")))

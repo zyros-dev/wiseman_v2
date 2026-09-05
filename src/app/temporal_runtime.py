@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, cast
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event, TurnWork
+from app.models import Event, TurnWork
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 DELIVERY_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30))
@@ -42,66 +42,43 @@ def _engine() -> Engine:
     return _activity_runtime.engine
 
 
-@activity.defn(name="wiseman.turn")
-async def run_turn(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
-    state = _object_map(payload.get("state"))
-    event.seen_ids = [str(item) for item in _sequence(state.get("seen", event.seen_ids))]
-    retry_transport = _activity_attempt() < (TRANSPORT_RETRY_POLICY.maximum_attempts or 1)
-    result = cast(
-        "JsonObject",
-        await _engine().handle(event, state_data=state, retry_transport=retry_transport),
-    )
-    error = result.get("error")
-    retry_markers = ("runner returned http 5", "disconnected", "transport error")
-    if retry_transport and isinstance(error, str) and any(marker in error.lower() for marker in retry_markers):
-        raise ApplicationError(str(result["error"]), type="runner_transport")
-    return result
-
-
 @activity.defn(name="wiseman.workspace")
 async def provision_workspace(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
+    event = _event(payload)
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    owner = str(_object_map(payload.get("state")).get("owner_id") or event.trigger.author_id)
+    owner = str(_state(payload).get("owner_id") or event.trigger.author_id)
     await _engine().config.runner.acquire(owner, workspace)
     return {"workspace": workspace}
 
 
 @activity.defn(name="wiseman.codex_start")
 async def start_codex(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
-    state = _object_map(payload.get("state"))
+    event, state = _event(payload), _state(payload)
     workspace = event.trigger.thread_id or event.trigger.channel_id
-    thread = await _engine().config.runner.start(
-        str(state.get("codex_thread") or ""), str(state.get("owner_id") or event.trigger.author_id), workspace
-    )
+    thread = await _engine().config.runner.start(str(state.get("codex_thread") or ""), str(state.get("owner_id") or event.trigger.author_id), workspace)
     state["codex_thread"] = thread
     return {"state": state, "workspace": workspace, "codex_thread": thread}
 
 
 @activity.defn(name="wiseman.progress")
 async def publish_progress(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
+    event = _event(payload)
     phase = str(payload.get("phase", "⏳ Working..."))
-    state = await _engine().preflight(event, phase, _object_map(payload.get("state")))
+    state = await _engine().preflight(event, phase, _state(payload))
     return {"phase": phase, "state": state}
 
 
 @activity.defn(name="wiseman.failure")
 async def fail_turn(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
+    event = _event(payload)
     error = str(payload.get("error", "unknown failure"))
-    return dict(await _engine().fail(event, error, _object_map(payload.get("state"))))
+    return await _engine().fail(event, error, _state(payload))
 
 
 @activity.defn(name="wiseman.retire")
 async def retire_session(payload: dict) -> dict:
-    event = Event.model_validate(payload["event"])
-    state = _object_map(payload["state"])
-    await _engine().config.runner.release(
-        str(state.get("owner_id") or event.trigger.author_id), event.trigger.thread_id or event.trigger.channel_id
-    )
+    event, state = _event(payload), _state(payload)
+    await _engine().config.runner.release(str(state.get("owner_id") or event.trigger.author_id), event.trigger.thread_id or event.trigger.channel_id)
     return {"state": {**state, "closed": True}}
 
 
@@ -111,7 +88,6 @@ async def _activity(fn: Callable[[dict], Awaitable[dict]], payload: dict, durati
         payload,
         start_to_close_timeout=duration,
         retry_policy=TRANSPORT_RETRY_POLICY,
-        heartbeat_timeout=timedelta(seconds=45) if fn is run_turn else None,
     )
 
 
@@ -121,6 +97,8 @@ class TurnWorkflow:
         self.work: TurnWork | None = None
         self.pending_progress: list[str] = []
         self.inferencing = False
+        self.stop_requested = False
+        self.stop_commands: set[str] = set()
 
     @workflow.update
     async def steer(self, event: dict) -> bool:
@@ -139,14 +117,30 @@ class TurnWorkflow:
             self.work.state.processed.add(incoming.trigger.id)
         return bool(result["accepted"])
 
+    @workflow.update
+    async def stop(self, event: dict) -> bool:
+        incoming = Event.model_validate(event)
+        if self.work is None or incoming.trigger.id in self.stop_commands:
+            return True
+        if not self.inferencing:
+            self.stop_requested = True
+            self.stop_commands.add(incoming.trigger.id)
+            return True
+        result = await workflow.execute_activity(
+            "wiseman.stop",
+            {"work": self.work.model_dump(mode="json"), "event": event},
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=TRANSPORT_RETRY_POLICY,
+        )
+        if result["accepted"]:
+            self.stop_requested = True
+            self.stop_commands.add(incoming.trigger.id)
+        return bool(result["accepted"])
+
     @workflow.signal
     def progress(self, message: str) -> None:
         if not self.pending_progress or self.pending_progress[-1] != message:
             self.pending_progress = [*self.pending_progress[-31:], message]
-
-    @workflow.query
-    def current(self) -> dict:
-        return self.work.model_dump(mode="json") if self.work is not None else {}
 
     async def _node(self, name: str, *, durable: bool = False) -> None:
         assert self.work is not None
@@ -165,31 +159,35 @@ class TurnWorkflow:
 
     @workflow.run
     async def run(self, payload: dict) -> dict:
-        if not workflow.patched("durable-turn-nodes"):
-            return await _activity(run_turn, payload, timedelta(hours=1))
         self.work = TurnWork.model_validate(payload)
-        self.work.state.progress = [
-            "🛠️ Workspace provisioning..." if not self.work.state.codex_thread else "🤖 Codex resuming..."
-        ]
-        await self._node("render", durable=True)
+        self.work.state.progress = ["🛠️ Workspace provisioning..." if not self.work.state.codex_thread else "🤖 Codex resuming..."]
         try:
+            await self._node("render", durable=True)
             await self._node("react")
         except Exception:
             workflow.logger.exception("Processing reaction unavailable; continuing the turn")
         try:
             await self._node("context")
             await self._node("prompt")
-            if not self.work.state.codex_thread:
+            if not self.stop_requested and not self.work.state.codex_thread:
                 await _activity(provision_workspace, self.work.model_dump(mode="json"), timedelta(minutes=5))
                 self.progress("🤖 Codex starting...")
                 await self._node("render")
                 started = await _activity(start_codex, self.work.model_dump(mode="json"), timedelta(minutes=2))
                 self.work.state.codex_thread = str(started["codex_thread"])
-            await self._infer()
-            if not self.work.output.strip():
+            if self.stop_requested:
+                self.work.stopped = True
+                self.work.error = "Turn stopped by user"
+            else:
+                await self._infer()
+            if not self.work.output.strip() and not self.work.stopped:
                 self.work.error = "Codex returned no answer"
         except Exception as exc:
-            self.work.error = str(exc) or type(exc).__name__
+            if self.stop_requested:
+                self.work.stopped = True
+                self.work.error = "Turn stopped by user"
+            else:
+                self.work.error = str(exc) or type(exc).__name__
         self.inferencing = False
         await workflow.wait_condition(workflow.all_handlers_finished)
         await self._node("deliver", durable=True)
@@ -252,25 +250,19 @@ class ThreadWorkflow:
         self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
         if event := _object_map(first.get("event")):
             self.pending.insert(0, event)
-        workflow.patched("split-startup-activities")
-        child_workflow = workflow.patched("child-turn-workflow")
-        compact_history = workflow.patched("thread-history-compaction")
-        durable_session = workflow.patched("durable-session-lifetime")
-        durable_nodes = workflow.patched("durable-turn-nodes")
         self.result = {"state": self.state}
         handled = 0
         while True:
             try:
                 await workflow.wait_condition(
                     lambda: bool(self.pending),
-                    timeout=timedelta(days=3) if durable_session else timedelta(minutes=THREAD_AUTO_ARCHIVE_MINUTES),
+                    timeout=timedelta(days=3),
                 )
             except TimeoutError:
-                if durable_session:
-                    await self._retire(event)
+                await self._retire(event)
                 return self.result
             turn = self.state.get("turn")
-            if compact_history and handled and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
+            if handled and isinstance(turn, int) and turn % HISTORY_COMPACTION_TURNS == 0:
                 workflow.continue_as_new({"state": self.state, "pending": self.pending})
             event = self.pending.pop(0)
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
@@ -279,7 +271,7 @@ class ThreadWorkflow:
             self.active_message = message_id
             self.state.setdefault("owner_id", _object_map(event.get("trigger")).get("author_id", ""))
             try:
-                self.result = await self._turn(event, child_workflow=child_workflow, durable_nodes=durable_nodes)
+                self.result = await self._turn(event)
             except Exception as exc:
                 self.result = await _activity(
                     fail_turn,
@@ -290,23 +282,12 @@ class ThreadWorkflow:
             self.active_message = ""
             handled += 1
 
-    async def _turn(self, event: dict, *, child_workflow: bool, durable_nodes: bool) -> dict:
-        if not durable_nodes:
-            if not self.state.get("codex_thread"):
-                self.state = await _setup(event, self.state)
-            progress = await _activity(
-                publish_progress,
-                {"event": event, "state": self.state, "phase": "🤖 Codex turn started..."},
-                timedelta(seconds=30),
-            )
-            self.state = _object_map(progress.get("state", self.state))
-        if child_workflow:
-            return await workflow.execute_child_workflow(
-                TurnWorkflow.run,
-                {"event": event, "state": self.state},
-                id=f"wiseman-turn-{self.active_message or len(self.pending)}",
-            )
-        return await _activity(run_turn, {"event": event, "state": self.state}, timedelta(hours=1))
+    async def _turn(self, event: dict) -> dict:
+        return await workflow.execute_child_workflow(
+            TurnWorkflow.run,
+            {"event": event, "state": self.state},
+            id=f"wiseman-turn-{self.active_message}",
+        )
 
     async def _retire(self, event: dict) -> None:
         await _activity(retire_session, {"event": event, "state": self.state}, timedelta(minutes=5))
@@ -314,18 +295,6 @@ class ThreadWorkflow:
         self.result["state"] = self.state
         if self.pending:
             workflow.continue_as_new({"state": {"owner_id": self.state.get("owner_id", "")}, "pending": self.pending})
-
-
-async def _setup(event: dict, state: JsonObject) -> JsonObject:
-    for fn, phase, duration in (
-        (provision_workspace, "🛠️ Workspace provisioning...", timedelta(seconds=30)),
-        (start_codex, "🤖 Codex starting...", timedelta(seconds=90)),
-    ):
-        progress = await _activity(publish_progress, {"event": event, "state": state, "phase": phase}, duration)
-        state = _object_map(progress.get("state", state))
-        result = await _activity(fn, {"event": event, "state": state}, duration)
-        state = _object_map(result.get("state", state))
-    return state
 
 
 class TemporalRuntime:
@@ -354,7 +323,6 @@ class TemporalRuntime:
                 start_codex,
                 publish_progress,
                 fail_turn,
-                run_turn,
                 retire_session,
                 *TurnActivities(_engine(), cast("Client", self.client)).registered(),
             ],
@@ -378,7 +346,7 @@ class TemporalRuntime:
         except WorkflowAlreadyStartedError:
             await client.get_workflow_handle(workflow_id).signal(ThreadWorkflow.submit, event)
 
-    async def steer(self, event: Event) -> bool:
+    async def _update(self, name: str, event: Event) -> bool:
         if self.client is None:
             raise RuntimeError("Temporal is not connected")
         client = cast("Client", self.client)
@@ -389,7 +357,7 @@ class TemporalRuntime:
                 return False
             return bool(
                 await client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update(
-                    "steer",
+                    name,
                     event.model_dump(mode="json"),
                     id=event.trigger.id,
                 )
@@ -399,21 +367,28 @@ class TemporalRuntime:
                 return False
             raise
 
+    async def steer(self, event: Event) -> bool:
+        return await self._update("steer", event)
+
+    async def stop(self, event: Event) -> bool:
+        return await self._update("stop", event)
+
     async def close(self) -> None:
         if self.worker_task is not None:
             self.worker_task.cancel()
             await asyncio.gather(self.worker_task, return_exceptions=True)
 
 
-def _activity_attempt() -> int:
-    try:
-        return activity.info().attempt
-    except RuntimeError:
-        return 1
-
-
 def _object_map(value: object) -> JsonObject:
     return cast("JsonObject", value) if isinstance(value, dict) else {}
+
+
+def _event(payload: dict) -> Event:
+    return Event.model_validate(payload["event"])
+
+
+def _state(payload: dict) -> JsonObject:
+    return _object_map(payload.get("state"))
 
 
 def _sequence(value: object) -> list[object]:

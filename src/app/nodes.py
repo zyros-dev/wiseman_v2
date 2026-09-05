@@ -9,6 +9,8 @@ from app.models import Event, TurnWork
 from app.runner import MESSAGE_ID
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from temporalio.client import Client
 
     from app.engine import Engine
@@ -18,13 +20,16 @@ class TurnActivities:
     def __init__(self, engine: Engine, client: Client) -> None:
         self.engine, self.client = engine, client
 
+    async def _work(self, method: Callable[[TurnWork], Awaitable[TurnWork]], payload: dict) -> dict:
+        return (await method(TurnWork.model_validate(payload))).model_dump(mode="json")
+
     @activity.defn(name="wiseman.context")
     async def context(self, payload: dict) -> dict:
-        return (await self.engine.prepare_context(TurnWork.model_validate(payload))).model_dump(mode="json")
+        return await self._work(self.engine.prepare_context, payload)
 
     @activity.defn(name="wiseman.prompt")
     async def prompt(self, payload: dict) -> dict:
-        return (await self.engine.prepare_prompt(TurnWork.model_validate(payload))).model_dump(mode="json")
+        return await self._work(self.engine.prepare_prompt, payload)
 
     @activity.defn(name="wiseman.render")
     async def render(self, payload: dict) -> dict:
@@ -45,15 +50,13 @@ class TurnActivities:
 
     @activity.defn(name="wiseman.deliver")
     async def deliver(self, payload: dict) -> dict:
-        return (await self.engine.deliver(TurnWork.model_validate(payload))).model_dump(mode="json")
+        return await self._work(self.engine.deliver, payload)
 
     @activity.defn(name="wiseman.react")
     async def react(self, payload: dict) -> dict:
         work = TurnWork.model_validate(payload)
         if work.output or work.error:
-            work.terminal_emoji = (
-                work.terminal_emoji or self.engine.reaction_emojis["failure" if work.error else "success"]
-            )
+            work.terminal_emoji = work.terminal_emoji or self.engine.reaction_emojis["failure" if work.error else "success"]
         return (await self.engine.reconcile(work)).model_dump(mode="json")
 
     @activity.defn(name="wiseman.observe")
@@ -85,5 +88,22 @@ class TurnActivities:
         finally:
             MESSAGE_ID.reset(token)
 
+    @activity.defn(name="wiseman.stop")
+    async def stop(self, payload: dict) -> dict:
+        work = TurnWork.model_validate(payload["work"])
+        event = Event.model_validate(payload["event"])
+        token = MESSAGE_ID.set(event.trigger.id)
+        try:
+            stopped = await self.engine.config.runner.stop(
+                work.state.codex_thread or "",
+                work.state.owner_id,
+                work.event.trigger.thread_id or work.event.trigger.channel_id,
+                work.event.trigger.id,
+                event.trigger.id,
+            )
+            return {"accepted": stopped}
+        finally:
+            MESSAGE_ID.reset(token)
+
     def registered(self) -> list:
-        return [self.context, self.prompt, self.render, self.infer, self.deliver, self.react, self.observe, self.steer]
+        return [self.context, self.prompt, self.render, self.infer, self.deliver, self.react, self.observe, self.steer, self.stop]

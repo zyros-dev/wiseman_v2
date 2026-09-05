@@ -68,6 +68,7 @@ class HttpRunner:
     ) -> tuple[str, str, dict[str, object]]:
         payload = _payload(thread, user, workspace, prompt)
         payload.update(turn_number=TURN_NUMBER.get(), message_id=MESSAGE_ID.get() or uuid4().hex)
+        payload["attempt"] = activity.info().attempt if activity.in_activity() else 1
         value = await self._post("/turn", payload)
         cursor = 0
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
@@ -98,3 +99,9 @@ class HttpRunner:
         payload["message_id"] = MESSAGE_ID.get() or uuid4().hex
         data = await self._post("/steer", payload)
         return bool(data.get("steered", False))
+
+    async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool:
+        payload = _payload(thread, user, workspace)
+        payload.update(message_id=command_id, target_message_id=target_message_id)
+        data = await self._post("/stop", payload)
+        return bool(data.get("stopped", False))

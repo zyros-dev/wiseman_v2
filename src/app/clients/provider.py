@@ -15,9 +15,7 @@ if TYPE_CHECKING:
 
 
 class OpenRouter:
-    def __init__(
-        self, settings: ClientSettings, prompts: PromptClient, transport: httpx.AsyncBaseTransport | None = None
-    ) -> None:
+    def __init__(self, settings: ClientSettings, prompts: PromptClient, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.settings, self.prompts = settings, prompts
         self.http = httpx.AsyncClient(
             base_url=settings.provider_url,
@@ -33,9 +31,7 @@ class OpenRouter:
         return await self.http.send(request, stream=True)
 
     async def describe(self, url: str, question: str) -> dict[str, object]:
-        template = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined).from_string(
-            await self.prompts.source("vision-question")
-        )
+        template = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined).from_string(await self.prompts.source("vision-question"))
         response = await self.http.post(
             "/api/v1/chat/completions",
             json={

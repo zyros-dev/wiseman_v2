@@ -51,9 +51,7 @@ class Phoenix:
         self.audit_dir = Path(audit_dir) if audit_dir else None
         self.roots: dict[str, Span] = {}
         self.contexts: dict[str, Context] = {}
-        self.provider = TracerProvider(
-            resource=Resource.create({"service.name": "wiseman-v2", "openinference.project.name": project})
-        )
+        self.provider = TracerProvider(resource=Resource.create({"service.name": "wiseman-v2", "openinference.project.name": project}))
         if endpoint:
             headers = {"Authorization": f"Bearer {key}"} if key else {}
             if project:
@@ -83,9 +81,7 @@ class Phoenix:
             span.set_attribute("openinference.session.id", trace)
             for key, value in item.items():
                 span.set_attribute(f"wiseman.{key}", json_text(value) if not isinstance(value, str) else value)
-        terminal = node in {"completed", "failure", "provider", "vision_tool"} or (
-            node == "reaction" and "✅" in json_text(data.get("operations", []))
-        )
+        terminal = node in {"completed", "failure", "provider", "vision_tool"} or (node == "reaction" and "✅" in json_text(data.get("operations", [])))
         if terminal:
             self.roots.pop(trace).end()
             self.contexts.pop(trace)
@@ -128,7 +124,6 @@ class PromptHub:
         contracts = Path(__file__).parents[2] / "contracts"
         candidates = (
             contracts / f"{local_kind}.j2",
-            contracts / f"{local_kind}.txt",
             contracts / f"{local_kind}.json",
         )
         default = next((path.read_text(encoding="utf-8") for path in candidates if path.exists()), "")

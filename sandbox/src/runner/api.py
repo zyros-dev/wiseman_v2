@@ -12,27 +12,25 @@ import subprocess
 import time
 from contextlib import asynccontextmanager, suppress
 from functools import partial
-from itertools import chain
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+from openai_codex.generated import v2_all as v2
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     ItemCompletedNotification,
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
 )
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
-from runner.jobs import Jobs
+from runner.jobs import Jobs, RetryableTurnError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
     from openai_codex import AsyncThread, AsyncTurnHandle
     from openai_codex.generated.v2_all import ThreadItem, ThreadTokenUsage
@@ -43,8 +41,12 @@ CODEX_RUNTIME_OVERRIDES = (
     "features.image_generation=false",
     "features.multi_agent=false",
     "features.multi_agent_v2=false",
+    "model_providers.wiseman-relay.request_max_retries=0",
+    "model_providers.wiseman-relay.stream_max_retries=0",
 )
 PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", str(Path(__file__).parents[3] / "contracts")))
+RETRYABLE_HTTP_STATUSES = {408, 429}
+RETRYABLE_HTTP_SERVER = range(500, 600)
 
 
 class Turn(BaseModel):
@@ -54,14 +56,16 @@ class Turn(BaseModel):
     input: str = Field(max_length=100_000)
     turn_number: int = Field(default=0, ge=0)
     message_id: str = ""
-
-
-class WorkspaceError(ValueError):
-    pass
+    attempt: int = Field(default=1, ge=1)
 
 
 class SteeringTurn(Turn):
     message_id: str = Field(min_length=1)
+
+
+class StopTurn(Turn):
+    message_id: str = Field(min_length=1)
+    target_message_id: str = Field(min_length=1)
 
 
 class Workspace:
@@ -80,13 +84,11 @@ class Workspace:
         try:
             pwd.getpwnam(name)
         except KeyError:
-            subprocess.run(["/usr/sbin/groupadd", "--system", name], check=True)
             subprocess.run(
                 [
                     "/usr/sbin/useradd",
                     "--system",
-                    "--gid",
-                    name,
+                    "--user-group",
                     "--groups",
                     "wsm_sudo",
                     "--home-dir",
@@ -101,9 +103,9 @@ class Workspace:
 
     @staticmethod
     def _own_tree(path: Path, user: str) -> None:
-        for entry in chain((path,), path.rglob("*")):
+        for entry in (path, *path.rglob("*")):
             with suppress(FileNotFoundError):
-                shutil.chown(entry, user=user, group=user, follow_symlinks=False)
+                shutil.chown(entry, user=user, group=user)
 
     def thread(self, user: str, thread: str) -> Path:
         with self.lock:
@@ -113,67 +115,75 @@ class Workspace:
         users = (self.root / "users").resolve()
         users.mkdir(parents=True, exist_ok=True)
         base = (users / user).resolve()
-        if base.parent != users:
-            raise WorkspaceError("workspace owner escapes root")
+        _require_child(base, users, "workspace owner escapes root")
         account = self._ensure_account(user)
         threads = base / "threads"
         threads.mkdir(parents=True, exist_ok=True)
-        if threads.resolve().parent != base:
-            raise WorkspaceError("thread root escapes owner")
+        _require_child(threads.resolve(), base, "thread root escapes owner")
         path = (threads / thread).resolve()
-        if path.parent != threads.resolve():
-            raise WorkspaceError("workspace path escapes owner")
+        _require_child(path, threads.resolve(), "workspace path escapes owner")
         shared = base / "shared"
         if shared.is_symlink() and shared.resolve() != shared:
-            raise WorkspaceError("shared directory escapes owner")
-        path.mkdir(parents=True, exist_ok=True)
-        (shared / "skills").mkdir(parents=True, exist_ok=True)
-        (shared / "memories.md").touch(exist_ok=True)
-        (shared / "AGENTS.md").touch(exist_ok=True)
-        base.chmod(0o700)
-        shared.chmod(0o700)
-        (shared / "skills").chmod(0o700)
-        (shared / "memories.md").chmod(0o600)
-        (shared / "AGENTS.md").chmod(0o600)
+            raise ValueError("shared directory escapes owner")
+        _prepare_workspace(base, shared, path)
         link = path / "shared"
         if link.is_symlink() and link.resolve() != shared:
-            raise WorkspaceError("invalid shared link")
+            raise ValueError("invalid shared link")
         if not link.exists():
             link.symlink_to(shared, target_is_directory=True)
-        (path / ".codex").mkdir(exist_ok=True)
-        path.chmod(0o700)
-        (path / ".codex").chmod(0o700)
-        relay = os.getenv("WISEMAN_RELAY_URL", "")
-        if relay:
-            (path / ".codex" / "config.toml").write_text(
-                'model_provider = "wiseman-relay"\n'
-                "[model_providers.wiseman-relay]\n"
-                'name = "Wiseman relay"\n'
-                f"base_url = {json.dumps(relay)}\n"
-                'env_key = "OPENAI_API_KEY"\n'
-                'wire_api = "responses"\n',
-                encoding="utf-8",
-            )
-        if not (path / "AGENTS.md").exists():
-            (path / "AGENTS.md").write_text("Read shared/AGENTS.md and shared/memories.md before acting.\n")
-        (path / "AGENTS.md").chmod(0o600)
+        _prepare_codex(path)
         if account:
-            try:
-                shutil.chown(base, user=account, group=account, follow_symlinks=False)
-            except FileNotFoundError:
-                return path
-            self._own_tree(shared, account)
-            self._own_tree(path, account)
+            self._claim(base, shared, path, account)
         return path
+
+    def _claim(self, base: Path, shared: Path, path: Path, account: str) -> None:
+        with suppress(FileNotFoundError):
+            shutil.chown(base, user=account, group=account)
+            marker = path / ".wiseman-owned"
+            if not marker.exists():
+                self._own_tree(shared, account)
+                self._own_tree(path, account)
+                marker.touch()
+                shutil.chown(marker, user=account, group=account)
 
     def release(self, user: str, thread: str) -> None:
         path = self.root / "users" / user / "threads" / thread
-        if any(not value or Path(value).name != value or value in {".", ".."} for value in (user, thread)):
-            raise WorkspaceError("workspace path escapes owner")
         if path.resolve() != path:
-            raise WorkspaceError("workspace path escapes owner")
+            raise ValueError("workspace path escapes owner")
         if path.exists():
             shutil.rmtree(path)
+
+
+def _require_child(path: Path, parent: Path, error: str) -> None:
+    if path.parent != parent:
+        raise ValueError(error)
+
+
+def _prepare_workspace(base: Path, shared: Path, path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (shared / "skills").mkdir(parents=True, exist_ok=True)
+    (shared / "memories.md").touch(exist_ok=True)
+    (shared / "AGENTS.md").touch(exist_ok=True)
+    for item in (base, shared, shared / "skills", path):
+        item.chmod(0o700)
+    for item in (shared / "memories.md", shared / "AGENTS.md"):
+        item.chmod(0o600)
+
+
+def _prepare_codex(path: Path) -> None:
+    codex = path / ".codex"
+    codex.mkdir(exist_ok=True)
+    codex.chmod(0o700)
+    if relay := os.getenv("WISEMAN_RELAY_URL"):
+        (codex / "config.toml").write_text(
+            f'model_provider = "wiseman-relay"\n[model_providers.wiseman-relay]\nname = "Wiseman relay"\n'
+            f'base_url = {json.dumps(relay)}\nenv_key = "OPENAI_API_KEY"\nwire_api = "responses"\n',
+            encoding="utf-8",
+        )
+    agents = path / "AGENTS.md"
+    if not agents.exists():
+        agents.write_text("Read shared/AGENTS.md and shared/memories.md before acting.\n")
+    agents.chmod(0o600)
 
 
 def _auth(got: str | None, expected: str) -> None:
@@ -181,14 +191,35 @@ def _auth(got: str | None, expected: str) -> None:
         raise HTTPException(401, "unauthorized")
 
 
+def _retryable(error: v2.TurnError) -> bool:
+    match error.codex_error_info.root if error.codex_error_info else None:
+        case v2.CodexErrorInfoValue.server_overloaded | v2.CodexErrorInfoValue.internal_server_error:
+            return True
+        case (
+            v2.HttpConnectionFailedCodexErrorInfo(http_connection_failed=detail)
+            | v2.ResponseStreamConnectionFailedCodexErrorInfo(response_stream_connection_failed=detail)
+            | v2.ResponseStreamDisconnectedCodexErrorInfo(response_stream_disconnected=detail)
+            | v2.ResponseTooManyFailedAttemptsCodexErrorInfo(response_too_many_failed_attempts=detail)
+        ):
+            status = detail.http_status_code
+            return status is None or status in RETRYABLE_HTTP_STATUSES or status in RETRYABLE_HTTP_SERVER
+        case _:
+            return False
+
+
+def _retryable_exception(error: BaseException) -> bool:
+    return any(marker in str(error).lower() for marker in ("disconnect", "connection", "timed out", "timeout"))
+
+
 class CodexRunner:
     def __init__(self) -> None:
         self.codex: dict[str, AsyncCodex] = {}
         self.threads: dict[str, AsyncThread] = {}
         self.locks: dict[str, asyncio.Lock] = {}
-        self.progress: dict[str, str] = {}
         self.progress_steps: dict[str, list[str]] = {}
         self.active_turns: dict[str, AsyncTurnHandle] = {}
+        self.active_messages: dict[str, str] = {}
+        self.stop_requested: set[str] = set()
         self.turn_counts: dict[str, int] = {}
         self.last_used: dict[str, float] = {}
         self.cache_limit = max(1, int(os.getenv("WISEMAN_MAX_IDLE_CLIENTS", "64")))
@@ -255,10 +286,8 @@ class CodexRunner:
             return await self._run_thread(thread, turn, path)
 
     def _set_progress(self, thread_id: str, message: str) -> None:
-        self.progress[thread_id] = message
         steps = self.progress_steps.setdefault(thread_id, [])
-        if not steps or steps[-1] != message:
-            steps.append(message)
+        steps.extend([message] if steps[-1:] != [message] else [])
 
     async def _run_thread(self, thread: AsyncThread, turn: Turn, path: Path) -> dict[str, object]:
         turn_number = turn.turn_number or self.turn_counts.get(turn.thread_id, 0) + 1
@@ -267,35 +296,41 @@ class CodexRunner:
         items: list[ThreadItem] = []
         usage: ThreadTokenUsage | None = None
         completed: TurnCompletedNotification | None = None
+        prompt = turn.input
+        if turn.attempt > 1:
+            prompt = (PROMPT_ROOT / "codex-disconnect-retry.j2").read_text() + "\n" + prompt
         active_turn = await thread.turn(
-            turn.input,
+            prompt,
             approval_mode=ApprovalMode.deny_all,
             sandbox=Sandbox.full_access,
             cwd=str(path),
         )
         self.active_turns[turn.thread_id] = active_turn
+        self.active_messages[turn.thread_id] = turn.message_id
         try:
-            async for event in active_turn.stream():
-                if message := _progress_message(event, turn_number):
-                    self._set_progress(turn.thread_id, message)
-                payload = event.payload
-                if isinstance(payload, ItemCompletedNotification):
-                    items.append(payload.item)
-                elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
-                    usage = payload.token_usage
-                elif isinstance(payload, TurnCompletedNotification):
-                    completed = payload
+            try:
+                items, usage, completed = await _collect_events(active_turn, self._set_progress, turn.thread_id, turn_number)
+            except Exception as exc:
+                if turn.thread_id not in self.stop_requested and turn.codex_thread_id == thread.id and _retryable_exception(exc):
+                    raise RetryableTurnError(str(exc)) from exc
+                raise
         finally:
             self.last_used[turn.thread_id] = time.monotonic()
-            if completed is None:
+            if completed is None and turn.thread_id not in self.stop_requested:
                 with suppress(Exception):
                     async with asyncio.timeout(5):
                         await active_turn.interrupt()
                 await self.close(turn.thread_id)
             self.active_turns.pop(turn.thread_id, None)
+            self.active_messages.pop(turn.thread_id, None)
+        if turn.thread_id in self.stop_requested:
+            self.stop_requested.remove(turn.thread_id)
+            raise RuntimeError("turn stopped by user")
         if completed is None:
             raise RuntimeError("turn completed event not received")
         if completed.turn.error is not None:
+            if turn.codex_thread_id == thread.id and _retryable(completed.turn.error):
+                raise RetryableTurnError(completed.turn.error.message)
             raise RuntimeError(completed.turn.error.message or "Codex turn failed")
         final_response = _final_response(items)
         return {
@@ -317,17 +352,29 @@ class CodexRunner:
 
     async def close(self, key: str) -> None:
         client = self.codex.pop(key, None)
-        for data in (self.threads, self.last_used, self.progress, self.progress_steps, self.turn_counts):
+        for data in (self.threads, self.last_used, self.progress_steps, self.turn_counts):
             data.pop(key, None)
         if client is not None:
             await client.close()
 
-    async def steer(self, turn: Turn, path: Path, account: str = "") -> bool:
-        del path, account
+    async def steer(self, turn: Turn, _path: Path, _account: str = "") -> bool:
         active = self.active_turns.get(turn.thread_id)
         if active is None:
             return False
         await active.steer(turn.input)
+        return True
+
+    async def stop(self, turn: StopTurn, _path: Path, _account: str = "") -> bool:
+        active = self.active_turns.get(turn.thread_id)
+        if active is None or self.active_messages.get(turn.thread_id) != turn.target_message_id:
+            return False
+        self.stop_requested.add(turn.thread_id)
+        try:
+            async with asyncio.timeout(10):
+                await active.interrupt()
+        except Exception:
+            self.stop_requested.discard(turn.thread_id)
+            raise
         return True
 
 
@@ -337,6 +384,28 @@ def _final_response(items: list[ThreadItem]) -> str:
         if isinstance(root, AgentMessageThreadItem) and root.text:
             return root.text
     return ""
+
+
+async def _collect_events(
+    active_turn: AsyncTurnHandle,
+    set_progress: Callable[[str, str], None],
+    thread_id: str,
+    turn_number: int,
+) -> tuple[list[ThreadItem], ThreadTokenUsage | None, TurnCompletedNotification | None]:
+    items: list[ThreadItem] = []
+    usage: ThreadTokenUsage | None = None
+    completed: TurnCompletedNotification | None = None
+    async for event in active_turn.stream():
+        if message := _progress_message(event, turn_number):
+            set_progress(thread_id, message)
+        payload = event.payload
+        if isinstance(payload, ItemCompletedNotification):
+            items.append(payload.item)
+        elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+            usage = payload.token_usage
+        elif isinstance(payload, TurnCompletedNotification):
+            completed = payload
+    return items, usage, completed
 
 
 def _progress_message(event: Notification, turn_number: int = 0) -> str | None:
@@ -379,15 +448,20 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=partial(_lifespan, jobs, codex),
     )
+    _register_health(app)
+    _register_workspace(app, workspaces, codex, jobs, secret)
+    _register_turns(app, workspaces, codex, jobs, secret)
+    _register_controls(app, workspaces, codex, jobs, secret)
+    return app
 
+
+def _register_health(app: FastAPI) -> None:
     @app.get("/healthz")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/metrics")
-    async def metrics() -> PlainTextResponse:
-        return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+def _register_workspace(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
     @app.post("/acquire")
     async def acquire(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
@@ -415,6 +489,8 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(503, f"codex startup unavailable: {exc}") from exc
 
+
+def _register_turns(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
     @app.post("/turn")
     async def run(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(authorization, secret)
@@ -425,7 +501,7 @@ def create_app() -> FastAPI:
 
         try:
             if turn.message_id:
-                return jobs.submit(turn.message_id, f"{turn.user_id}/{turn.thread_id}", execute).model_dump()
+                return jobs.submit(turn.message_id, f"{turn.user_id}/{turn.thread_id}", execute, attempt=turn.attempt).model_dump()
             return await execute()
         except Exception as exc:
             raise HTTPException(503, f"codex unavailable: {exc}") from exc
@@ -439,6 +515,8 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "unknown runner job") from exc
         return {**receipt.model_dump(), "steps": codex.progress_steps.get(receipt.workspace.split("/", 1)[1], [])}
 
+
+def _register_controls(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
     @app.post("/steer")
     async def steer(turn: SteeringTurn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
         _auth(authorization, secret)
@@ -453,15 +531,19 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 
-    @app.get("/progress/{thread_id}")
-    async def progress(thread_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
+    @app.post("/stop")
+    async def stop(turn: StopTurn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
         _auth(authorization, secret)
-        return {
-            "message": codex.progress.get(thread_id, "🤖 Codex starting..."),
-            "steps": codex.progress_steps.get(thread_id, []),
-        }
 
-    return app
+        async def execute() -> dict[str, object]:
+            path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
+            return {"stopped": await codex.stop(turn, path, workspaces.username(turn.user_id))}
+
+        try:
+            result = await jobs.execute_once(f"stop:{turn.message_id}", f"{turn.user_id}/{turn.thread_id}", execute)
+            return {"stopped": bool(result.get("stopped"))}
+        except Exception as exc:
+            raise HTTPException(503, f"codex stop unavailable: {exc}") from exc
 
 
 @asynccontextmanager

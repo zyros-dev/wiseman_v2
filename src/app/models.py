@@ -40,8 +40,7 @@ class DeliveryReceipt:
 
 def is_image_attachment(value: object) -> bool:
     return isinstance(value, dict) and (
-        str(value.get("content_type") or "").startswith("image/")
-        or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES)
+        str(value.get("content_type") or "").startswith("image/") or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES)
     )
 
 
@@ -92,6 +91,7 @@ class TurnWork(BaseModel):
     output: str = ""
     billing: dict[str, object] = Field(default_factory=dict)
     error: str = ""
+    stopped: bool = False
     processing_emoji: str = ""
     terminal_emoji: str = ""
 

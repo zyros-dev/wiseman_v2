@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, cast
 import discord
 from prometheus_client import Counter, Gauge
 
-from app.clients.discord_client import mention_ids, normalize_message
+from app.admission import admitted
+from app.clients.discord_client import normalize_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -35,7 +36,6 @@ class Gateway(discord.Client):
         allowlist: set[int],
         activity_path: str | Path | None = None,
         profile_path: str | Path | None = None,
-        sequence_path: str | Path | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -45,11 +45,7 @@ class Gateway(discord.Client):
         self.temporal: TemporalClient | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
-        self.sequence_path = (
-            Path(sequence_path)
-            if sequence_path
-            else self.activity_path and self.activity_path.with_name("thread-sequence.json")
-        )
+        self.sequence_path = self.activity_path and self.activity_path.with_name("thread-sequence.json")
         self.thread_sequence = self._load_thread_sequence()
         self._load_profile()
 
@@ -142,7 +138,6 @@ class Gateway(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         raw = self.raw_gateway_payloads.pop(str(message.id), {})
         DISCORD_MESSAGES.inc()
-        LOGGER.warning("Discord message received id=%s mentions=%s", message.id, mention_ids(message))
         if not await self._eligible(message):
             return
         if self.temporal is None:
@@ -159,39 +154,34 @@ class Gateway(discord.Client):
         channel = message.channel
         reply_to_self = await self._replies_to_self(message)
         if isinstance(channel, discord.Thread) and not self._is_self(message):
+            if message.content.strip() == "/stop" and self.temporal is not None:
+                await self.temporal.stop(Event(trigger=normalize_message(message, str(channel.id), str(channel.id)), kind="stop"))
+                return False
             reference_id = getattr(message.reference, "message_id", None)
             if (
                 reference_id is not None
                 and self.temporal is not None
-                and await self.temporal.steer(
-                    Event(trigger=normalize_message(message, str(channel.id), str(channel.id)))
-                )
+                and await self.temporal.steer(Event(trigger=normalize_message(message, str(channel.id), str(channel.id))))
             ):
                 return False
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
         eligible = (
             not self._is_self(message)
             and (not self.allowlist or guild_id in self.allowlist)
-            and (str(getattr(self.user, "id", "")) in mention_ids(message) or reply_to_self)
+            and admitted(
+                normalize_message(message, str(getattr(channel, "id", "")), None),
+                str(getattr(self.user, "id", "")),
+                reply_to_bot=reply_to_self,
+            )
         )
         if not eligible:
-            LOGGER.warning(
-                "Discord message ignored id=%s reason=not-admitted mentions=%s guild=%s allowlisted=%s",
-                message.id,
-                mention_ids(message),
-                guild_id,
-                not self.allowlist or guild_id in self.allowlist,
-            )
+            LOGGER.debug("Ignoring non-admitted Discord message %s", message.id)
         return eligible
 
     async def _replies_to_self(self, message: discord.Message) -> bool:
         reference = getattr(message, "reference", None)
         resolved = getattr(reference, "resolved", None)
-        if (
-            resolved is None
-            and getattr(reference, "message_id", None)
-            and callable(fetch := getattr(message.channel, "fetch_message", None))
-        ):
+        if resolved is None and getattr(reference, "message_id", None) and callable(fetch := getattr(message.channel, "fetch_message", None)):
             with suppress(discord.DiscordException, ValueError):
                 resolved = await cast("Callable[[int], Awaitable[object]]", fetch)(int(reference.message_id))
         return resolved is not None and self._is_self(cast("discord.Message", resolved))
