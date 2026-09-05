@@ -56,7 +56,7 @@ class ModelState:
         self.vertex = target
         if name in {"admit-question", "queue-question"} and message_id:
             self.pending += 1
-        if target == Vertex.IDLE and self.pending:
+        if name in {"stop-confirmed", "error-finalized", "delivery-finalized"} and self.pending:
             self.pending -= 1
             self.turns += 1
 

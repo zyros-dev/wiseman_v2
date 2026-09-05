@@ -6,10 +6,27 @@ The compact suite covers the normalized Discord admission path, startup and
 follow-up context selection, Engine delivery and reactions, provider SSE
 forwarding, image/file/profile tools, the Temporal test server, duplicate
 messages, session retention, and retirement. The current run is 3 tests with
-60.06% application coverage and a checked-in 55% floor.
+59.91% application coverage and a checked-in 55% floor.
+
+## Step 1 test reduction
+
+The standalone admission fuzzer was removed because it duplicated the
+admission assertions without exercising the required GraphWalker model. The
+retained tests have separate responsibilities: the Temporal boundary test
+proves workflow execution and cancellation, the client boundary test proves
+tool/provider contracts, and the GraphWalker test proves native path replay
+through `/v1/replay/discord`. Step 2 will extend the retained GraphWalker
+model rather than add another test harness.
+
+Step 2 evidence: the pinned GraphWalker 4.3.3 CLI generated one edge-coverage
+path and two independent 100-transition seeded walks on Thor. Each path was
+replayed through `/v1/replay/discord`; the three retained tests passed for all
+three traversals. Duplicate questions now receive `duplicate`, background
+messages and idle stops receive `ignored`, and admitted questions receive
+`queued`.
 
 Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,999/3,000`; no
+and `git diff --check` pass. The counted source budget is `2,970/3,000`; no
 production file exceeds 500 counted lines and application code contains no
 `Any` annotations.
 
