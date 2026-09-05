@@ -45,8 +45,6 @@ class Gateway(discord.Client):
         self.temporal: TemporalClient | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
-        self.sequence_path = self.activity_path and self.activity_path.with_name("thread-sequence.json")
-        self.thread_sequence = self._load_thread_sequence()
         self._load_profile()
 
     async def on_ready(self) -> None:
@@ -65,21 +63,6 @@ class Gateway(discord.Client):
                 self.raw_gateway_payloads[data["id"]] = cast("JsonObject", value)
                 if len(self.raw_gateway_payloads) > RAW_CAPTURE_LIMIT:
                     self.raw_gateway_payloads.pop(next(iter(self.raw_gateway_payloads)))
-
-    def _load_thread_sequence(self) -> int:
-        if self.sequence_path is None or not self.sequence_path.exists():
-            return 0
-        try:
-            return max(0, int(json.loads(self.sequence_path.read_text(encoding="utf-8"))))
-        except (OSError, TypeError, ValueError):
-            LOGGER.warning("Ignoring invalid Wiseman thread sequence state")
-            return 0
-
-    def _next_thread_name(self) -> str:
-        self.thread_sequence += 1
-        if self.sequence_path is not None:
-            _atomic_write(self.sequence_path, str(self.thread_sequence))
-        return thread_name(self.thread_sequence)
 
     def _load_profile(self) -> None:
         if self.profile_path is None or not self.profile_path.exists():
@@ -199,7 +182,7 @@ class Gateway(discord.Client):
         else:
             try:
                 thread = await message.create_thread(
-                    name=self._next_thread_name(),
+                    name=thread_name(message.content, str(getattr(self.user, "id", ""))),
                     auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 )
             except discord.DiscordException:

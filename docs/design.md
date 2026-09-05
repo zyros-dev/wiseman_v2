@@ -79,7 +79,8 @@ guild-based and is enforced for both parent channels and managed threads;
 messages from DMs or other guilds are ignored before context collection. The
 trigger message remains the reaction target; all banner, progress, failure,
 and answer messages are delivered inside the managed thread.
-New threads use sequential `Gurt N` names persisted across gateway restarts.
+New threads use a sanitized, bounded preview of the triggering user message as
+their name, with `Wiseman thread` as the empty-message fallback.
 The gateway also sets Discord's one-hour auto-archive setting, persists
 last-human-activity timestamps on its mounted state volume, and closes and
 locks managed threads after that same one-hour idle interval; cleanup failures

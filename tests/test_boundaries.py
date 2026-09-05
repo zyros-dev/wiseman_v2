@@ -10,6 +10,7 @@ from app.clients.mock_clients import MockDiscord, mock_container
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.models import State, TurnWork
+from app.presentation import thread_name
 
 
 def _raw(message_id: str, content: str, *, thread: str | None = "t", attachments: list[dict[str, object]] | None = None) -> dict[str, object]:
@@ -40,6 +41,10 @@ def test_admission_normalizes_discord_and_selects_only_new_images() -> None:
     assert json.loads(str(grammar["rendered"])) == {"mode": "startup", "count": 0}
 
 
+def test_thread_name_uses_trigger_text() -> None:
+    assert thread_name("<@bot>  what is this?\n", "bot") == "what is this?"
+
+
 async def test_engine_delivers_progress_and_reconciles_terminal_reaction() -> None:
     clients = mock_container()
     engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
@@ -47,9 +52,12 @@ async def test_engine_delivers_progress_and_reconciles_terminal_reaction() -> No
     await engine.prepare_context(work)
     await engine.prepare_prompt(work)
     await engine.render(work)
+    work.processing_emoji = engine.reaction_emojis["processing"]
+    await engine.reconcile(work)
+    discord = cast("MockDiscord", clients.discord)
+    assert discord.state.reactions["q1"] == ["👀"]
     await engine.execute(work, lambda message: engine.config.phoenix.record(work.trace, "progress", message=message))
     result = await engine.finish(work)
-    discord = cast("MockDiscord", clients.discord)
     assert result["output"]
     assert discord.state.reactions["q1"] == ["✅"]
     assert any(item[1] == "edit" for item in discord.state.calls)

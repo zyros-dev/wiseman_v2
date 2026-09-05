@@ -81,8 +81,8 @@ class HttpRunner:
                 value = response.json()
                 steps = value.get("steps", [])
                 if progress is not None and isinstance(steps, list):
-                    if messages := [str(message) for message in steps[cursor:][-8:]]:
-                        await progress("\n".join(messages))
+                    for message in steps[cursor:][-8:]:
+                        await progress(str(message))
                     cursor = len(steps)
                 if value.get("status") == "running":
                     await asyncio.sleep(0.75)

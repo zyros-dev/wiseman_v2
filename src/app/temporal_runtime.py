@@ -131,12 +131,13 @@ class TurnWorkflow:
 
     @workflow.signal
     def progress(self, message: str) -> None:
-        if not self.pending_progress or self.pending_progress[-1] != message:
-            self.pending_progress = [*self.pending_progress[-31:], message]
+        key = _progress_key(message)
+        self.pending_progress = [item for item in self.pending_progress if _progress_key(item) != key][-31:]
+        self.pending_progress.append(message)
 
     async def _node(self, name: str, *, durable: bool = False) -> None:
         assert self.work is not None
-        self.work.state.progress = [*self.work.state.progress, *self.pending_progress][-32:]
+        self.work.state.progress = _merge_progress(self.work.state.progress, self.pending_progress)
         self.pending_progress.clear()
         result = TurnWork.model_validate(
             await workflow.execute_activity(
@@ -381,6 +382,22 @@ def _event(payload: dict) -> Event:
 
 def _state(payload: dict) -> JsonObject:
     return _object_map(payload.get("state"))
+
+
+def _progress_key(message: str) -> str:
+    return message.split("...", 1)[0].split('"', 1)[0].strip()
+
+
+def _merge_progress(existing: list[str], updates: list[str]) -> list[str]:
+    merged = list(existing)
+    for message in updates:
+        key = _progress_key(message)
+        match = next((index for index, item in enumerate(merged) if _progress_key(item) == key), None)
+        if match is None:
+            merged.append(message)
+        else:
+            merged[match] = message
+    return merged[-32:]
 
 
 def _sequence(value: object) -> list[object]:
