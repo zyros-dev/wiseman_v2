@@ -51,6 +51,7 @@ class Gateway(discord.Client):
 
     async def on_ready(self) -> None:
         DISCORD_CONNECTED.set(1)
+        LOGGER.info("Discord gateway ready as %s", self.user)
         await self._discover_managed_threads()
 
     async def on_disconnect(self) -> None:
