@@ -188,7 +188,7 @@ def _prepare_codex(path: Path) -> None:
         )
     agents = path / "AGENTS.md"
     if not agents.exists():
-        agents.write_text("Read shared/AGENTS.md and shared/memories.md before acting.\n")
+        agents.write_text((PROMPT_ROOT / "sandbox-developer-instructions.j2").read_text(encoding="utf-8"))
     agents.chmod(0o600)
 
 
