@@ -246,6 +246,7 @@ class ThreadWorkflow:
 
     @workflow.run
     async def run(self, first: dict) -> dict:
+        workflow.patched("split-startup-activities")
         self.state = _object_map(first.get("state"))
         self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
         if event := _object_map(first.get("event")):
