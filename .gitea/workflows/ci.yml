@@ -59,6 +59,7 @@ jobs:
       - name: Compile and sandbox smoke
         run: |
           uv run python -m compileall -q src sandbox/src tests tools
+          docker build -t wiseman-v2-gateway:ci .
           docker build -t wiseman-v2-sandbox:ci -f sandbox/Dockerfile .
           container=$(docker run -d -p 18090:8090 wiseman-v2-sandbox:ci)
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
