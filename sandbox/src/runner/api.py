@@ -32,13 +32,17 @@ from pydantic import BaseModel, Field
 from runner.jobs import Jobs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
+    from openai_codex import AsyncThread, AsyncTurnHandle
+    from openai_codex.generated.v2_all import ThreadItem, ThreadTokenUsage
     from openai_codex.models import Notification
 
-CODEX_TEXT_ONLY_OVERRIDES = (
+CODEX_RUNTIME_OVERRIDES = (
     "features.view_image=false",
     "features.image_generation=false",
+    "features.multi_agent=false",
+    "features.multi_agent_v2=false",
 )
 PROMPT_ROOT = Path(os.getenv("WISEMAN_PROMPT_ROOT", str(Path(__file__).parents[3] / "contracts")))
 
@@ -180,11 +184,11 @@ def _auth(got: str | None, expected: str) -> None:
 class CodexRunner:
     def __init__(self) -> None:
         self.codex: dict[str, AsyncCodex] = {}
-        self.threads: dict[str, object] = {}
+        self.threads: dict[str, AsyncThread] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress: dict[str, str] = {}
         self.progress_steps: dict[str, list[str]] = {}
-        self.active_turns: dict[str, object] = {}
+        self.active_turns: dict[str, AsyncTurnHandle] = {}
         self.turn_counts: dict[str, int] = {}
         self.last_used: dict[str, float] = {}
         self.cache_limit = max(1, int(os.getenv("WISEMAN_MAX_IDLE_CLIENTS", "64")))
@@ -199,8 +203,8 @@ class CodexRunner:
     async def _start_locked(self, turn: Turn, path: Path, account: str) -> dict[str, object]:
         self.last_used[turn.thread_id] = time.monotonic()
         existing = self.threads.get(turn.thread_id)
-        if existing is not None and (not turn.codex_thread_id or getattr(existing, "id", None) == turn.codex_thread_id):
-            return {"thread_id": getattr(existing, "id", "")}
+        if existing is not None and (not turn.codex_thread_id or existing.id == turn.codex_thread_id):
+            return {"thread_id": existing.id}
         client = self._client(turn, path, account)
         if turn.codex_thread_id:
             start = partial(client.thread_resume, turn.codex_thread_id)
@@ -223,17 +227,19 @@ class CodexRunner:
     def _client(self, turn: Turn, path: Path, account: str) -> AsyncCodex:
         key = turn.thread_id
         if key not in self.codex:
-            env = dict(os.environ)
+            env = {}
             if relay := os.getenv("WISEMAN_RELAY_URL"):
                 env["OPENAI_BASE_URL"] = relay
             env["OPENAI_API_KEY"] = os.getenv("WISEMAN_PROVIDER_TOKEN", "")
+            env["WISEMAN_RELAY_URL"] = os.getenv("WISEMAN_RELAY_URL", "")
+            env["WISEMAN_MCP_TOKEN"] = os.getenv("WISEMAN_MCP_TOKEN", env["OPENAI_API_KEY"])
             env["HOME"], env["CODEX_HOME"] = str(path), str(path / ".codex")
             env["WISEMAN_EXEC_USER"] = account
             env["WISEMAN_THREAD_ID"] = turn.thread_id
             self.codex[key] = AsyncCodex(
                 CodexConfig(
-                    codex_bin=os.getenv("WISEMAN_CODEX_BIN") or None,
-                    config_overrides=CODEX_TEXT_ONLY_OVERRIDES,
+                    codex_bin=os.getenv("WISEMAN_CODEX_BIN") or str(Path(__file__).parents[2] / "codex-as-user"),
+                    config_overrides=CODEX_RUNTIME_OVERRIDES,
                     cwd=str(path),
                     env=env,
                 )
@@ -254,12 +260,12 @@ class CodexRunner:
         if not steps or steps[-1] != message:
             steps.append(message)
 
-    async def _run_thread(self, thread: object, turn: Turn, path: Path) -> dict[str, object]:
+    async def _run_thread(self, thread: AsyncThread, turn: Turn, path: Path) -> dict[str, object]:
         turn_number = turn.turn_number or self.turn_counts.get(turn.thread_id, 0) + 1
         self.turn_counts[turn.thread_id] = turn_number
         self._set_progress(turn.thread_id, f"🤖 Gurt {turn_number}: Codex turn started...")
-        items: list[object] = []
-        usage: object = None
+        items: list[ThreadItem] = []
+        usage: ThreadTokenUsage | None = None
         completed: TurnCompletedNotification | None = None
         active_turn = await thread.turn(
             turn.input,
@@ -319,15 +325,15 @@ class CodexRunner:
     async def steer(self, turn: Turn, path: Path, account: str = "") -> bool:
         del path, account
         active = self.active_turns.get(turn.thread_id)
-        if active is None or not hasattr(active, "steer"):
+        if active is None:
             return False
         await active.steer(turn.input)
         return True
 
 
-def _final_response(items: list[object]) -> str:
+def _final_response(items: list[ThreadItem]) -> str:
     for item in reversed(items):
-        root = getattr(item, "root", item)
+        root = item.root
         if isinstance(root, AgentMessageThreadItem) and root.text:
             return root.text
     return ""
@@ -459,7 +465,7 @@ def create_app() -> FastAPI:
 
 
 @asynccontextmanager
-async def _lifespan(jobs: Jobs, codex: CodexRunner, _app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(jobs: Jobs, codex: CodexRunner, _app: FastAPI) -> AsyncGenerator[None, None]:
     async def sweep() -> None:
         while True:
             await codex.expire()

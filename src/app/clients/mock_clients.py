@@ -14,11 +14,12 @@ from app.clients.client_interfaces import (
     RunnerClient,
     TemporalClient,
 )
+from app.models import DeliveryReceipt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from app.models import MessageRef, Upload
+    from app.models import Event, MessageRef, Upload
     from app.types import JsonObject
 
 type Failure = str
@@ -47,8 +48,9 @@ class MockState:
     records: list[dict[str, object]] = field(default_factory=list)
     audits: dict[str, dict[str, object]] = field(default_factory=dict)
     turn_ids: dict[str, str] = field(default_factory=dict)
-    profile: dict[str, str] = field(default_factory=dict)
+    profile: dict[str, str | bytes] = field(default_factory=dict)
     files: dict[str, str] = field(default_factory=dict)
+    uploads: dict[str, Upload] = field(default_factory=dict)
     nonces: dict[str, str] = field(default_factory=dict)
 
     def call(self, client: str, operation: str, *values: str) -> None:
@@ -100,6 +102,7 @@ class MockDiscord(DiscordClient):
         self.state.messages[message_id] = content
         if upload is not None:
             self.state.files[message_id] = upload.name
+            self.state.uploads[message_id] = upload
 
     async def add_reaction(self, ref: MessageRef, emoji: str) -> None:
         message_id = ref.message_id
@@ -123,12 +126,13 @@ class MockDiscord(DiscordClient):
         self.state.call("discord", "lock_thread", thread_id)
         self.state.locked.add(thread_id)
 
-    async def send_file(self, channel_id: str, path: str, caption: str = "") -> str:
-        self.state.call("discord", "send_file", channel_id, path, caption)
+    async def send_file(self, channel_id: str, upload: Upload, caption: str = "") -> DeliveryReceipt:
+        self.state.call("discord", "send_file", channel_id, upload.name, caption)
         message_id = f"file-{self.next_id}"
         self.next_id += 1
-        self.state.files[message_id] = path
-        return message_id
+        self.state.files[message_id] = upload.name
+        self.state.uploads[message_id] = upload
+        return DeliveryReceipt(message_id, f"https://discord.test/{channel_id}/{message_id}")
 
     def advance(self, seconds: float) -> None:
         if seconds < 0:
@@ -138,12 +142,13 @@ class MockDiscord(DiscordClient):
             if self.state.fake_time - touched >= 60 * 60:
                 self.state.archived.add(thread_id)
 
-    async def set_profile(self, username: str | None, avatar: str | None) -> None:
-        self.state.call("discord", "set_profile", username or "", avatar or "")
+    async def set_profile(self, username: str | None, avatar: bytes | None) -> str:
+        self.state.call("discord", "set_profile", username or "", str(len(avatar or b"")))
         if username is not None:
             self.state.profile["username"] = username
         if avatar is not None:
             self.state.profile["avatar"] = avatar
+        return str(self.state.profile.get("username", "Wiseman"))
 
     async def set_reactions(self, values: dict[str, str]) -> None:
         self.state.call("discord", "set_reactions", *sorted(values.values()))
@@ -155,6 +160,16 @@ class MockTemporal(TemporalClient):
 
     async def submit(self, event: JsonObject) -> None:
         self.state.call("temporal", "submit", str(event.get("trigger", "")))
+
+    async def start(self) -> None:
+        self.state.call("temporal", "start")
+
+    async def close(self) -> None:
+        self.state.call("temporal", "close")
+
+    async def steer(self, event: Event) -> bool:
+        self.state.call("temporal", "steer", event.trigger.id)
+        return False
 
 
 class MockPhoenix(PhoenixClient):

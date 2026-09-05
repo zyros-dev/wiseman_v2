@@ -1,2 +1,2 @@
-project-includes = ["src/**/*.py", "tests/**/*.py"]
+project-includes = ["src/**/*.py", "sandbox/src/**/*.py", "tests/**/*.py", "tools/**/*.py"]
 search-path = ["src", "sandbox/src", "."]

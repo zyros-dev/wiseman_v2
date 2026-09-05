@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Nick van der Merwe
 from __future__ import annotations
 
-import base64
 import io
 import re
 import secrets
@@ -9,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import discord
 
-from app.models import Message
+from app.models import DeliveryReceipt, Message
 
 if TYPE_CHECKING:
     from app.gateway import Gateway
@@ -88,17 +87,23 @@ class RealDiscord:
             raise TypeError("Only a thread can be locked")
         await channel.edit(locked=True)
 
-    async def send_file(self, channel_id: str, path: str, caption: str = "") -> str:
-        message = await (await self.channel(channel_id)).send(caption or None, file=discord.File(path))
-        return str(message.id)
+    async def send_file(self, channel_id: str, upload: Upload, caption: str = "") -> DeliveryReceipt:
+        channel = await self.channel(channel_id)
+        if not isinstance(channel, discord.Thread):
+            raise TypeError("file delivery requires a Discord thread")
+        message = await channel.send(caption or None, file=discord.File(io.BytesIO(upload.data), filename=upload.name))
+        return DeliveryReceipt(str(message.id), message.jump_url)
 
-    async def set_profile(self, username: str | None, avatar: str | None) -> None:
+    async def set_profile(self, username: str | None, avatar: bytes | None) -> str:
         if self.gateway.user is None:
             raise RuntimeError("Discord bot identity is unavailable")
-        if username is not None:
-            await self.gateway.user.edit(username=username)
-        if avatar is not None:
-            await self.gateway.user.edit(avatar=base64.b64decode(avatar, validate=True))
+        if username is not None and avatar is not None:
+            updated = await self.gateway.user.edit(username=username, avatar=avatar)
+        elif username is not None:
+            updated = await self.gateway.user.edit(username=username)
+        else:
+            updated = await self.gateway.user.edit(avatar=avatar)
+        return updated.name
 
     async def set_reactions(self, values: dict[str, str]) -> None:
         self.gateway.engine.set_reaction_emojis(values)

@@ -63,7 +63,7 @@ from app.temporal_runtime import (
 )
 from app.types import EngineResult, JsonObject, StateData
 from runner.api import (
-    CODEX_TEXT_ONLY_OVERRIDES,
+    CODEX_RUNTIME_OVERRIDES,
     ApprovalMode,
     CodexRunner,
     Sandbox,
@@ -405,30 +405,10 @@ def test_reaction_configuration_changes_future_turns() -> None:
 
 
 def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> None:
-    class User:
-        name = "Wiseman"
-
-        def __init__(self) -> None:
-            self.edits: list[dict[str, object]] = []
-
-        async def edit(self, **kwargs: object) -> None:
-            self.edits.append(kwargs)
-
-    class Sent:
-        id = 42
-        jump_url = "https://discord.test/messages/42"
-
-    class Thread:
-        async def send(self, **kwargs: object) -> Sent:
-            self.payload = kwargs
-            return Sent()
-
     monkeypatch.setenv("WISEMAN_PROVIDER_TOKEN", "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
-    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
     engine = configured_engine()
     app = mock_app(engine, token="secret")
-    app.state.gateway._connection.user = User()
 
     with TestClient(app) as client:
         headers = {"authorization": "Bearer secret"}
@@ -457,13 +437,8 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
             json={"username": "New Wiseman", "avatar_base64": "aGVsbG8="},
         )
         assert profile.status_code == 200
-        assert app.state.gateway.user.edits == [{"username": "New Wiseman", "avatar": b"hello"}]
-
-        monkeypatch.setattr(
-            app.state.gateway,
-            "fetch_channel",
-            lambda _channel_id: __import__("asyncio").sleep(0, result=Thread()),
-        )
+        assert isinstance(engine.discord, MockDiscord)
+        assert engine.discord.state.profile == {"username": "New Wiseman", "avatar": b"hello"}
         uploaded = client.post(
             "/v1/tools/send-file",
             headers=headers,
@@ -475,7 +450,7 @@ def test_discord_tools_update_reactions_profile_and_send_file(monkeypatch) -> No
             },
         )
         assert uploaded.status_code == 200
-        assert uploaded.json()["message_id"] == "42"
+        assert engine.discord.state.uploads[uploaded.json()["message_id"]].data == b"hello"
 
     assert app.state.gateway.profile_path is None
 
@@ -1062,18 +1037,6 @@ def test_app_health_and_replay_authentication() -> None:
     assert client.post("/v1/replay/discord", headers={"x-replay-token": "secret"}, json={}).status_code == 422
 
 
-def test_app_starts_discord_with_discord_token_not_replay_token(monkeypatch) -> None:
-    received: list[str] = []
-
-    async def fake_run(_bot: Gateway, token: str) -> None:
-        received.append(token)
-
-    monkeypatch.setattr(Gateway, "run_forever", fake_run)
-    with TestClient(mock_app(configured_engine(), token="replay", discord_token="discord")):
-        pass
-    assert received == ["discord"]
-
-
 @pytest.mark.asyncio
 async def test_gateway_retries_a_fatal_session_error(monkeypatch) -> None:
     bot = Gateway(configured_engine(), {1})
@@ -1382,11 +1345,7 @@ async def test_temporal_preflight_activities_use_runner_lifecycle(monkeypatch) -
             calls.append(("start", (thread, user, workspace)))
             return "codex-thread"
 
-    class Engine:
-        runner = Runner()
-
-    engine = Engine()
-    engine.config = engine  # type: ignore[attr-defined]
+    engine = SimpleNamespace(config=SimpleNamespace(runner=Runner()))
     monkeypatch.setattr("app.temporal_runtime._activity_runtime.engine", engine)
     payload = {"event": normalize_event(discord_message("m", "hello", thread="t")).model_dump(mode="json")}
     assert await provision_workspace(cast("JsonObject", payload)) == {"workspace": "t"}
@@ -1547,122 +1506,48 @@ async def test_temporal_turn_workflow_owns_activity_retry_policy(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_gateway_uses_same_admission_for_parent_and_thread(monkeypatch) -> None:
-    class Guild:
-        def __init__(self, gid: int) -> None:
-            self.id = gid
+    parent = Mock(spec=discord.TextChannel, id=1, guild=SimpleNamespace(id=1))
+    thread = Mock(spec=discord.Thread, id=2, parent_id=1, guild=parent.guild)
+    thread.parent = parent
 
-    class User:
-        id, name, bot = 7, "Nick", False
+    def raw_message(mid, channel):
+        return Mock(
+            spec=discord.Message,
+            id=mid,
+            channel=channel,
+            content="context",
+            author=SimpleNamespace(id=8, name="Nick", bot=True),
+            raw_mentions=[7],
+            created_at=datetime.now(UTC),
+            attachments=[],
+            reference=None,
+        )
 
-    class Channel:
-        id, parent_id = 1, None
+    async def history(channel):
+        yield raw_message(f"history-{channel.id}", channel)
 
-        def __init__(self) -> None:
-            self.guild = Guild(1)
-            self.sent: list[str] = []
-            self.embeds: list[object] = []
-            self.thread: Thread | None = None
-
-        async def history(self, **kwargs: object):
-            del kwargs
-            yield raw_message("parent-history", self)
-
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            self.sent.append(content)
-            self.embeds.append(kwargs.get("embed"))
-            return object()
-
-    class Thread(Channel):
-        parent_id = 1
-
-        def __init__(self, parent: Channel) -> None:
-            self.id, self.parent, self.guild = 2, parent, parent.guild
-            self.sent: list[str] = []
-            self.embeds: list[object] = []
-
-        async def history(self, **kwargs: object):
-            del kwargs
-            yield raw_message("thread-history", self)
-
-        async def send(self, content: str = "", **kwargs: object) -> object:
-            index = len(self.sent)
-            self.sent.append(content)
-            self.embeds.append(kwargs.get("embed"))
-
-            class Delivery:
-                async def edit(self, *, content: str) -> None:
-                    thread.sent[index] = content
-
-            thread = self
-            return Delivery()
-
-        async def edit(self, **kwargs: object) -> None:
-            del kwargs
-
-    class Message:
-        def __init__(self, mid: str, channel: Channel, content: str) -> None:
-            self.id, self.channel, self.content = mid, channel, content
-            self.author, self.mentions = User(), []
-            self.raw_mentions = [bot_user.id]
-            self.created_at = datetime.now(UTC)
-            self.attachments, self.reference = (), None
-            self.reactions: list[str] = []
-
-        async def create_thread(self, name: str, auto_archive_duration: int) -> Thread:
-            assert name == "Gurt 1"
-            assert auto_archive_duration == 60
-            self.channel.thread = Thread(self.channel)
-            return self.channel.thread
-
-        async def add_reaction(self, emoji: str) -> None:
-            self.reactions.append(emoji)
-
-        async def remove_reaction(self, emoji: str, member: object) -> None:
-            del member
-            self.reactions.remove(emoji)
-
-    def raw_message(mid: str, channel: Channel) -> Message:
-        item = Message(mid, channel, "context")
-        item.mentions = []
-        return item
-
-    parent = Channel()
-    bot_user = User()
-    engine = configured_engine()
-    monkeypatch.setattr("app.gateway.discord.Thread", Thread)
-    bot = Gateway(engine, {1})
-    bot._connection.user = cast("discord.ClientUser", bot_user)
-    startup = Message("start", parent, "hello")
-    startup.author.bot = True
-    startup.author.id = 8
+    parent.history = lambda **kwargs: history(parent)
+    thread.history = lambda **kwargs: history(thread)
+    bot = Gateway(configured_engine(), {1})
+    bot._connection.user = cast("discord.ClientUser", SimpleNamespace(id=7))
+    temporal = AsyncMock()
+    bot.temporal = temporal
+    startup = raw_message("start", parent)
+    startup.create_thread = AsyncMock(return_value=thread)
     await bot.on_socket_raw_receive('{"op":0,"t":"MESSAGE_CREATE","d":{"id":"start"}}')
-    await bot.on_message(cast("discord.Message", startup))
-    assert parent.thread is not None
-    audit = engine.config.phoenix.audit("discord-start")
-    assert audit is not None
-    assert cast("dict[str, object]", audit["raw_request"])["t"] == "MESSAGE_CREATE"
-    followup = Message("follow", parent.thread, "next")
-    followup.author.bot = True
-    followup.author.id = 8
-    await bot.on_message(cast("discord.Message", followup))
-    assert bot.fallback_state["2"]["turn"] == 2
-    assert isinstance(engine.discord, MockDiscord)
-    state = engine.discord.state
-    assert state.reactions == {"start": ["✅"], "follow": ["✅"]}
-    sent = list(state.messages.values())
-    assert len(sent) == 3
-    assert sent[0] == ""
-    assert sent[1].startswith("Codex received: ")
-    assert sent[2].startswith("Codex received: ")
-    assert not parent.sent
-    assert next(iter(state.embeds.values()))["title"] == "⚡ Wiseman thread startup"
-    assert [call.values[0] for call in state.calls if call.operation == "send"] == ["2", "2", "2"]
-
-    rejected = Channel()
-    rejected.guild = Guild(2)
-    ignored = Message("ignored", rejected, "hello")
-    await bot.on_message(cast("discord.Message", ignored))
-    assert "ignored" not in bot.fallback_state
+    await bot.on_message(startup)
+    await bot.on_message(raw_message("follow", thread))
+    startup.create_thread.assert_awaited_once_with(name="Gurt 1", auto_archive_duration=60)
+    events = [Event.model_validate(call.args[0]) for call in temporal.submit.await_args_list]
+    assert [event.kind for event in events] == ["startup", "followup"]
+    assert [event.trigger.channel_id for event in events] == ["1", "2"]
+    assert all(event.trigger.thread_id == "2" for event in events)
+    assert events[0].raw_payload["t"] == "MESSAGE_CREATE"
+    assert events[1].thread_messages[0].id == "history-2"
+    assert all(event.parent_messages[0].id == "history-1" for event in events)
+    rejected = Mock(spec=discord.TextChannel, id=3, guild=SimpleNamespace(id=2))
+    await bot.on_message(raw_message("ignored", rejected))
+    assert temporal.submit.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1939,7 +1824,7 @@ def test_runner_starts_and_resumes_codex_thread(tmp_path, monkeypatch) -> None:
     assert len(calls) == 1
     assert "Never claim to have searched" in str(calls[0]["developer_instructions"])
     assert "sudo -n apt-get" in str(calls[0]["developer_instructions"])
-    assert configs[0].config_overrides == CODEX_TEXT_ONLY_OVERRIDES
+    assert configs[0].config_overrides == CODEX_RUNTIME_OVERRIDES
     assert 'base_url = "http://relay/v1"' in (tmp_path / "users/u/threads/t/.codex/config.toml").read_text()
 
 

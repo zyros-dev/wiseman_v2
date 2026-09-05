@@ -20,7 +20,7 @@ from app.clients.mock_clients import (
     MockState,
 )
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message, MessageRef, State, TurnWork
+from app.models import Event, Message, MessageRef, State, TurnWork, Upload
 from app.phoenix import PromptHub
 from app.temporal_runtime import TurnWorkflow
 
@@ -134,13 +134,13 @@ class DiscordClientMachine(RuleBasedStateMachine):
     @rule()
     def sends_files(self) -> None:
         if self.thread_ids:
-            run_safely(self.client.send_file(self.thread_ids[-1], "artifact.bin"))
+            run_safely(self.client.send_file(self.thread_ids[-1], Upload("artifact.bin", b"artifact")))
 
     @rule(
         username=st.one_of(st.none(), st.text(min_size=2, max_size=12)),
-        avatar=st.one_of(st.none(), st.text(max_size=12)),
+        avatar=st.one_of(st.none(), st.binary(max_size=12)),
     )
-    def updates_profile(self, username: str | None, avatar: str | None) -> None:
+    def updates_profile(self, username: str | None, avatar: bytes | None) -> None:
         run_safely(self.client.set_profile(username, avatar))
 
     @rule()
@@ -197,8 +197,8 @@ def test_failed_discord_mutation_is_atomic(operation: str) -> None:
         "discord.remove_reaction": lambda: client.remove_reaction(MessageRef("channel", message), "👀"),
         "discord.archive_thread": lambda: client.archive_thread(thread),
         "discord.lock_thread": lambda: client.lock_thread(thread),
-        "discord.send_file": lambda: client.send_file(thread, "artifact.bin"),
-        "discord.set_profile": lambda: client.set_profile("Wise Man", "avatar.png"),
+        "discord.send_file": lambda: client.send_file(thread, Upload("artifact.bin", b"artifact")),
+        "discord.set_profile": lambda: client.set_profile("Wise Man", b"avatar"),
         "discord.set_reactions": lambda: client.set_reactions({"success": "✅"}),
     }
     before = _discord_snapshot(state, client)
@@ -219,6 +219,7 @@ def _discord_snapshot(state: MockState, client: MockDiscord) -> tuple[object, ..
         deepcopy(state.channel_history),
         deepcopy(state.profile),
         deepcopy(state.files),
+        deepcopy(state.uploads),
         client.next_id,
     )
 

@@ -5,11 +5,10 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import io
 import json
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, cast
@@ -21,14 +20,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
-    from app.clients.client_interfaces import (
-        PhoenixClient,
-        PromptClient,
-        RunnerClient,
-        TemporalClient,
-    )
+    from app.clients.client_interfaces import TemporalClient
     from app.models import Event
     from app.types import JsonObject
 
@@ -38,6 +32,7 @@ from app.clients.discord_client import RealDiscord
 from app.clients.real_clients import RealDependencies, real_services
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
+from app.models import Upload
 from app.phoenix import json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
@@ -55,7 +50,7 @@ class _Context:
     engine: Engine
     bot: Gateway
     clients: ClientContainer
-    temporal: TemporalRuntime | None
+    temporal: TemporalClient | None
     token: str
     discord_token: str
     replay_state: dict[str, JsonObject] = field(default_factory=dict)
@@ -101,6 +96,19 @@ def _context(engine: Engine | None, token: str, discord_token: str, clients: Cli
     settings = clients.settings if clients is not None else ClientSettings.from_env()
     token = token or settings.runner_token
     discord_token = discord_token or settings.discord_token
+    settings = replace(settings, runner_token=token, discord_token=discord_token)
+    real = clients is None or clients.mode is ClientMode.REAL
+    if real and not all(
+        (
+            discord_token,
+            settings.temporal_address,
+            settings.runner_url,
+            token,
+            settings.phoenix_endpoint,
+            settings.prompt_hub_url,
+        )
+    ):
+        raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
     services = real_services(settings) if clients is None else None
     if engine is None:
         if clients is not None:
@@ -115,27 +123,25 @@ def _context(engine: Engine | None, token: str, discord_token: str, clients: Cli
         str(Path(activity_file).with_name("profile.json")) if activity_file else None
     )
     bot = Gateway(engine, allowlist, activity_file, profile_file)
-    temporal = (
-        TemporalRuntime(settings.temporal_address, settings.temporal_queue) if settings.temporal_address else None
-    )
-    bot.temporal = temporal
     if clients is None:
-        services = services or real_services(settings)
         clients = build_clients(
             ClientMode.REAL,
             settings,
             RealDependencies(
                 discord=RealDiscord(bot),
-                temporal=cast("TemporalClient", temporal),
-                phoenix=cast("PhoenixClient", engine.config.phoenix),
-                prompts=cast("PromptClient", engine.config.prompts),
-                runner=cast("RunnerClient", engine.config.runner),
+                temporal=TemporalRuntime(settings.temporal_address, settings.temporal_queue),
+                phoenix=engine.config.phoenix,
+                prompts=engine.config.prompts,
+                runner=engine.config.runner,
             ),
         )
     engine.config = EngineConfig(
         clients.phoenix, clients.runner, clients.prompts, engine.config.context, clients.discord
     )
-    assert clients is not None
+    temporal = clients.temporal if real else None
+    bot.temporal = clients.temporal
+    if not real:
+        discord_token = ""
     return _Context(engine, bot, clients, temporal, token, discord_token)
 
 
@@ -149,13 +155,14 @@ async def _start(context: _Context) -> None:
 async def _stop(context: _Context) -> None:
     if context.discord_task is not None:
         context.discord_task.cancel()
+        await asyncio.gather(context.discord_task, return_exceptions=True)
     await context.bot.close()
     if context.temporal is not None:
         await context.temporal.close()
 
 
 @asynccontextmanager
-async def _lifespan(context: _Context, _app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(context: _Context, _app: FastAPI) -> AsyncGenerator[None, None]:
     await _start(context)
     try:
         yield
@@ -340,15 +347,11 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
             username, avatar = _profile_values(payload)
         except ProfileInputError as exc:
             raise HTTPException(422, str(exc)) from exc
-        if context.bot.user is None:
-            raise HTTPException(503, "Discord gateway is not ready")
-        if username is not None and avatar is not None:
-            await context.bot.user.edit(username=username, avatar=avatar)
-        elif username is not None:
-            await context.bot.user.edit(username=username)
-        else:
-            await context.bot.user.edit(avatar=avatar)
-        return {"status": "updated", "username": getattr(context.bot.user, "name", None)}
+        try:
+            username = await context.clients.discord.set_profile(username, avatar)
+        except RuntimeError as exc:
+            raise HTTPException(503, "Discord profile is unavailable") from exc
+        return {"status": "updated", "username": username}
 
     async def send_file(
         payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
@@ -356,16 +359,14 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         _tool_auth(context, authorization)
         thread_id, filename, data = _file_values(payload)
         try:
-            channel = await context.bot.fetch_channel(int(thread_id))
+            receipt = await context.clients.discord.send_file(
+                thread_id, Upload(filename, data), str(payload.get("caption") or "")[:2_000]
+            )
         except (ValueError, discord.DiscordException) as exc:
             raise HTTPException(404, "Discord thread was not found") from exc
-        if not isinstance(channel, discord.Thread):
-            raise HTTPException(422, "file delivery requires a Discord thread")
-        message = await channel.send(
-            content=str(payload.get("caption") or "")[:2_000],
-            file=discord.File(io.BytesIO(data), filename=filename),
-        )
-        return {"status": "sent", "message_id": str(message.id), "url": str(message.jump_url)}
+        except TypeError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"status": "sent", "message_id": receipt.message_id, "url": receipt.url}
 
     app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"])
     app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"])

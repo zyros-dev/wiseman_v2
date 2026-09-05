@@ -32,6 +32,12 @@ class Upload:
     data: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveryReceipt:
+    message_id: str
+    url: str
+
+
 def is_image_attachment(value: object) -> bool:
     return isinstance(value, dict) and (
         str(value.get("content_type") or "").startswith("image/")

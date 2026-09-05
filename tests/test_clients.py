@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pytest
 
@@ -11,10 +11,7 @@ from app.clients import ClientContainer, ClientMode, ClientSettings, build_clien
 from app.clients.mock_clients import MockDiscord, MockState, mock_container
 from app.clients.real_clients import RealDependencies, real_container
 from app.engine import Engine, EngineConfig
-from app.models import Event, Message, MessageRef
-
-if TYPE_CHECKING:
-    from app.types import JsonObject
+from app.models import Event, Message, MessageRef, Upload
 
 
 @pytest.mark.asyncio
@@ -28,7 +25,8 @@ async def test_mock_container_records_complete_discord_lifecycle() -> None:
     await container.discord.remove_reaction(ref, "👀")
     await container.discord.remove_reaction(ref, "👀")
 
-    state = container.discord.state  # type: ignore[attr-defined]
+    assert isinstance(container.discord, MockDiscord)
+    state = container.discord.state
     assert isinstance(state, MockState)
     assert state.threads[thread] == "Gurt 1"
     assert state.messages[message] == "working"
@@ -50,10 +48,10 @@ async def test_mock_discord_models_history_files_and_native_one_hour_archive() -
     thread = await discord.create_thread("channel", "Gurt 1", 60)
     message = await discord.send(thread, "hello")
     assert (await discord.history(thread, 10))[0]["id"] == message
-    assert await discord.send_file(thread, "image.png") == "file-3"
+    assert (await discord.send_file(thread, Upload("image.png", b"image"))).message_id == "file-3"
 
     discord.advance(3_600)
-    state = discord.state  # type: ignore[attr-defined]
+    state = discord.state
     assert thread in state.archived
     assert thread not in state.locked
     await discord.lock_thread(thread)
@@ -65,8 +63,8 @@ async def test_mock_clients_model_progress_profile_and_files() -> None:
     container = mock_container()
     discord = cast("MockDiscord", container.discord)
     thread = await discord.create_thread("channel", "Gurt 1", 60)
-    file_message = await discord.send_file(thread, "artifact.bin", "result")
-    await discord.set_profile("Wise Man", "avatar.png")
+    receipt = await discord.send_file(thread, Upload("artifact.bin", b"artifact"), "result")
+    await discord.set_profile("Wise Man", b"avatar")
     progress: list[str] = []
 
     async def record(message: str) -> None:
@@ -74,9 +72,9 @@ async def test_mock_clients_model_progress_profile_and_files() -> None:
 
     await container.runner.run("codex-1", "hello", "user", thread, progress=record)
 
-    state = cast("MockState", discord.state)  # type: ignore[attr-defined]
-    assert state.files[file_message] == "artifact.bin"
-    assert state.profile == {"username": "Wise Man", "avatar": "avatar.png"}
+    state = discord.state
+    assert state.files[receipt.message_id] == "artifact.bin"
+    assert state.profile == {"username": "Wise Man", "avatar": b"avatar"}
     assert progress == ["🤖 Codex turn started...", "✍️ Writing response..."]
 
 
@@ -99,8 +97,9 @@ async def test_engine_uses_the_injected_client_container() -> None:
 
     result = await engine.handle(event)
 
-    assert str(result["output"]).startswith('mock response: {"context":')
-    state = cast("MockState", container.discord.state)  # type: ignore[attr-defined]
+    assert result["output"].startswith('mock response: {"context":')
+    assert isinstance(container.discord, MockDiscord)
+    state = container.discord.state
     assert any(call.client == "runner" and call.operation == "run" for call in state.calls)
     assert any(call.client == "phoenix" and call.operation == "record" for call in state.calls)
     assert state.records
@@ -131,7 +130,7 @@ async def test_engine_restarts_from_returned_state_without_local_durable_store()
             "trigger": first_event.trigger.model_copy(update={"id": "message-2", "content": "next"}),
         }
     )
-    second = await restarted.handle(followup, state_data=cast("JsonObject", first["state"]))
+    second = await restarted.handle(followup, state_data=first["state"])
 
     assert not hasattr(first_engine, "states")
     assert second["state"]["turn"] == 2
@@ -161,7 +160,8 @@ async def test_injected_clients_isolate_concurrent_threads() -> None:
         engine.handle(event("message-1", "thread-1")),
         engine.handle(event("message-2", "thread-2")),
     )
-    state = cast("MockState", container.discord.state)  # type: ignore[attr-defined]
+    assert isinstance(container.discord, MockDiscord)
+    state = container.discord.state
     calls = [call for call in state.calls if call.client == "runner" and call.operation == "run"]
     assert {call.values[-1] for call in calls} == {"thread-1", "thread-2"}
     assert {result["state"]["turn"] for result in results} == {1}

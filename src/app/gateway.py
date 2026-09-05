@@ -16,8 +16,8 @@ from app.clients.discord_client import mention_ids, normalize_message
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from app.clients.client_interfaces import TemporalClient
     from app.engine import Engine
-    from app.temporal_runtime import TemporalRuntime
     from app.types import JsonObject
 from app.models import THREAD_AUTO_ARCHIVE_MINUTES, Event, Message
 from app.presentation import thread_name
@@ -41,9 +41,8 @@ class Gateway(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents, enable_debug_events=True)
         self.engine, self.allowlist = engine, allowlist
-        self.fallback_state: dict[str, JsonObject] = {}
         self.raw_gateway_payloads: dict[str, JsonObject] = {}
-        self.temporal: TemporalRuntime | None = None
+        self.temporal: TemporalClient | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
         self.sequence_path = (
@@ -146,23 +145,15 @@ class Gateway(discord.Client):
         LOGGER.warning("Discord message received id=%s mentions=%s", message.id, mention_ids(message))
         if not await self._eligible(message):
             return
+        if self.temporal is None:
+            raise RuntimeError("Temporal client is not configured")
         event = await self._incoming(message, raw)
         if event is None:
             return
-        if self.temporal is not None:
-            try:
-                await self.temporal.submit(event.model_dump(mode="json"))
-            except Exception:
-                LOGGER.exception("Could not submit Discord message %s to Temporal", message.id)
-        else:
-            result = await self.engine.handle(
-                event,
-                state_data=self.fallback_state.get(event.trigger.thread_id or event.trigger.channel_id, {}),
-            )
-            if isinstance(result.get("state"), dict):
-                self.fallback_state[event.trigger.thread_id or event.trigger.channel_id] = cast(
-                    "JsonObject", result["state"]
-                )
+        try:
+            await self.temporal.submit(event.model_dump(mode="json"))
+        except Exception:
+            LOGGER.exception("Could not submit Discord message %s to Temporal", message.id)
 
     async def _eligible(self, message: discord.Message) -> bool:
         channel = message.channel

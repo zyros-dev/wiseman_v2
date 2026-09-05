@@ -3,10 +3,11 @@ import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import httpx
 import pytest
-from openai_codex import ApprovalMode, Sandbox
+from openai_codex import ApprovalMode, AsyncThread, AsyncTurnHandle, Sandbox
 
 from app.clients.mock_clients import mock_container
 from app.engine import Engine, EngineConfig
@@ -92,9 +93,9 @@ async def test_sdk_idle_eviction_never_interrupts_active_turn():
         closed.append("closed")
 
     runner.codex["t"] = cast("AsyncCodex", SimpleNamespace(close=close))
-    runner.threads["t"] = SimpleNamespace(id="sdk-thread")
+    runner.threads["t"] = Mock(spec=AsyncThread, id="sdk-thread")
     runner.last_used["t"] = 0
-    runner.active_turns["t"] = object()
+    runner.active_turns["t"] = Mock(spec=AsyncTurnHandle)
     await runner.expire(now=1000)
     assert not closed
     runner.active_turns.clear()
@@ -115,7 +116,7 @@ async def test_sdk_cache_evicts_oldest_idle_client_at_capacity(monkeypatch):
 
     for key in ("old", "new"):
         runner.codex[key] = cast("AsyncCodex", SimpleNamespace(close=close))
-        runner.threads[key] = SimpleNamespace(id=key)
+        runner.threads[key] = Mock(spec=AsyncThread, id=key)
         runner.last_used[key] = 1 if key == "old" else 2
     await runner.expire(now=3)
     assert closed == ["closed"]
