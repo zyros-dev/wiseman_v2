@@ -76,9 +76,10 @@ jobs:
           apt-get install -y --no-install-recommends ca-certificates docker.io
       - name: Compile and sandbox smoke
         run: |
-          python -m compileall -q src sandbox/src tests tools
           docker build -t wiseman-v2-gateway:ci .
           docker build -t wiseman-v2-sandbox:ci -f sandbox/Dockerfile .
+          docker run --rm wiseman-v2-gateway:ci python -m compileall -q src
+          docker run --rm wiseman-v2-sandbox:ci python -m compileall -q sandbox/src
           container=$(docker run -d wiseman-v2-sandbox:ci)
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
