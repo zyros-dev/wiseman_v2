@@ -30,18 +30,17 @@ if TYPE_CHECKING:
 from app.admission import admitted, normalize_event
 from app.clients.client_interfaces import ClientContainer, ClientMode, ClientSettings
 from app.clients.discord_client import RealDiscord
-from app.clients.provider import OpenRouter
+from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
 from app.models import Upload
-from app.phoenix import Phoenix, PromptHub, json_text, provider_values
+from app.phoenix import json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
     normalize_image_url,
 )
-from app.runner import HttpRunner
-from app.temporal_runtime import TemporalRuntime, configure_engine
+from app.temporal_runtime import configure_engine
 from app.types import JsonObject
 
 BEARER = HTTPBearer(auto_error=False)
@@ -109,37 +108,17 @@ def create_app(clients: ClientContainer | None = None) -> FastAPI:
 def _context(clients: ClientContainer | None) -> _Context:
     settings = clients.settings if clients is not None else ClientSettings.from_env()
     token, discord_token = settings.runner_token, settings.discord_token
-    real = clients is None or clients.mode is ClientMode.REAL
-    required = (discord_token, settings.temporal_address, settings.runner_url, token, settings.phoenix_endpoint, settings.prompt_hub_url, settings.provider_key)
-    if real and not all(required):
-        raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
     if clients is None:
-        phoenix, prompts, runner = (
-            Phoenix(settings.phoenix_endpoint, settings.phoenix_key, settings.phoenix_project, os.getenv("WISEMAN_AUDIT_DIR")),
-            PromptHub(settings.prompt_hub_url, settings.phoenix_key),
-            HttpRunner(settings.runner_url, settings.runner_token),
-        )
-    else:
-        phoenix, prompts, runner = clients.phoenix, clients.prompts, clients.runner
-    engine = Engine(EngineConfig(phoenix, runner, prompts, discord=clients.discord if clients else None))
+        clients = build_clients(ClientMode.REAL, settings)
+    real = clients.mode is ClientMode.REAL
+    engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
     configure_engine(engine)
     allowlist = {int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value}
     activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
     profile_file = os.getenv("WISEMAN_PROFILE_FILE") or (str(Path(activity_file).with_name("profile.json")) if activity_file else None)
     bot = Gateway(engine, allowlist, activity_file, profile_file)
-    if clients is None:
-        clients = ClientContainer.install(
-            ClientContainer(
-                ClientMode.REAL,
-                RealDiscord(bot),
-                TemporalRuntime(settings.temporal_address, settings.temporal_queue),
-                engine.config.phoenix,
-                engine.config.prompts,
-                engine.config.runner,
-                OpenRouter(settings, engine.config.prompts),
-                settings,
-            )
-        )
+    if isinstance(clients.discord, RealDiscord):
+        clients.discord.attach(bot)
     engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context, clients.discord)
     bot.temporal = clients.temporal
     if not real:
