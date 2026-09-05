@@ -125,7 +125,7 @@ class TurnWorkflow:
             f"wiseman.{name}",
             {"work": self.work.model_dump(mode="json"), "event": event},
             start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=TRANSPORT_RETRY_POLICY,
+            retry_policy=RetryPolicy(maximum_attempts=1) if name == "stop" else TRANSPORT_RETRY_POLICY,
         )
         return bool(result["accepted"])
 
