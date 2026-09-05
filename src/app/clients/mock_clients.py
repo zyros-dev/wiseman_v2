@@ -174,6 +174,9 @@ class MockRunner(RunnerClient):
     async def acquire(self, user: str, workspace: str) -> None:
         self.state.call("runner", "acquire", user, workspace)
 
+    async def release(self, user: str, workspace: str) -> None:
+        self.state.call("runner", "release", user, workspace)
+
     async def start(self, thread: str, user: str, workspace: str = "") -> str:
         self.state.call("runner", "start", thread, user, workspace)
         thread_id = thread or f"codex-{user}"

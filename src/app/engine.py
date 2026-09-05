@@ -15,7 +15,7 @@ from prometheus_client import Counter
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient
+    from app.clients.client_interfaces import ClientContainer, PhoenixClient, PromptClient, RunnerClient
     from app.types import EngineResult, JsonObject, StateData
 
 from app.admission import ContextConfig, context, render_grammar
@@ -30,7 +30,7 @@ from app.presentation import (
     render_progress,
     startup_embed,
 )
-from app.runner import MESSAGE_ID, TURN_NUMBER, Runner, RunnerError
+from app.runner import MESSAGE_ID, TURN_NUMBER, RunnerError
 
 LOGGER = logging.getLogger("wiseman")
 TURN_TOTAL = Counter("wiseman_turns_total", "Accepted Discord turns")
@@ -79,7 +79,7 @@ class _Success:
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
     phoenix: PhoenixClient
-    runner: Runner
+    runner: RunnerClient
     prompts: PromptClient
     context: ContextConfig = field(default_factory=ContextConfig.from_env)
 
@@ -145,7 +145,8 @@ class Engine:
         retry_transport: bool = False,
     ) -> EngineResult:
         trigger = event.trigger
-        state = self._state(state_data)
+        state = State.model_validate(state_data or {})
+        state.owner_id = state.owner_id or trigger.author_id
         if trigger.id in state.processed:
             return {
                 "trace": f"discord-{trigger.id}",
@@ -217,24 +218,11 @@ class Engine:
             )
         )
 
-    def _state(self, data: Mapping[str, object] | None) -> State:
-        data = data or {}
-        return State(
-            codex_thread=cast("str | None", data.get("codex_thread")),
-            seen=_strings(data.get("seen", [])),
-            processed=_strings(data.get("processed", [])),
-            turn=int(cast("int", data.get("turn", 0))),
-            closed=bool(data.get("closed", False)),
-            delivery_id=cast("str | None", data.get("delivery_id")),
-            banner_sent=bool(data.get("banner_sent", False)),
-            progress=[item for item in cast("list[object]", data.get("progress", [])) if isinstance(item, str)],
-        )
-
     async def preflight(self, event: Event, phase: str, state_data: Mapping[str, object] | None = None) -> StateData:
         trigger = event.trigger
         if self.lookup_channel is None or (channel := await self.lookup_channel(event)) is None:
-            return _state_data(self._state(state_data))
-        state = self._state(state_data)
+            return _state_data(State.model_validate(state_data or {}))
+        state = State.model_validate(state_data or {})
         steps = state.progress
         await self._ensure_banner(event.kind or "startup", channel, state)
         steps.extend(() if phase in steps else (phase,))
@@ -289,7 +277,7 @@ class Engine:
             self.working_reactions.get(event.trigger.id, self.reaction_emojis["processing"]),
             f"discord-{event.trigger.id}",
             event.kind or "startup",
-            self._state(state_data),
+            State.model_validate(state_data or {}),
         )
         return await self._failure(lifecycle, RuntimeError(error))
 
@@ -383,7 +371,7 @@ class Engine:
         message_token = MESSAGE_ID.set(trigger.id)
         try:
             return await self.config.runner.run(
-                state.codex_thread or "", prompt, trigger.author_id, workspace, progress=report
+                state.codex_thread or "", prompt, state.owner_id or trigger.author_id, workspace, progress=report
             )
         finally:
             TURN_NUMBER.reset(token)
@@ -456,10 +444,7 @@ class Engine:
         active = self.active_turns.get(thread_id)
         if active is None or active.delivery_id != message_id:
             return False
-        steer = getattr(self.config.runner, "steer", None)
-        if not callable(steer):
-            return False
-        accepted = await cast("Callable[..., Awaitable[bool]]", steer)("", prompt, user, workspace=thread_id)
+        accepted = await self.config.runner.steer("", prompt, user, workspace=thread_id)
         if accepted:
             await self.config.phoenix.record(
                 f"discord-{message_id}",
@@ -505,19 +490,11 @@ class Engine:
 
 
 def _state_data(state: State, *, finished: bool = False) -> StateData:
-    return {
-        "codex_thread": state.codex_thread,
-        "seen": sorted(state.seen),
-        "processed": sorted(state.processed),
-        "turn": state.turn,
-        "delivery_id": None if finished else state.delivery_id,
-        "banner_sent": state.banner_sent,
-        "progress": [] if finished else state.progress,
-    }
-
-
-def _strings(value: object) -> set[str]:
-    return set() if not isinstance(value, list) else {str(item) for item in value}
+    data = state.model_dump(mode="json")
+    data.update(seen=sorted(state.seen), processed=sorted(state.processed))
+    if finished:
+        data.update(delivery_id=None, progress=[])
+    return cast("StateData", data)
 
 
 def _transport_error(error: Exception) -> bool:

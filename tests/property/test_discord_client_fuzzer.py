@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 
     import discord
 
+    from app.clients.client_interfaces import RunnerClient
     from app.phoenix import Phoenix
-    from app.runner import Runner
     from app.types import JsonObject
 
 
@@ -345,7 +345,7 @@ class EngineLifecycleMachine(RuleBasedStateMachine):
         engine = Engine(
             EngineConfig(
                 cast("Phoenix", MockPhoenix(self.state)),
-                cast("Runner", self.runner),
+                cast("RunnerClient", self.runner),
                 PromptHub(),
             )
         )
