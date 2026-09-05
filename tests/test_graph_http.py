@@ -67,7 +67,7 @@ async def test_graphwalker_edges_use_the_discord_admission_boundary(monkeypatch)
                 response = await client.post(
                     "/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread=thread), "kind": kind}
                 )
-            assert response.status_code == 200 and (edge != "background-chatter" or response.json()["status"] == "ignored")
+            assert all((response.status_code == 200, edge != "background-chatter" or response.json()["status"] == "ignored"))
             assert response.json()["message_id"] == message_id
     assert isinstance(clients.discord, MockDiscord)
     assert [str(cast("dict[str, object]", item["trigger"])["id"]) for item in clients.discord.state.admitted] == [
