@@ -1,5 +1,9 @@
 #!/bin/sh
 set -eu
 bin="${WISEMAN_CODEX_REAL_BIN:-/app/.venv/lib/python3.13/site-packages/codex_cli_bin/bin/codex}"
-[ -z "${WISEMAN_EXEC_USER:-}" ] || exec runuser --preserve-environment -u "$WISEMAN_EXEC_USER" -- "$bin" "$@"
-exec "$bin" "$@"
+set -- env -i PATH="$PATH" HOME="$HOME" CODEX_HOME="$CODEX_HOME" LANG="${LANG:-C.UTF-8}" \
+    OPENAI_BASE_URL="${OPENAI_BASE_URL:-}" OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    WISEMAN_RELAY_URL="${WISEMAN_RELAY_URL:-}" WISEMAN_MCP_TOKEN="${WISEMAN_MCP_TOKEN:-}" \
+    WISEMAN_THREAD_ID="${WISEMAN_THREAD_ID:-}" "$bin" "$@"
+[ -z "${WISEMAN_EXEC_USER:-}" ] || exec runuser -u "$WISEMAN_EXEC_USER" -- "$@"
+exec "$@"

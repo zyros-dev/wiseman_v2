@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -69,6 +68,7 @@ class HttpRunner:
     ) -> tuple[str, str, dict[str, object]]:
         payload = _payload(thread, user, workspace, prompt)
         payload.update(turn_number=TURN_NUMBER.get(), message_id=MESSAGE_ID.get() or uuid4().hex)
+        payload["attempt"] = activity.info().attempt if activity.in_activity() else 1
         value = await self._post("/turn", payload)
         cursor = 0
         headers = {"authorization": f"Bearer {self.token}"} if self.token else {}
@@ -95,34 +95,13 @@ class HttpRunner:
         return str(result.get("thread_id", thread)), str(result.get("output", "")), billing
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        data = await self._post("/steer", _payload(thread, user, workspace, prompt))
+        payload = _payload(thread, user, workspace, prompt)
+        payload["message_id"] = MESSAGE_ID.get() or uuid4().hex
+        data = await self._post("/steer", payload)
         return bool(data.get("steered", False))
 
-
-class FakeRunner:
-    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        del thread, prompt, user, workspace
-        return False
-
-    async def acquire(self, user: str, workspace: str) -> None: ...
-
-    async def release(self, user: str, workspace: str) -> None: ...
-
-    async def start(self, thread: str, user: str, workspace: str = "") -> str:
-        del workspace
-        return thread or f"codex-{user}"
-
-    async def run(
-        self,
-        thread: str,
-        prompt: str,
-        user: str,
-        workspace: str = "",
-        progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str, str, dict[str, object]]:
-        del workspace, progress
-        return (
-            thread or f"codex-{user}",
-            f"Codex received: {prompt[:1000]}",
-            {"model": os.getenv("WISEMAN_MODEL", "local-fake")},
-        )
+    async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool:
+        payload = _payload(thread, user, workspace)
+        payload.update(message_id=command_id, target_message_id=target_message_id)
+        data = await self._post("/stop", payload)
+        return bool(data.get("stopped", False))

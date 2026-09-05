@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from httpx import Response
+
+    from app.models import DeliveryReceipt, Event, MessageRef, Upload
     from app.types import JsonObject
 
 
@@ -28,6 +31,9 @@ class ClientSettings:
     phoenix_project: str = "wiseman-v2"
     runner_url: str = ""
     runner_token: str = ""
+    provider_url: str = "https://openrouter.ai"
+    provider_key: str = ""
+    vision_model: str = "z-ai/glm-5.3-flash"
 
     @classmethod
     def from_env(cls) -> ClientSettings:
@@ -41,35 +47,36 @@ class ClientSettings:
             phoenix_project=os.getenv("PHOENIX_PROJECT", "wiseman-v2"),
             runner_url=os.getenv("WISEMAN_RUNNER_URL", ""),
             runner_token=os.getenv("WISEMAN_RUNNER_API_TOKEN", ""),
+            provider_url=os.getenv("OPENROUTER_URL", "https://openrouter.ai"),
+            provider_key=os.getenv("OPENROUTER_API_KEY", ""),
+            vision_model=os.getenv("WISEMAN_VISION_MODEL", "z-ai/glm-5.3-flash"),
         )
 
 
 class DiscordClient(Protocol):
-    async def history(self, channel_id: str, limit: int) -> list[JsonObject]: ...
+    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None, nonce: str = "") -> str: ...
 
-    async def create_thread(self, channel_id: str, name: str, auto_archive_minutes: int) -> str: ...
+    async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None: ...
 
-    async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None) -> str: ...
+    async def add_reaction(self, ref: MessageRef, emoji: str) -> None: ...
 
-    async def edit(self, message_id: str, content: str) -> None: ...
+    async def remove_reaction(self, ref: MessageRef, emoji: str) -> None: ...
 
-    async def add_reaction(self, message_id: str, emoji: str) -> None: ...
+    async def send_file(self, channel_id: str, upload: Upload, caption: str = "") -> DeliveryReceipt: ...
 
-    async def remove_reaction(self, message_id: str, emoji: str) -> None: ...
-
-    async def archive_thread(self, thread_id: str) -> None: ...
-
-    async def lock_thread(self, thread_id: str) -> None: ...
-
-    async def send_file(self, channel_id: str, path: str, caption: str = "") -> str: ...
-
-    async def set_profile(self, username: str | None, avatar: str | None) -> None: ...
-
-    async def set_reactions(self, values: dict[str, str]) -> None: ...
+    async def set_profile(self, username: str | None, avatar: bytes | None) -> str: ...
 
 
 class TemporalClient(Protocol):
-    async def submit(self, event: JsonObject) -> None: ...
+    async def start(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def submit(self, event: JsonObject) -> dict[str, object] | None: ...
+
+    async def steer(self, event: Event) -> bool: ...
+
+    async def stop(self, event: Event) -> bool: ...
 
 
 class PhoenixClient(Protocol):
@@ -102,6 +109,16 @@ class RunnerClient(Protocol):
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool: ...
 
+    async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool: ...
+
+
+class ProviderClient(Protocol):
+    async def responses(self, payload: JsonObject) -> Response: ...
+
+    async def describe(self, url: str, question: str) -> dict[str, object]: ...
+
+    async def close(self) -> None: ...
+
 
 @dataclass(slots=True)
 class ClientContainer:
@@ -111,6 +128,7 @@ class ClientContainer:
     phoenix: PhoenixClient
     prompts: PromptClient
     runner: RunnerClient
+    provider: ProviderClient
     settings: ClientSettings = field(default_factory=ClientSettings)
 
     _installed: ClassVar[ClientContainer | None] = None
@@ -125,7 +143,3 @@ class ClientContainer:
         if cls._installed is None:
             raise RuntimeError("client container has not been configured")
         return cls._installed
-
-    @classmethod
-    def reset(cls) -> None:
-        cls._installed = None

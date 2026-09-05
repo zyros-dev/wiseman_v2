@@ -1,109 +1,32 @@
 # Validation Record
 
-## Local evidence
+## Local gate
 
-- `uv run pytest tests -q --cov=app --cov=runner --cov-fail-under=80`: 25 passed,
-  83.72% coverage.
-- Ruff, Pyrefly, Vulture, pip-audit, `compileall`, shell syntax, `uv lock
-  --check`, and `docker compose config` all pass.
-- Python source and tests total 1,932 physical lines.
-- A live Uvicorn process accepted raw Discord-shaped HTTP startup and follow-up
-  payloads. Startup selected `old2,start2` and returned turn 1; follow-up
-  selected only reply ancestor `start2` plus `newp2,newt2,follow2` and returned
-  turn 2. Both completed with exactly `✅`.
-- The Phoenix inspection endpoint showed the ordered trace nodes for both
-  requests, including context, grammar, prompt, Codex, delivery, and reactions.
+The compact suite covers the normalized Discord admission path, startup and
+follow-up context selection, Engine delivery and reactions, provider SSE
+forwarding, image/file/profile tools, the Temporal test server, duplicate
+messages, session retention, and retirement. The current run is 5 tests with
+55.86% application coverage and a checked-in 55% floor.
 
-## External validation blocker
+Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
+and `git diff --check` pass. The counted source budget is `2,997/3,000`; no
+production file exceeds 500 counted lines and application code contains no
+`Any` annotations.
 
-The current environment has no Discord, Phoenix, OpenRouter, Temporal, or
-runner credentials configured. A three-second `docker info` probe also timed
-out because the Docker daemon is unavailable. Therefore live Discord gateway,
-Phoenix OTLP export, Temporal worker execution, OpenRouter billing, and the
-real Codex container remain unexercised. No production completion claim is made
-until those dependencies are available.
+GraphWalker CLI 4.3.3 is checksum-pinned in CI. Two seeded native traversals
+run on Thor and produced 325 and 227 transitions. The model includes queued
+questions, background context, steering, `/stop`, retries, restart recovery,
+delivery failure, unknown cancellation, and three-day retirement states.
 
-## Deployment attempt: 2026-09-02
+Both coordinator and sandbox images build on Thor. A sandbox container returns
+`{"status":"ok"}` from `/healthz`.
 
-- Commit `8ce586d` is now the local root revision.
-- Gateway and sandbox images both built successfully on Thor with
-  `mg-cli dev thor run`; the gateway build includes the pinned Codex CLI
-  bundle.
-- The committed gateway accepted raw Discord-shaped `MESSAGE_CREATE` payloads
-  over HTTP. Startup returned turn 1 with `✅`; follow-up returned turn 2 with
-  `✅` after removing the processing reaction.
-- Phoenix inspection for that run recorded `turn`, `context`, `grammar`,
-  `prompt`, `codex`, `delivery`, and `reaction` nodes for both traces. Startup
-  selected `parent-old,raw-start`; follow-up selected only
-  `raw-start,parent-new,raw-follow`.
-- Deployment did not proceed. The new Gitea repository cannot be created with
-  the managed token because it lacks `write:user`; Docker Desktop is also
-  unavailable locally. The old `hermes-discord-gateway` and
-  The retired Hermes deployments are absent; only the Wiseman V2 gateway and
-  sandbox remain in the application namespace.
+## Remaining acceptance evidence
 
-## Cutover preparation: 2026-09-02
-
-- Release wiring is committed at `4a2710e` and the registry memory correction
-  at `8ce586d`.
-- Gateway and sandbox images built from `4a2710e` on Thor and were pushed to
-  `registry.odin.home:5000` as tag `4a2710e`.
-- Midgard app-registry trusted-sandbox support is implemented on local branch
-  `42d033d`; its app-registry target and inline tests pass in the Midgard dev
-  container. Generated V2 manifests validate with root UID/GID, writable root
-  filesystem, and privilege escalation enabled only for the trusted sandbox.
-- The V2 GitOps workflow is ready but cannot run until `zel/wiseman_v2` exists
-  in Gitea and the dedicated Vault paths `k8s/wiseman-v2/{gateway}` are
-  provisioned. The managed Tea token currently lacks `write:organization`, and
-  Gitea has push-to-create disabled.
-- The old Hermes deployments remain running because V2 has not reached a
-  verified Discord/Phoenix acceptance state. No cutover claim is made.
-
-- A fresh Uvicorn process at the exact release revision accepted a raw
-  `MESSAGE_CREATE` envelope and a follow-up over HTTP. Startup selected 100
-  parent messages plus the trigger; follow-up selected only the reply
-  ancestor, two new messages, and the follow-up trigger. The follow-up did not
-  replay the older parent window. Both returned turn 1/2 and exactly
-  `✅`.
-- Phoenix inspection for that process showed, for each trace, `turn`,
-  `reaction`, `context`, `grammar`, `prompt`, three progress nodes, `codex`,
-  `delivery`, and terminal `reaction`.
-
-## Vision tool
-
-- The image contract test verifies Discord image URLs are sent to
-  `z-ai/glm-5.3-flash` as multimodal content and the returned description is
-  available to Codex for both generic and question-directed requests.
-
-## Thread naming and idle cleanup: 2026-09-03
-
-- Unit and gateway contract tests cover mention removal, whitespace
-  normalization, image-only fallback, Discord's 100-character name bound,
-  persisted activity state, restart restoration, and archive/lock expiry.
-- Unmanaged threads are not added to the cleanup registry. A managed thread's
-  human follow-up refreshes its timestamp, while bot messages do not.
-- `pytest` passed 35 tests; Ruff, format, Pyrefly, Vulture, `uv lock --check`,
-  and `docker compose config` passed with required values supplied.
-- Deployment and signed-in Discord acceptance are still pending for this
-  change; no completion claim is made from local tests alone.
-
-## Discord presentation tools: 2026-09-03
-
-- Added authenticated sandbox commands for sending files/images, changing
-  lifecycle reactions, and changing the bot username/avatar.
-- Gateway contract tests cover authentication, bounded avatar decoding,
-  reaction configuration, profile mutation, and thread file delivery.
-- The sandbox image includes `/usr/local/bin/wiseman-discord`, including its
-  `describe-image` command; deployment
-  enables profile edits and persists reaction configuration at
-  `/var/lib/wiseman/profile.json`.
-
-## Trusted package installation: 2026-09-03
-
-- The sandbox image does not preinstall a compiler or kernel-specific
-  toolchain. Managed accounts receive `/bin/bash` and passwordless sudo;
-  Codex is instructed to install project-specific packages itself with
-  noninteractive `apt-get` commands.
-- A live disposable managed-style account initially exposed the bad wildcard
-  sudo rule (`sudo: a password is required`). The rule now uses the dedicated
-  `wsm_sudo` group and is queued for redeploy and repeat verification.
+Live Discord credentials and the deployment target are still required for the
+real initial/follow-up conversation, multi-question background context,
+steering, `/stop`, concurrency/restart recovery, image/file exchange, and
+agent-installed Linux build workload. Completion also requires recording the
+correlated Discord, Temporal, Phoenix, gateway, runner, and provider IDs.
+Synthetic HTTP, mock clients, and container builds do not substitute for that
+evidence.

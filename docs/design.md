@@ -19,10 +19,10 @@ flowchart LR
 and `/v1/discord/events` both pass through `normalize_event`; the replay route
 accepts captured Discord JSON with nested authors, mentions, references, and
 attachments as well as canonical events. A raw HTTP fixture therefore
-exercises the same context, grammar, runner, delivery, and reaction path as a
-Discord mention. `/v1/replay/discord` is an authenticated alias for that test
-seam. `/v1/phoenix/events` exposes the in-process evidence buffer; when
-`PHOENIX_OTLP_ENDPOINT` is set, each event is forwarded immediately.
+exercises the same admission path as a Discord mention. `/v1/replay/discord`
+is an authenticated alias for that test path. `/v1/replay/phoenix/<audit-id>`
+replays the exact captured gateway envelope; when `PHOENIX_OTLP_ENDPOINT` is
+set, each event is forwarded immediately.
 The checked-in `contracts/startup-context.json` and
 `contracts/followup-context.json` files are the local grammar sources; Phoenix
 Prompt Hub overrides them by versioned name when configured.

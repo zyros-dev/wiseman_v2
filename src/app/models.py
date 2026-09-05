@@ -1,6 +1,5 @@
 # Copyright (c) 2026 Nick van der Merwe
 from dataclasses import dataclass
-from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,10 +20,27 @@ IMAGE_SUFFIXES = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class MessageRef:
+    channel_id: str
+    message_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Upload:
+    name: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryReceipt:
+    message_id: str
+    url: str
+
+
 def is_image_attachment(value: object) -> bool:
     return isinstance(value, dict) and (
-        str(value.get("content_type") or "").startswith("image/")
-        or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES)
+        str(value.get("content_type") or "").startswith("image/") or str(value.get("filename") or "").lower().endswith(IMAGE_SUFFIXES)
     )
 
 
@@ -54,10 +70,6 @@ class Event(BaseModel):
     raw_payload: JsonObject = Field(default_factory=dict)
 
 
-class Messageable(Protocol):
-    async def send(self, content: str = "") -> object: ...
-
-
 class State(BaseModel):
     owner_id: str = ""
     codex_thread: str | None = None
@@ -70,7 +82,23 @@ class State(BaseModel):
     progress: list[str] = Field(default_factory=list)
 
 
-@dataclass
-class ActiveTurn:
-    trigger_id: str
-    delivery_id: str | None = None
+class TurnWork(BaseModel):
+    event: Event
+    state: State
+    current: dict[str, object] = Field(default_factory=dict)
+    grammar: dict[str, object] = Field(default_factory=dict)
+    prompt: str = ""
+    output: str = ""
+    billing: dict[str, object] = Field(default_factory=dict)
+    error: str = ""
+    stopped: bool = False
+    processing_emoji: str = ""
+    terminal_emoji: str = ""
+
+    @property
+    def trace(self) -> str:
+        return f"discord-{self.event.trigger.id}"
+
+    @property
+    def kind(self) -> str:
+        return "followup" if self.state.turn else "startup"

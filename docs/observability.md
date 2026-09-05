@@ -12,7 +12,7 @@ The first `admission` child is a replay artifact. It stores the exact raw
 request accepted by the gateway, the normalized event passed to the shared
 admission function, and the `normalize_event:v2` revision. The artifact is
 available in Phoenix span attributes as `wiseman.raw_request` and through the
-authenticated `GET /v1/phoenix/audits/<trace-id>` endpoint. The gateway also
+authenticated `POST /v1/replay/phoenix/<audit-id>` route. The gateway also
 atomically keeps the same artifact under `WISEMAN_AUDIT_DIR`, so the replay
 index survives a gateway restart while Phoenix remains the system of record
 for the trace evidence. In a non-production environment,
@@ -32,7 +32,7 @@ with bounded attachment IDs, the configured vision model, question,
 description, usage, and cost; image bytes and provider credentials are never
 recorded.
 
-`GET /v1/phoenix/events` is a local inspection endpoint. Setting
+The in-process Phoenix client retains records for tests. Setting
 `PHOENIX_OTLP_ENDPOINT` forwards each event to the configured Phoenix ingress;
 telemetry failure is swallowed so it cannot turn a successful Discord answer
 into a failure. Prompt sources are fetched from Phoenix's versioned

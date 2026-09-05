@@ -29,11 +29,11 @@ class ContextConfig:
 
     @classmethod
     def from_env(cls) -> ContextConfig:
-        value = os.getenv("WISEMAN_MAX_ANCESTORS", "12")
-        try:
-            return cls(int(value))
-        except ValueError as exc:
-            raise ValueError from exc
+        return cls(int(os.getenv("WISEMAN_MAX_ANCESTORS", "12")))
+
+
+def admitted(message: Message, bot_id: str, *, reply_to_bot: bool = False) -> bool:
+    return bot_id in message.mentions or reply_to_bot
 
 
 def _message(value: Mapping[str, object], thread_id: str | None = None) -> Message:
@@ -41,9 +41,7 @@ def _message(value: Mapping[str, object], thread_id: str | None = None) -> Messa
         return Message.model_validate(dict(value))
     author = _mapping(value.get("author"))
     reference = _mapping(value.get("message_reference") or value.get("reference"))
-    mentions = [
-        str(item.get("id", "")) if isinstance(item, dict) else str(item) for item in _sequence(value.get("mentions"))
-    ]
+    mentions = [str(item.get("id", "")) if isinstance(item, dict) else str(item) for item in _sequence(value.get("mentions"))]
     return Message(
         id=str(value["id"]),
         author_id=str(author.get("id", "unknown")),
@@ -79,14 +77,12 @@ def normalize_event(value: object) -> Event:
             **{key: raw[key] for key in ("kind", "parent_messages", "thread_messages") if key in raw},
         }
     normalized = _mapping(value)
-    if "trigger" in normalized:
-        trigger = _message(_mapping(normalized["trigger"]), _string(normalized.get("thread_id")))
-        parent = _sequence(normalized.get("parent_messages"))
-        thread = _sequence(normalized.get("thread_messages"))
-    else:
-        trigger = _message(normalized, _string(normalized.get("thread_id")))
-        parent = _sequence(normalized.get("parent_messages"))
-        thread = _sequence(normalized.get("thread_messages"))
+    trigger = _message(
+        _mapping(normalized.get("trigger")) or normalized,
+        _string(normalized.get("thread_id")),
+    )
+    parent = _sequence(normalized.get("parent_messages"))
+    thread = _sequence(normalized.get("thread_messages"))
     return Event(
         trigger=trigger,
         kind=_string(normalized.get("kind")),
@@ -141,9 +137,7 @@ def context(event: Event, config: ContextConfig | None = None) -> dict[str, obje
         parent = item.reply_to
     selected = list({m.id: m for m in (*ancestors[::-1], *pool, trigger)}.values())
     selected.sort(key=lambda item: (item.timestamp, item.id))
-    messages = [
-        item.model_dump(mode="json", exclude={"attachments": {"__all__": {"url", "proxy_url"}}}) for item in selected
-    ]
+    messages = [item.model_dump(mode="json", exclude={"attachments": {"__all__": {"url", "proxy_url"}}}) for item in selected]
     result = {
         "schema": "wiseman.discord_context.v2",
         "trigger": trigger.model_dump(mode="json"),
@@ -154,9 +148,7 @@ def context(event: Event, config: ContextConfig | None = None) -> dict[str, obje
         "raw_count": len(pool),
         "startup": startup,
     }
-    schema = json.loads(
-        (Path(__file__).parents[2] / "contracts" / "discord-context.schema.json").read_text(encoding="utf-8")
-    )
+    schema = json.loads((Path(__file__).parents[2] / "contracts" / "discord-context.schema.json").read_text(encoding="utf-8"))
     validate(result, schema)
     return cast("dict[str, object]", result)
 
@@ -167,18 +159,13 @@ IMAGE_REFERENCE_WORDS = re.compile(
 )
 
 
-def image_tool_instruction(
-    trigger: Mapping[str, object], reply_ancestors: Sequence[Mapping[str, object]] | None = None
-) -> str:
+def image_tool_instruction(trigger: Mapping[str, object], reply_ancestors: Sequence[Mapping[str, object]] | None = None) -> str:
     messages = [trigger]
     if not trigger.get("attachments") and IMAGE_REFERENCE_WORDS.search(str(trigger.get("content") or "")):
         messages.extend(
             message
             for message in reversed(reply_ancestors or [])
-            if any(
-                is_image_attachment(_mapping(attachment))
-                for attachment in _sequence(_mapping(message).get("attachments"))
-            )
+            if any(is_image_attachment(_mapping(attachment)) for attachment in _sequence(_mapping(message).get("attachments")))
         )
         messages = messages[:2]
     images: list[str] = []

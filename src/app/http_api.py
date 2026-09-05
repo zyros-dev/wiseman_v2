@@ -5,49 +5,44 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import io
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated
 
 import discord
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
-    from app.clients.client_interfaces import (
-        DiscordClient,
-        PhoenixClient,
-        PromptClient,
-        RunnerClient,
-        TemporalClient,
-    )
     from app.models import Event
-    from app.types import JsonObject
 
-from app.admission import normalize_event
-from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
-from app.clients.real_clients import RealDependencies, real_services
+from app.admission import admitted, normalize_event
+from app.clients import ClientContainer, ClientMode, ClientSettings
+from app.clients.discord_client import RealDiscord
+from app.clients.provider import OpenRouter
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
-from app.phoenix import json_text, provider_values
+from app.models import Upload
+from app.phoenix import Phoenix, PromptHub, json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
     MAX_DISCORD_USERNAME_LENGTH,
     MIN_DISCORD_USERNAME_LENGTH,
-    describe_images,
     normalize_image_url,
 )
+from app.runner import HttpRunner
 from app.temporal_runtime import TemporalRuntime, configure_engine
+from app.types import JsonObject
 
 
 @dataclass(slots=True)
@@ -55,33 +50,13 @@ class _Context:
     engine: Engine
     bot: Gateway
     clients: ClientContainer
-    temporal: TemporalRuntime | None
     token: str
     discord_token: str
-    replay_state: dict[str, JsonObject] = field(default_factory=dict)
     discord_task: asyncio.Task[None] | None = None
 
 
-class ProfileInputError(ValueError):
-    def __init__(self, field: str) -> None:
-        super().__init__(
-            {
-                "username": "username must be 2-32 characters",
-                "avatar_type": "avatar_base64 must be a string",
-                "avatar_encoding": "avatar_base64 is invalid",
-                "avatar_size": "avatar exceeds the 8 MiB limit",
-                "missing": "provide username or avatar",
-            }[field]
-        )
-
-
-def create_app(
-    engine: Engine | None = None,
-    token: str = "",
-    discord_token: str = "",
-    clients: ClientContainer | None = None,
-) -> FastAPI:
-    context = _context(engine, token, discord_token, clients)
+def create_app(clients: ClientContainer | None = None) -> FastAPI:
+    context = _context(clients)
     app = FastAPI(
         title="wiseman-v2",
         docs_url=None,
@@ -97,49 +72,67 @@ def create_app(
     return app
 
 
-def _context(engine: Engine | None, token: str, discord_token: str, clients: ClientContainer | None) -> _Context:
+def _context(clients: ClientContainer | None) -> _Context:
     settings = clients.settings if clients is not None else ClientSettings.from_env()
-    token = token or settings.runner_token
-    discord_token = discord_token or settings.discord_token
-    services = real_services(settings) if clients is None else None
-    if engine is None:
-        if clients is not None:
-            engine = Engine(clients=clients)
-        else:
-            assert services is not None
-            engine = Engine(EngineConfig(services[0], services[2], services[1]))
+    token, discord_token = settings.runner_token, settings.discord_token
+    real = clients is None or clients.mode is ClientMode.REAL
+    if real and not all(
+        (
+            discord_token,
+            settings.temporal_address,
+            settings.runner_url,
+            token,
+            settings.phoenix_endpoint,
+            settings.prompt_hub_url,
+            settings.provider_key,
+        )
+    ):
+        raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
+    services = None
+    if clients is None:
+        services = (
+            Phoenix(
+                settings.phoenix_endpoint,
+                settings.phoenix_key,
+                settings.phoenix_project,
+                os.getenv("WISEMAN_AUDIT_DIR"),
+            ),
+            PromptHub(settings.prompt_hub_url, settings.phoenix_key),
+            HttpRunner(settings.runner_url, settings.runner_token),
+        )
+    if clients is not None:
+        engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
+    else:
+        assert services is not None
+        engine = Engine(EngineConfig(services[0], services[2], services[1]))
     configure_engine(engine)
     allowlist = {int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value}
     activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
-    profile_file = os.getenv("WISEMAN_PROFILE_FILE") or (
-        str(Path(activity_file).with_name("profile.json")) if activity_file else None
-    )
+    profile_file = os.getenv("WISEMAN_PROFILE_FILE") or (str(Path(activity_file).with_name("profile.json")) if activity_file else None)
     bot = Gateway(engine, allowlist, activity_file, profile_file)
-    temporal = (
-        TemporalRuntime(settings.temporal_address, settings.temporal_queue) if settings.temporal_address else None
-    )
-    bot.temporal = temporal
     if clients is None:
-        services = services or real_services(settings)
-        clients = build_clients(
-            ClientMode.REAL,
-            settings,
-            RealDependencies(
-                discord=cast("DiscordClient", bot),
-                temporal=cast("TemporalClient", temporal),
-                phoenix=cast("PhoenixClient", engine.config.phoenix),
-                prompts=cast("PromptClient", engine.config.prompts),
-                runner=cast("RunnerClient", engine.config.runner),
-            ),
+        clients = ClientContainer.install(
+            ClientContainer(
+                ClientMode.REAL,
+                RealDiscord(bot),
+                TemporalRuntime(settings.temporal_address, settings.temporal_queue),
+                engine.config.phoenix,
+                engine.config.prompts,
+                engine.config.runner,
+                OpenRouter(settings, engine.config.prompts),
+                settings,
+            )
         )
-    engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context)
-    assert clients is not None
-    return _Context(engine, bot, clients, temporal, token, discord_token)
+    engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context, clients.discord)
+    bot.temporal = clients.temporal
+    if not real:
+        discord_token = ""
+    return _Context(engine, bot, clients, token, discord_token)
 
 
 async def _start(context: _Context) -> None:
-    if context.temporal is not None:
-        await context.temporal.start()
+    if context.clients.mode is ClientMode.REAL:
+        await context.clients.temporal.start()
     if context.discord_token:
         context.discord_task = asyncio.create_task(context.bot.run_forever(context.discord_token))
 
@@ -147,13 +140,15 @@ async def _start(context: _Context) -> None:
 async def _stop(context: _Context) -> None:
     if context.discord_task is not None:
         context.discord_task.cancel()
+        await asyncio.gather(context.discord_task, return_exceptions=True)
     await context.bot.close()
-    if context.temporal is not None:
-        await context.temporal.close()
+    if context.clients.mode is ClientMode.REAL:
+        await context.clients.temporal.close()
+    await context.clients.provider.close()
 
 
 @asynccontextmanager
-async def _lifespan(context: _Context, _app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(context: _Context, _app: FastAPI) -> AsyncGenerator[None, None]:
     await _start(context)
     try:
         yield
@@ -173,13 +168,9 @@ def _register_health(app: FastAPI, context: _Context) -> None:
     async def metrics() -> PlainTextResponse:
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    async def events() -> list[dict[str, object]]:
-        return context.engine.config.phoenix.records
-
     app.add_api_route("/healthz", health, methods=["GET"])
     app.add_api_route("/readyz", ready, methods=["GET"])
     app.add_api_route("/metrics", metrics, methods=["GET"])
-    app.add_api_route("/v1/phoenix/events", events, methods=["GET"])
 
 
 def _replay_auth(context: _Context, supplied: str | None) -> None:
@@ -188,50 +179,47 @@ def _replay_auth(context: _Context, supplied: str | None) -> None:
         raise HTTPException(401, "invalid replay token")
 
 
-async def _replay_local(context: _Context, event: Event) -> dict[str, object]:
-    key = event.trigger.thread_id or event.trigger.channel_id
-    result = dict(await context.engine.handle(event, state_data=context.replay_state.get(key, {})))
-    if isinstance(result.get("state"), dict):
-        context.replay_state[key] = cast("JsonObject", result["state"])
-    return result
+async def _admit(context: _Context, event: Event) -> dict[str, object]:
+    if event.kind == "stop":
+        accepted = await context.clients.temporal.stop(event)
+        return {"status": "stopped" if accepted else "ignored", "message_id": event.trigger.id}
+    bot_id = str(getattr(context.bot.user, "id", "") or os.getenv("WISEMAN_DISCORD_BOT_ID", ""))
+    replies = (*event.parent_messages, *event.thread_messages)
+    if bot_id and not admitted(
+        event.trigger,
+        bot_id,
+        reply_to_bot=any(item.id == event.trigger.reply_to and item.bot for item in replies),
+    ):
+        return {"status": "ignored", "message_id": event.trigger.id}
+    result = await context.clients.temporal.submit(event.model_dump(mode="json"))
+    return result or {"status": "queued", "message_id": event.trigger.id}
 
 
 def _register_replay(app: FastAPI, context: _Context) -> None:
-    async def events_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _replay_auth(context, x_replay_token)
-        value = context.engine.config.phoenix.audit(audit_id)
-        if value is None:
-            raise HTTPException(404, "Phoenix admission audit was not found")
-        return value
-
-    async def replay(
-        payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def replay(payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _replay_auth(context, x_replay_token)
         event = _event(payload, "invalid Discord event")
-        if context.temporal is not None:
-            await context.temporal.submit(event.model_dump(mode="json"))
-            return {"status": "queued", "message_id": event.trigger.id}
-        return await _replay_local(context, event)
+        return await _admit(context, event)
 
     async def replay_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _replay_auth(context, x_replay_token)
-        artifact = context.engine.config.phoenix.audit(audit_id)
-        if artifact is None:
-            raise HTTPException(404, "Phoenix admission audit was not found")
+        artifact = _audit(context, audit_id)
         payload = artifact.get("raw_request")
         if not isinstance(payload, dict):
             raise HTTPException(422, "Phoenix audit has no replayable raw request")
         event = _event(payload, "Phoenix audit contains an invalid Discord event")
-        if context.temporal is not None:
-            await context.temporal.submit(event.model_dump(mode="json"))
-            return {"status": "queued", "message_id": event.trigger.id, "audit_id": audit_id}
-        return {**(await _replay_local(context, event)), "audit_id": audit_id}
+        return {**(await _admit(context, event)), "audit_id": audit_id}
 
-    app.add_api_route("/v1/phoenix/audits/{audit_id}", events_audit, methods=["GET"])
     app.add_api_route("/v1/replay/discord", replay, methods=["POST"])
     app.add_api_route("/v1/replay/phoenix/{audit_id}", replay_audit, methods=["POST"])
     app.add_api_route("/v1/discord/events", replay, methods=["POST"])
+
+
+def _audit(context: _Context, audit_id: str) -> dict[str, object]:
+    value = context.engine.config.phoenix.audit(audit_id)
+    if value is None:
+        raise HTTPException(404, "Phoenix admission audit was not found")
+    return value
 
 
 def _event(payload: dict[str, object], detail: str) -> Event:
@@ -242,37 +230,35 @@ def _event(payload: dict[str, object], detail: str) -> Event:
 
 
 def _register_provider(app: FastAPI, context: _Context) -> None:
-    async def responses(request: Request, authorization: Annotated[str | None, Header()] = None) -> StreamingResponse:
+    async def responses(payload: JsonObject, authorization: Annotated[str | None, Header()] = None) -> Response:
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", context.token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid provider token")
-        payload = await request.json()
-        key = os.getenv("OPENROUTER_API_KEY", "")
-        if not key:
-            raise HTTPException(503, "OpenRouter is not configured")
         trace = f"provider-{hashlib.sha256(json_text(payload).encode()).hexdigest()[:16]}"
-        return StreamingResponse(_provider_stream(context, payload, key, trace), media_type="text/event-stream")
+        try:
+            upstream = await context.clients.provider.responses(payload)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            await _external_record(context, trace, request=payload, error=type(exc).__name__)
+            raise HTTPException(503, "Provider connection unavailable") from exc
+        headers = {key: upstream.headers[key] for key in ("content-type", "retry-after", "x-request-id") if key in upstream.headers}
+        if upstream.is_error or "text/event-stream" not in upstream.headers.get("content-type", ""):
+            try:
+                body = await upstream.aread()
+                await _external_record(context, trace, request=payload, status=upstream.status_code)
+                return Response(body, status_code=upstream.status_code, headers=headers)
+            finally:
+                await upstream.aclose()
+        return StreamingResponse(_provider_stream(context, upstream, payload, trace), status_code=upstream.status_code, headers=headers)
 
     app.add_api_route("/v1/responses", responses, methods=["POST"])
 
 
-async def _provider_stream(context: _Context, payload: object, key: str, trace: str) -> AsyncIterator[bytes]:
+async def _provider_stream(context: _Context, response: httpx.Response, payload: JsonObject, trace: str) -> AsyncIterator[bytes]:
     usage: object = None
     cost: object = None
     served_model: object = None
-    async with (
-        httpx.AsyncClient(timeout=300) as client,
-        client.stream(
-            "POST",
-            f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
-            headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
-            json=payload,
-        ) as response,
-    ):
-        if response.is_error:
-            detail = (await response.aread()).decode(errors="replace")[:1_000]
-            message = f"OpenRouter returned HTTP {response.status_code}: {detail}"
-            raise RuntimeError(message)
+    complete = False
+    try:
         async for line in response.aiter_lines():
             if line.startswith("data:"):
                 try:
@@ -282,15 +268,26 @@ async def _provider_stream(context: _Context, payload: object, key: str, trace: 
                 except ValueError:
                     pass
             yield f"{line}\n".encode()
-    await context.engine.config.phoenix.record(
-        trace,
-        "provider",
-        request=payload,
-        requested_model=payload.get("model") if isinstance(payload, dict) else None,
-        served_model=served_model,
-        usage=usage,
-        cost=cost,
-    )
+        complete = True
+    finally:
+        await asyncio.shield(response.aclose())
+        await _external_record(
+            context,
+            trace,
+            request=payload,
+            requested_model=payload.get("model"),
+            served_model=served_model,
+            usage=usage,
+            cost=cost,
+            transport_complete=complete,
+        )
+
+
+async def _external_record(context: _Context, trace: str, node: str = "provider", **values: object) -> None:
+    try:
+        await asyncio.wait_for(context.clients.phoenix.record(trace, node, **values), timeout=5)
+    except Exception:
+        logging.getLogger("wiseman").exception("External telemetry failed trace=%s", trace)
 
 
 def _tool_auth(context: _Context, supplied: str | None) -> None:
@@ -300,25 +297,22 @@ def _tool_auth(context: _Context, supplied: str | None) -> None:
 
 
 def _register_tools(app: FastAPI, context: _Context) -> None:
-    async def describe_image(
-        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def describe_image(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _tool_auth(context, authorization)
         url = normalize_image_url(payload.get("url"))
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
-        attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
-        result = await describe_images(
-            [{"attachments": [{"id": attachment_id, "content_type": "image/*", "url": url}]}],
-            str(payload.get("question") or "")[:2_000],
-        )
+        attachment_id = str(payload.get("attachment_id") or url)
+        try:
+            result = await context.clients.provider.describe(url, str(payload.get("question") or "")[:2_000])
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise HTTPException(502, "Vision provider unavailable") from exc
+        result["attachments"] = [attachment_id]
         trace = str(payload.get("thread_id") or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}")
-        await context.engine.config.phoenix.record(trace, "vision_tool", **result)
+        await _external_record(context, trace, "vision_tool", **result)
         return result
 
-    async def set_reactions(
-        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def set_reactions(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _tool_auth(context, authorization)
         try:
             values = {phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload}
@@ -328,42 +322,27 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         context.bot.persist_profile()
         return {"reaction_emojis": configured}
 
-    async def set_profile(
-        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def set_profile(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _tool_auth(context, authorization)
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
+        username, avatar = _profile_values(payload)
         try:
-            username, avatar = _profile_values(payload)
-        except ProfileInputError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        if context.bot.user is None:
-            raise HTTPException(503, "Discord gateway is not ready")
-        if username is not None and avatar is not None:
-            await context.bot.user.edit(username=username, avatar=avatar)
-        elif username is not None:
-            await context.bot.user.edit(username=username)
-        else:
-            await context.bot.user.edit(avatar=avatar)
-        return {"status": "updated", "username": getattr(context.bot.user, "name", None)}
+            username = await context.clients.discord.set_profile(username, avatar)
+        except RuntimeError as exc:
+            raise HTTPException(503, "Discord profile is unavailable") from exc
+        return {"status": "updated", "username": username}
 
-    async def send_file(
-        payload: dict[str, object], authorization: Annotated[str | None, Header()] = None
-    ) -> dict[str, object]:
+    async def send_file(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _tool_auth(context, authorization)
         thread_id, filename, data = _file_values(payload)
         try:
-            channel = await context.bot.fetch_channel(int(thread_id))
+            receipt = await context.clients.discord.send_file(thread_id, Upload(filename, data), str(payload.get("caption") or "")[:2_000])
         except (ValueError, discord.DiscordException) as exc:
             raise HTTPException(404, "Discord thread was not found") from exc
-        if not isinstance(channel, discord.Thread):
-            raise HTTPException(422, "file delivery requires a Discord thread")
-        message = await channel.send(
-            content=str(payload.get("caption") or "")[:2_000],
-            file=discord.File(io.BytesIO(data), filename=filename),
-        )
-        return {"status": "sent", "message_id": str(message.id), "url": str(message.jump_url)}
+        except TypeError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"status": "sent", "message_id": receipt.message_id, "url": receipt.url}
 
     app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"])
     app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"])
@@ -373,23 +352,21 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
 
 def _profile_values(payload: dict[str, object]) -> tuple[str | None, bytes | None]:
     username = payload.get("username")
-    if username is not None and (
-        not isinstance(username, str) or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH
-    ):
-        raise ProfileInputError("username")
+    if username is not None and (not isinstance(username, str) or not MIN_DISCORD_USERNAME_LENGTH <= len(username) <= MAX_DISCORD_USERNAME_LENGTH):
+        raise HTTPException(422, "username must be 2-32 characters")
     avatar = payload.get("avatar_base64")
     data: bytes | None = None
     if avatar is not None:
         if not isinstance(avatar, str):
-            raise ProfileInputError("avatar_type")
+            raise HTTPException(422, "avatar_base64 must be a string")
         try:
             data = base64.b64decode(avatar, validate=True)
         except (ValueError, TypeError) as exc:
-            raise ProfileInputError("avatar_encoding") from exc
+            raise HTTPException(422, "avatar_base64 is invalid") from exc
         if not data or len(data) > MAX_DISCORD_UPLOAD_BYTES:
-            raise ProfileInputError("avatar_size")
+            raise HTTPException(422, "avatar exceeds the 8 MiB limit")
     if username is None and data is None:
-        raise ProfileInputError("missing")
+        raise HTTPException(422, "provide username or avatar")
     return username, data
 
 
