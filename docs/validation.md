@@ -6,7 +6,7 @@ The compact suite covers the normalized Discord admission path, startup and
 follow-up context selection, Engine delivery and reactions, provider SSE
 forwarding, image/file/profile tools, the Temporal test server, duplicate
 messages, session retention, and retirement. The current run is 3 tests with
-59.91% application coverage and a checked-in 55% floor.
+60.12% application coverage and a checked-in 55% floor.
 
 ## Step 1 test reduction
 
@@ -26,9 +26,15 @@ messages and idle stops receive `ignored`, and admitted questions receive
 `queued`.
 
 Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,970/3,000`; no
+and `git diff --check` pass. The counted source budget is `2,999/3,000`; no
 production file exceeds 500 counted lines and application code contains no
 `Any` annotations.
+
+The initialization stop race and the mock runner's persistent stop flag were
+fixed in commit `0f066f3`; the sandbox instruction literal was replaced by
+the Jinja contract in `ca17c69`. CI run `3354` for `ca17c69` passed on
+`k8s-thor` in 3 minutes, including the edge-coverage path and both seeded
+100-transition GraphWalker walks.
 
 GraphWalker CLI 4.3.3 is checksum-pinned in CI. Two seeded native traversals
 run on Thor and are replayed through the authenticated HTTP admission boundary;
