@@ -226,7 +226,7 @@ class ThreadWorkflow:
     def __init__(self) -> None:
         self.pending: list[dict] = []
         self.state: JsonObject = {}
-        self.active_message = ""
+        self.active_message = self.active_timestamp = ""
 
     @workflow.signal
     async def submit(self, event: dict) -> None:
@@ -243,7 +243,7 @@ class ThreadWorkflow:
 
     @workflow.query
     def session(self) -> dict:
-        return {**self.state, "active_message": self.active_message}
+        return {**self.state, "active_message": self.active_message, "active_timestamp": self.active_timestamp}
 
     @workflow.run
     async def run(self, first: dict) -> dict:
@@ -272,7 +272,7 @@ class ThreadWorkflow:
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
-            self.active_message = message_id
+            self.active_message, self.active_timestamp = message_id, str(_object_map(event.get("trigger")).get("timestamp", ""))
             self.state.setdefault("owner_id", _object_map(event.get("trigger")).get("author_id", ""))
             try:
                 self.result = await self._turn(event)
@@ -283,7 +283,7 @@ class ThreadWorkflow:
                     timedelta(seconds=30),
                 )
             self.state = _object_map(self.result.get("state", self.state))
-            self.active_message = ""
+            self.active_message = self.active_timestamp = ""
             handled += 1
 
     async def _turn(self, event: dict) -> dict:
@@ -368,7 +368,8 @@ class TemporalRuntime:
         thread_id = event.trigger.thread_id or event.trigger.channel_id
         try:
             state = await client.get_workflow_handle(f"wiseman-{thread_id}").query(ThreadWorkflow.session)
-            if not (message_id := state.get("active_message")):
+            stale = bool(event.trigger.timestamp and event.trigger.timestamp < str(state.get("active_timestamp", "")))
+            if not (message_id := state.get("active_message")) or stale:
                 return False
             return bool(
                 await client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update(
@@ -382,11 +383,9 @@ class TemporalRuntime:
                 return False
             raise
 
-    async def steer(self, event: Event) -> bool:
-        return await self._update("steer", event)
+    async def steer(self, event: Event) -> bool: return await self._update("steer", event)  # fmt: skip
 
-    async def stop(self, event: Event) -> bool:
-        return await self._update("stop", event)
+    async def stop(self, event: Event) -> bool: return await self._update("stop", event)  # fmt: skip
 
     async def close(self) -> None:
         if self.worker_task is not None:
