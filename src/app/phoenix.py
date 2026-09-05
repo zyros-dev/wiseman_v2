@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Nick van der Merwe
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -9,12 +10,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import httpx
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Context, Span, set_span_in_context
+from phoenix.client import Client
 
 if TYPE_CHECKING:
     from app.types import JsonObject
@@ -117,7 +118,12 @@ class Phoenix:
 
 class PromptHub:
     def __init__(self, url: str = "", key: str = "") -> None:
-        self.url, self.key = url.rstrip("/"), key
+        self.client = Client(base_url=url.rstrip("/"), api_key=key) if url else None
+        try:
+            value: object = json.loads(os.getenv("WISEMAN_PROMPT_VERSION_IDS", "{}"))
+        except ValueError:
+            value = {}
+        self.version_ids = {str(name): str(identifier) for name, identifier in value.items()} if isinstance(value, dict) else {}
 
     async def source(self, kind: str) -> str:
         local_kind = {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)
@@ -127,24 +133,16 @@ class PromptHub:
             contracts / f"{local_kind}.json",
         )
         default = next((path.read_text(encoding="utf-8") for path in candidates if path.exists()), "")
-        if not self.url:
+        identifier = self.version_ids.get(local_kind)
+        if self.client is None or not identifier:
             return default
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                response = await client.get(
-                    f"{self.url}/v1/prompts/{kind}/latest",
-                    headers={"Authorization": f"Bearer {self.key}"} if self.key else {},
-                )
-                response.raise_for_status()
-                value = response.json()
-                data = value.get("data", value)
-                if isinstance(data, dict):
-                    if isinstance(data.get("source"), str):
-                        return data["source"][:100_000]
-                    if data.get("template") is not None:
-                        return json_text({"model": data.get("model_name"), "template": data["template"]})[:100_000]
-                return default
-        except (httpx.HTTPError, ValueError, AttributeError):
+            version = await asyncio.to_thread(self.client.prompts.get, prompt_version_id=identifier)
+            formatted = version.format(variables={}, sdk="openai")
+            messages = getattr(formatted, "messages", ())
+            source = "\n\n".join(str(item.get("content", "")) for item in messages if isinstance(item, dict))
+            return source[:100_000] or default
+        except (OSError, RuntimeError, TypeError, ValueError):
             return default
 
 

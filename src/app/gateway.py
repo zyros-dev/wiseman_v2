@@ -45,8 +45,6 @@ class Gateway(discord.Client):
         self.temporal: TemporalClient | None = None
         self.activity_path = Path(activity_path) if activity_path else None
         self.profile_path = Path(profile_path) if profile_path else None
-        self.sequence_path = self.activity_path and self.activity_path.with_name("thread-sequence.json")
-        self.thread_sequence = self._load_thread_sequence()
         self._load_profile()
 
     async def on_ready(self) -> None:
@@ -65,21 +63,6 @@ class Gateway(discord.Client):
                 self.raw_gateway_payloads[data["id"]] = cast("JsonObject", value)
                 if len(self.raw_gateway_payloads) > RAW_CAPTURE_LIMIT:
                     self.raw_gateway_payloads.pop(next(iter(self.raw_gateway_payloads)))
-
-    def _load_thread_sequence(self) -> int:
-        if self.sequence_path is None or not self.sequence_path.exists():
-            return 0
-        try:
-            return max(0, int(json.loads(self.sequence_path.read_text(encoding="utf-8"))))
-        except (OSError, TypeError, ValueError):
-            LOGGER.warning("Ignoring invalid Wiseman thread sequence state")
-            return 0
-
-    def _next_thread_name(self) -> str:
-        self.thread_sequence += 1
-        if self.sequence_path is not None:
-            _atomic_write(self.sequence_path, str(self.thread_sequence))
-        return thread_name(self.thread_sequence)
 
     def _load_profile(self) -> None:
         if self.profile_path is None or not self.profile_path.exists():
@@ -154,7 +137,7 @@ class Gateway(discord.Client):
     async def _eligible(self, message: discord.Message) -> bool:
         channel = message.channel
         reply_to_self = await self._replies_to_self(message)
-        if isinstance(channel, discord.Thread) and not self._is_self(message):
+        if isinstance(channel, discord.Thread) and not self._is_self(message) and self._guild_allowed(message):
             if message.content.strip() == "/stop" and self.temporal is not None:
                 await self.temporal.stop(Event(trigger=normalize_message(message, str(channel.id), str(channel.id)), kind="stop"))
                 return False
@@ -165,10 +148,9 @@ class Gateway(discord.Client):
                 and await self.temporal.steer(Event(trigger=normalize_message(message, str(channel.id), str(channel.id))))
             ):
                 return False
-        guild_id = getattr(getattr(channel, "guild", None), "id", None)
         eligible = (
             not self._is_self(message)
-            and (not self.allowlist or guild_id in self.allowlist)
+            and self._guild_allowed(message)
             and admitted(
                 normalize_message(message, str(getattr(channel, "id", "")), None),
                 str(getattr(self.user, "id", "")),
@@ -178,6 +160,10 @@ class Gateway(discord.Client):
         if not eligible:
             LOGGER.debug("Ignoring non-admitted Discord message %s", message.id)
         return eligible
+
+    def _guild_allowed(self, message: discord.Message) -> bool:
+        guild_id = getattr(getattr(message.channel, "guild", None), "id", None)
+        return not self.allowlist or guild_id in self.allowlist
 
     async def _replies_to_self(self, message: discord.Message) -> bool:
         reference = getattr(message, "reference", None)
@@ -199,7 +185,7 @@ class Gateway(discord.Client):
         else:
             try:
                 thread = await message.create_thread(
-                    name=self._next_thread_name(),
+                    name=thread_name(message.content, str(getattr(self.user, "id", ""))),
                     auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 )
             except discord.DiscordException:

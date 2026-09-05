@@ -36,10 +36,8 @@ def banner() -> str:
     return "⚡ **Wiseman thread startup**\n" + line + ("\n" + " · ".join(details) if details else "")
 
 
-def thread_name(number: int) -> str:
-    if number < 1:
-        raise ValueError("thread number must be positive")
-    return f"Gurt {number}"
+def thread_name(content: str, bot_id: str = "") -> str:
+    return (" ".join(content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").split()).strip(" -") or "Wiseman thread")[:100]
 
 
 def startup_embed() -> discord.Embed:
@@ -60,5 +58,5 @@ def render_progress(steps: list[str], turn_number: int | None = None) -> str:
     visible = [
         line if len(line) <= MAX_PROGRESS_PREVIEW_LENGTH else line[: MAX_PROGRESS_PREVIEW_LENGTH - 3] + "..." for line in "\n".join(steps).splitlines()[-8:]
     ]
-    header = f"⏳ Working · Gurt {count}" if count else "⏳ Working"
+    header = f"⏳ Working · Turn {count}" if count else "⏳ Working"
     return "\n".join([header, *visible])

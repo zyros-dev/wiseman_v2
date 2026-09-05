@@ -21,6 +21,8 @@ dependencies = [
   "temporalio>=1.10,<2",
   "uvicorn[standard]>=0.34,<1",
   "jsonschema>=4.23,<5",
+  "arize-phoenix-client>=1,<2",
+  "httpx-sse>=0.4,<1",
 ]
 
 [dependency-groups]
@@ -75,10 +77,11 @@ max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
 "sandbox/src/runner/api.py" = ["S603"]
+"sandbox/src/runner/jobs.py" = ["BLE001"]
 "src/app/temporal_runtime.py" = ["BLE001", "PLC0415"]
 "src/app/http_api.py" = ["TC001"]
 "tests/**/*.py" = [
-  "ANN", "ARG", "ASYNC110", "B018", "N802", "PLC2701", "PLR2004", "S106", "SIM905", "SLF001"
+  "ANN", "ARG", "ASYNC110", "B010", "B018", "N802", "PLC2701", "PLR2004", "S106", "SIM905", "SLF001"
 ]
 
 [tool.coverage.run]
