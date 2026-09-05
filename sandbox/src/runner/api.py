@@ -16,7 +16,8 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from openai_codex import AsyncThread, AsyncTurnHandle
     from openai_codex.generated.v2_all import ThreadItem, ThreadTokenUsage
     from openai_codex.models import Notification
+
+BEARER = HTTPBearer(auto_error=False)
 
 CODEX_RUNTIME_OVERRIDES = (
     "features.view_image=false",
@@ -184,9 +187,12 @@ def _prepare_codex(path: Path) -> None:
     agents.chmod(0o600)
 
 
-def _auth(got: str | None, expected: str) -> None:
-    if expected and not hmac.compare_digest(got or "", f"Bearer {expected}"):
-        raise HTTPException(401, "unauthorized")
+def _auth_dependency(expected: str) -> Callable[[], None]:
+    def check(credentials: Annotated[HTTPAuthorizationCredentials | None, Security(BEARER)] = None) -> None:
+        if expected and not hmac.compare_digest(credentials.credentials if credentials else "", expected):
+            raise HTTPException(401, "unauthorized")
+
+    return check
 
 
 class CodexRunner:
@@ -437,15 +443,15 @@ def _register_health(app: FastAPI) -> None:
 
 
 def _register_workspace(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
-    @app.post("/acquire")
-    async def acquire(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(authorization, secret)
+    auth = Depends(_auth_dependency(secret))
+
+    @app.post("/acquire", dependencies=[auth])
+    async def acquire(turn: Turn) -> dict[str, object]:
         path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         return {"thread_id": turn.thread_id, "path": str(path), "shared": str(path / "shared")}
 
-    @app.post("/release")
-    async def release(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
-        _auth(authorization, secret)
+    @app.post("/release", dependencies=[auth])
+    async def release(turn: Turn) -> dict[str, bool]:
         lock = codex.locks.setdefault(turn.thread_id, asyncio.Lock())
         busy = any(jobs.get(key).workspace == f"{turn.user_id}/{turn.thread_id}" for key in jobs.tasks)
         if lock.locked() or busy:
@@ -455,9 +461,8 @@ def _register_workspace(app: FastAPI, workspaces: Workspace, codex: CodexRunner,
             await asyncio.to_thread(workspaces.release, turn.user_id, turn.thread_id)
         return {"released": True}
 
-    @app.post("/start")
-    async def start(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(authorization, secret)
+    @app.post("/start", dependencies=[auth])
+    async def start(turn: Turn) -> dict[str, object]:
         path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
         try:
             return await codex.start(turn, path, workspaces.username(turn.user_id))
@@ -466,9 +471,10 @@ def _register_workspace(app: FastAPI, workspaces: Workspace, codex: CodexRunner,
 
 
 def _register_turns(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
-    @app.post("/turn")
-    async def run(turn: Turn, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(authorization, secret)
+    auth = Depends(_auth_dependency(secret))
+
+    @app.post("/turn", dependencies=[auth])
+    async def run(turn: Turn) -> dict[str, object]:
 
         async def execute() -> dict[str, object]:
             path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
@@ -481,9 +487,8 @@ def _register_turns(app: FastAPI, workspaces: Workspace, codex: CodexRunner, job
         except Exception as exc:
             raise HTTPException(503, f"codex unavailable: {exc}") from exc
 
-    @app.get("/jobs/{message_id}")
-    async def job(message_id: str, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(authorization, secret)
+    @app.get("/jobs/{message_id}", dependencies=[auth])
+    async def job(message_id: str) -> dict[str, object]:
         try:
             receipt = jobs.get(message_id)
         except FileNotFoundError as exc:
@@ -492,9 +497,10 @@ def _register_turns(app: FastAPI, workspaces: Workspace, codex: CodexRunner, job
 
 
 def _register_controls(app: FastAPI, workspaces: Workspace, codex: CodexRunner, jobs: Jobs, secret: str) -> None:
-    @app.post("/steer")
-    async def steer(turn: SteeringTurn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
-        _auth(authorization, secret)
+    auth = Depends(_auth_dependency(secret))
+
+    @app.post("/steer", dependencies=[auth])
+    async def steer(turn: SteeringTurn) -> dict[str, bool]:
 
         async def execute() -> dict[str, object]:
             path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
@@ -506,9 +512,8 @@ def _register_controls(app: FastAPI, workspaces: Workspace, codex: CodexRunner, 
         except Exception as exc:
             raise HTTPException(503, f"codex steering unavailable: {exc}") from exc
 
-    @app.post("/stop")
-    async def stop(turn: StopTurn, authorization: Annotated[str | None, Header()] = None) -> dict[str, bool]:
-        _auth(authorization, secret)
+    @app.post("/stop", dependencies=[auth])
+    async def stop(turn: StopTurn) -> dict[str, bool]:
 
         async def execute() -> dict[str, object]:
             path = await asyncio.to_thread(workspaces.thread, turn.user_id, turn.thread_id)
