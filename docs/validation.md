@@ -6,20 +6,29 @@ The compact suite covers the normalized Discord admission path, startup and
 follow-up context selection, Engine delivery and reactions, provider SSE
 forwarding, image/file/profile tools, the Temporal test server, duplicate
 messages, session retention, and retirement. The current run is 5 tests with
-55.86% application coverage and a checked-in 55% floor.
+55.93% application coverage and a checked-in 55% floor.
 
 Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,997/3,000`; no
+and `git diff --check` pass. The counted source budget is `2,988/3,000`; no
 production file exceeds 500 counted lines and application code contains no
 `Any` annotations.
 
 GraphWalker CLI 4.3.3 is checksum-pinned in CI. Two seeded native traversals
-run on Thor and produced 325 and 227 transitions. The model includes queued
+run on Thor and are replayed through the authenticated HTTP admission boundary;
+both paths passed and covered every modeled edge. The model includes queued
 questions, background context, steering, `/stop`, retries, restart recovery,
 delivery failure, unknown cancellation, and three-day retirement states.
 
 Both coordinator and sandbox images build on Thor. A sandbox container returns
 `{"status":"ok"}` from `/healthz`.
+
+## Live evidence
+
+On 2026-09-05, deployed revision `a431ca6` created Discord thread `Gurt 7`
+(`1545705046547898388`) from a real parent-channel mention. It produced one
+startup banner and one edited `INITIAL_OK` answer, then one edited
+`FOLLOWUP_OK` answer for a real in-thread mention without repeating the
+startup banner. A plain non-ping remained silent.
 
 ## Remaining acceptance evidence
 
