@@ -131,14 +131,7 @@ class PromptHub:
             contracts / f"{local_kind}.txt",
             contracts / f"{local_kind}.json",
         )
-        fallback = {
-            "wiseman-soul": os.getenv("WISEMAN_SOUL", ""),
-            "wiseman-runtime": os.getenv("WISEMAN_RUNTIME", ""),
-        }
-        default = next(
-            (path.read_text(encoding="utf-8") for path in candidates if path.exists()),
-            fallback.get(kind, ""),
-        )
+        default = next((path.read_text(encoding="utf-8") for path in candidates if path.exists()), "")
         if not self.url:
             return default
         try:

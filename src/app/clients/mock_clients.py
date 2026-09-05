@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import httpx
+
 from app.clients.client_interfaces import (
     ClientContainer,
     ClientMode,
@@ -14,6 +16,7 @@ from app.clients.client_interfaces import (
     RunnerClient,
     TemporalClient,
 )
+from app.clients.provider import OpenRouter
 from app.models import DeliveryReceipt
 
 if TYPE_CHECKING:
@@ -178,11 +181,10 @@ class MockPhoenix(PhoenixClient):
         self.records = state.records
 
     async def record(self, trace: str, node: str, **data: object) -> None:
-        del data
         self.state.call("phoenix", "record", trace, node)
-        self.state.records.append({"trace": trace, "node": node})
+        self.state.records.append({"trace": trace, "node": node, **data})
         if node == "admission":
-            self.state.audits[trace] = {"trace": trace, "node": node}
+            self.state.audits[trace] = {"trace": trace, "node": node, **data}
 
     def audit(self, audit_id: str) -> dict[str, object] | None:
         return self.state.call("phoenix", "audit", audit_id) or self.state.audits.get(audit_id)
@@ -197,8 +199,8 @@ class MockPrompts(PromptClient):
 
 
 class MockRunner(RunnerClient):
-    def __init__(self, state: MockState) -> None:
-        self.state = state
+    def __init__(self, state: MockState | None = None) -> None:
+        self.state = state or MockState()
 
     async def acquire(self, user: str, workspace: str) -> None:
         self.state.call("runner", "acquire", user, workspace)
@@ -208,7 +210,7 @@ class MockRunner(RunnerClient):
 
     async def start(self, thread: str, user: str, workspace: str = "") -> str:
         self.state.call("runner", "start", thread, user, workspace)
-        thread_id = thread or f"codex-{user}"
+        thread_id = thread or f"codex-{workspace or user}"
         self.state.turn_ids[workspace or thread_id] = thread_id
         return thread_id
 
@@ -220,8 +222,8 @@ class MockRunner(RunnerClient):
         workspace: str = "",
         progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str, str, dict[str, object]]:
-        self.state.call("runner", "run", thread, user, workspace)
-        thread_id = thread or self.state.turn_ids.get(workspace, f"codex-{user}")
+        self.state.call("runner", "run", thread, user, workspace, prompt)
+        thread_id = thread or self.state.turn_ids.get(workspace, f"codex-{workspace or user}")
         if progress is not None:
             await progress("🤖 Codex turn started...")
             await progress("✍️ Writing response...")
@@ -234,6 +236,19 @@ class MockRunner(RunnerClient):
 
 def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
     state = MockState()
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        state.call("provider", request.url.path)
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(
+                200,
+                text='data: {"type":"response.completed","response":{"model":"mock"}}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200, json={"model": "mock-vision", "choices": [{"message": {"content": "mock image description"}}]}
+        )
+
     return ClientContainer(
         mode=ClientMode.MOCK,
         discord=MockDiscord(state),
@@ -241,5 +256,6 @@ def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
         phoenix=MockPhoenix(state),
         prompts=MockPrompts(),
         runner=MockRunner(state),
+        provider=OpenRouter(ClientSettings(provider_key="mock"), MockPrompts(), httpx.MockTransport(provider)),
         settings=settings or ClientSettings(),
     )

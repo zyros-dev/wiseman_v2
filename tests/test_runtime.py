@@ -35,7 +35,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from app.admission import ContextConfig, context, image_tool_instruction, normalize_event
 from app.clients.client_interfaces import RunnerClient
 from app.clients.discord_client import mention_ids
-from app.clients.mock_clients import MockDiscord, mock_container
+from app.clients.mock_clients import MockDiscord, MockRunner, mock_container
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway, _history
 from app.http_api import create_app
@@ -43,12 +43,11 @@ from app.models import Event
 from app.phoenix import Phoenix, PromptHub, provider_values
 from app.presentation import (
     banner,
-    describe_images,
     normalize_image_url,
     render_progress,
     thread_name,
 )
-from app.runner import FakeRunner, HttpRunner
+from app.runner import HttpRunner
 from app.temporal_runtime import (
     TRANSPORT_RETRY_POLICY,
     TemporalRuntime,
@@ -124,7 +123,7 @@ def discord_message(mid: str, content: str, channel: str = "parent", thread: str
 
 def configured_engine(phoenix: Phoenix | None = None, runner: RunnerClient | None = None) -> Engine:
     return Engine(
-        EngineConfig(phoenix or Phoenix(), runner or FakeRunner(), PromptHub(), discord=mock_container().discord)
+        EngineConfig(phoenix or Phoenix(), runner or MockRunner(), PromptHub(), discord=mock_container().discord)
     )
 
 
@@ -199,7 +198,7 @@ def test_raw_discord_initial_and_followup_use_distinct_contexts() -> None:
     assert {"source", "raw", "normalized", "rendered", "version"} <= grammar.keys()
     assert cast("dict[str, object]", grammar["parsed"])["schema"] == "wiseman.context.grammar.v2"
     codex = [item for item in engine.config.phoenix.records if item["node"] == "codex"]
-    assert codex[0]["model"] == "local-fake"
+    assert codex[0]["model"] == "mock"
     assert "old-" in str(codex[0]["input"])
     assert "new-parent" in str(codex[1]["input"])
     assert "old-" not in str(codex[1]["input"])
@@ -312,66 +311,6 @@ def test_gateway_mention_fallback_merges_parsed_and_raw_content() -> None:
     assert mention_ids(message) == ["7", "42"]
 
 
-@pytest.mark.asyncio
-async def test_vision_assist_sends_discord_image_to_glm(monkeypatch) -> None:
-    requests: list[dict[str, object]] = []
-
-    class Response:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {
-                "model": "z-ai/glm-5.3-flash",
-                "choices": [{"message": {"content": "Three black office chairs."}}],
-                "usage": {"cost": 0.01},
-            }
-
-    class Client:
-        def __init__(self, **kwargs: object) -> None:
-            del kwargs
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            del args
-
-        async def post(self, url: str, **kwargs: object) -> Response:
-            requests.append({"url": url, **kwargs})
-            return Response()
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.http_api.httpx.AsyncClient", Client)
-    result = await describe_images(
-        [{"attachments": [{"id": "image-1", "filename": "image.jpg", "url": "https://cdn/image.jpg"}]}],
-        "How many chairs are visible?",
-    )
-    assert result["text"] == "Three black office chairs."
-    assert result["attachments"] == ["image-1"]
-    assert result["question"] == "How many chairs are visible?"
-    request = cast("dict[str, object]", requests[0]["json"])
-    messages = cast("list[dict[str, object]]", request["messages"])
-    content = cast("list[dict[str, object]]", messages[0]["content"])
-    prompt = cast("str", content[0]["text"])
-    assert request["model"] == "z-ai/glm-5.3-flash"
-    assert "How many chairs" in prompt
-    assert cast("dict[str, object]", content[1]["image_url"])["url"] == "https://cdn/image.jpg"
-    generic = await describe_images(
-        [{"attachments": [{"id": "image-1", "filename": "image.jpg", "url": "https://cdn/image.jpg"}]}]
-    )
-    assert generic["text"] == result["text"]
-    assert generic["question"] is None
-    generic_request = cast("dict[str, object]", requests[1]["json"])
-    generic_messages = cast("list[dict[str, object]]", generic_request["messages"])
-    generic_content = cast("list[dict[str, object]]", generic_messages[0]["content"])
-    generic_prompt = cast("str", generic_content[0]["text"])
-    assert "Please describe this image generally" in generic_prompt
-    phoenix = Phoenix()
-    await phoenix.record("vision-tool", "vision_tool", **generic)
-    assert not phoenix.roots
-
-
 def test_image_url_normalization_accepts_model_wrappers() -> None:
     assert normalize_image_url(" <https://cdn.example/image.png> ") == ("https://cdn.example/image.png")
     assert normalize_image_url("attachment://image.png") == ""
@@ -379,19 +318,12 @@ def test_image_url_normalization_accepts_model_wrappers() -> None:
 
 @pytest.mark.asyncio
 async def test_describe_image_route_accepts_wrapped_http_url(monkeypatch) -> None:
-    seen: list[str] = []
-
-    async def describe(messages: list[dict[str, object]], question: str = "") -> dict[str, object]:
-        attachments = cast("list[dict[str, object]]", messages[0]["attachments"])
-        seen.append(str(attachments[0]["url"]))
-        return {"text": "description", "attachments": ["image"], "question": question or None}
-
-    monkeypatch.setattr("app.http_api.describe_images", describe)
-    response = TestClient(mock_app(configured_engine())).post(
-        "/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "}
-    )
+    app = mock_app(configured_engine())
+    describe = AsyncMock(return_value={"text": "description"})
+    monkeypatch.setattr(app.state.clients.provider, "describe", describe)
+    response = TestClient(app).post("/v1/tools/describe-image", json={"url": " <https://cdn.example/image.png> "})
     assert response.status_code == 200
-    assert seen == ["https://cdn.example/image.png"]
+    describe.assert_awaited_once_with("https://cdn.example/image.png", "")
 
 
 def test_reaction_configuration_changes_future_turns() -> None:
@@ -678,7 +610,7 @@ async def test_http_runner_forwards_live_progress(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_failure_keeps_processing_reaction_and_records_error() -> None:
-    class FailingRunner(FakeRunner):
+    class FailingRunner(MockRunner):
         async def run(
             self,
             thread: str,
@@ -717,7 +649,7 @@ async def test_discord_delivery_failure_does_not_report_success() -> None:
 
 @pytest.mark.asyncio
 async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
-    class Runner(FakeRunner):
+    class Runner(MockRunner):
         attempts = 0
 
         class DisconnectionError(RuntimeError):
@@ -750,7 +682,7 @@ async def test_temporal_transport_retry_reuses_startup_delivery() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_http_timeout_remains_retryable():
-    class TimeoutRunner(FakeRunner):
+    class TimeoutRunner(MockRunner):
         async def run(self, *args, **kwargs):
             raise httpx.ReadTimeout("")
 
@@ -766,7 +698,7 @@ async def test_empty_http_timeout_remains_retryable():
 async def test_same_thread_turns_are_serialized() -> None:
     active = maximum = 0
 
-    class Runner(FakeRunner):
+    class Runner(MockRunner):
         async def run(
             self,
             thread: str,
@@ -819,7 +751,7 @@ async def test_followup_preserves_previous_answer(failed):
 async def test_new_turn_recovers_after_previous_failure() -> None:
     attempts = 0
 
-    class Runner(FakeRunner):
+    class Runner(MockRunner):
         async def run(
             self,
             thread: str,
@@ -963,7 +895,7 @@ async def test_live_delivery_sendsbanner_progress_and_answer(monkeypatch) -> Non
     assert result["reactions"] == ["✅"]
     assert state.reactions["live"] == ["✅"]
     assert next(iter(state.messages.values())) == ""
-    assert list(state.messages.values())[1].startswith("Codex received: ")
+    assert list(state.messages.values())[1].startswith("mock response: ")
     assert next(iter(state.embeds.values()))["title"] == "⚡ Wiseman thread startup"
 
 
@@ -1096,86 +1028,6 @@ async def test_gateway_rediscovery_uses_owner_notthread_name(monkeypatch) -> Non
     cast("dict[int, object]", bot._connection._guilds)[1] = guild
     await bot._discover_managed_threads()
     assert edited == [42]
-
-
-def test_phoenix_provider_relay_records_wrapped_billing(monkeypatch) -> None:
-    class Response:
-        is_error = False
-        status_code = 200
-
-        def raise_for_status(self) -> None: ...
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            del args
-
-        async def aiter_lines(self):
-            yield 'data: {"response":{"model":"served","usage":{"cost":0.4}}}'
-            yield "data: [DONE]"
-
-    class Client:
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            del args
-
-        def stream(self, method: str, url: str, **kwargs: object) -> Response:
-            assert method == "POST"
-            assert url.endswith("/api/v1/responses")
-            assert kwargs["json"] == {"model": "requested"}
-            return Response()
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: Client())
-    engine = configured_engine()
-    response = TestClient(mock_app(engine)).post("/v1/responses", json={"model": "requested"})
-    assert response.status_code == 200
-    provider = engine.config.phoenix.records[-1]
-    assert provider["served_model"] == "served"
-    assert provider["cost"] == 0.4
-    assert provider["request"] == {"model": "requested"}
-
-
-def test_provider_relay_propagates_disconnect_for_temporal_retry(monkeypatch) -> None:
-    class Response:
-        is_error = False
-        status_code = 200
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            del args
-
-        async def aiter_lines(self):
-            yield 'data: {"response":{"model":"served"}}'
-            yield "data: [DONE]"
-
-    class Client:
-        attempts = 0
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            del args
-
-        def stream(self, method: str, url: str, **kwargs: object) -> Response:
-            del method, url, kwargs
-            self.attempts += 1
-            if self.attempts == 1:
-                raise httpx.RemoteProtocolError("disconnected")
-            return Response()
-
-    client = Client()
-    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
-    monkeypatch.setattr("app.http_api.httpx.AsyncClient", lambda **kwargs: client)
-    with pytest.raises(httpx.RemoteProtocolError, match="disconnected"):
-        TestClient(mock_app(configured_engine())).post("/v1/responses", json={"model": "requested"})
-    assert client.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -1686,7 +1538,9 @@ def test_admission_audit_survives_gateway_restart(tmp_path: Path) -> None:
         headers={"x-replay-token": "secret"},
     )
     assert replay.status_code == 200
-    assert '"user": "replay this"' in replay.json()["output"]
+    controlled = [record for record in restarted.records if record["node"] == "codex"]
+    assert isinstance(controlled[-1]["input"], str)
+    assert '"user": "replay this"' in controlled[-1]["input"]
 
 
 def test_default_app_persists_admission_audit(tmp_path: Path, monkeypatch) -> None:

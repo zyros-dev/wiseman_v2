@@ -12,6 +12,7 @@ from app.clients.client_interfaces import (
     RunnerClient,
     TemporalClient,
 )
+from app.clients.provider import OpenRouter
 from app.phoenix import Phoenix, PromptHub
 from app.runner import HttpRunner
 
@@ -35,6 +36,7 @@ def real_container(settings: ClientSettings, dependencies: RealDependencies | No
         dependencies.phoenix,
         dependencies.prompts,
         dependencies.runner,
+        OpenRouter(settings, dependencies.prompts),
         settings,
     )
 

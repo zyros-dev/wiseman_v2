@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -15,8 +16,8 @@ from typing import TYPE_CHECKING, Annotated, cast
 
 import discord
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 if TYPE_CHECKING:
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
 
     from app.clients.client_interfaces import TemporalClient
     from app.models import Event
-    from app.types import JsonObject
 
 from app.admission import normalize_event
 from app.clients import ClientContainer, ClientMode, ClientSettings, build_clients
@@ -39,10 +39,10 @@ from app.presentation import (
     MAX_DISCORD_UPLOAD_BYTES,
     MAX_DISCORD_USERNAME_LENGTH,
     MIN_DISCORD_USERNAME_LENGTH,
-    describe_images,
     normalize_image_url,
 )
 from app.temporal_runtime import TemporalRuntime, configure_engine
+from app.types import JsonObject  # noqa: TC001
 
 
 @dataclass(slots=True)
@@ -106,6 +106,7 @@ def _context(engine: Engine | None, token: str, discord_token: str, clients: Cli
             token,
             settings.phoenix_endpoint,
             settings.prompt_hub_url,
+            settings.provider_key,
         )
     ):
         raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
@@ -159,6 +160,7 @@ async def _stop(context: _Context) -> None:
     await context.bot.close()
     if context.temporal is not None:
         await context.temporal.close()
+    await context.clients.provider.close()
 
 
 @asynccontextmanager
@@ -251,37 +253,43 @@ def _event(payload: dict[str, object], detail: str) -> Event:
 
 
 def _register_provider(app: FastAPI, context: _Context) -> None:
-    async def responses(request: Request, authorization: Annotated[str | None, Header()] = None) -> StreamingResponse:
+    async def responses(payload: JsonObject, authorization: Annotated[str | None, Header()] = None) -> Response:
         expected = os.getenv("WISEMAN_PROVIDER_TOKEN", context.token)
         if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(401, "invalid provider token")
-        payload = await request.json()
-        key = os.getenv("OPENROUTER_API_KEY", "")
-        if not key:
-            raise HTTPException(503, "OpenRouter is not configured")
         trace = f"provider-{hashlib.sha256(json_text(payload).encode()).hexdigest()[:16]}"
-        return StreamingResponse(_provider_stream(context, payload, key, trace), media_type="text/event-stream")
+        try:
+            upstream = await context.clients.provider.responses(payload)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            await _external_record(context, trace, request=payload, error=type(exc).__name__)
+            raise HTTPException(503, "Provider connection unavailable") from exc
+        headers = {
+            key: upstream.headers[key]
+            for key in ("content-type", "retry-after", "x-request-id")
+            if key in upstream.headers
+        }
+        if upstream.is_error or "text/event-stream" not in upstream.headers.get("content-type", ""):
+            try:
+                body = await upstream.aread()
+                await _external_record(context, trace, request=payload, status=upstream.status_code)
+                return Response(body, status_code=upstream.status_code, headers=headers)
+            finally:
+                await upstream.aclose()
+        return StreamingResponse(
+            _provider_stream(context, upstream, payload, trace), status_code=upstream.status_code, headers=headers
+        )
 
     app.add_api_route("/v1/responses", responses, methods=["POST"])
 
 
-async def _provider_stream(context: _Context, payload: object, key: str, trace: str) -> AsyncIterator[bytes]:
+async def _provider_stream(
+    context: _Context, response: httpx.Response, payload: JsonObject, trace: str
+) -> AsyncIterator[bytes]:
     usage: object = None
     cost: object = None
     served_model: object = None
-    async with (
-        httpx.AsyncClient(timeout=300) as client,
-        client.stream(
-            "POST",
-            f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/responses",
-            headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
-            json=payload,
-        ) as response,
-    ):
-        if response.is_error:
-            detail = (await response.aread()).decode(errors="replace")[:1_000]
-            message = f"OpenRouter returned HTTP {response.status_code}: {detail}"
-            raise RuntimeError(message)
+    complete = False
+    try:
         async for line in response.aiter_lines():
             if line.startswith("data:"):
                 try:
@@ -291,15 +299,26 @@ async def _provider_stream(context: _Context, payload: object, key: str, trace: 
                 except ValueError:
                     pass
             yield f"{line}\n".encode()
-    await context.engine.config.phoenix.record(
-        trace,
-        "provider",
-        request=payload,
-        requested_model=payload.get("model") if isinstance(payload, dict) else None,
-        served_model=served_model,
-        usage=usage,
-        cost=cost,
-    )
+        complete = True
+    finally:
+        await asyncio.shield(response.aclose())
+        await _external_record(
+            context,
+            trace,
+            request=payload,
+            requested_model=payload.get("model"),
+            served_model=served_model,
+            usage=usage,
+            cost=cost,
+            transport_complete=complete,
+        )
+
+
+async def _external_record(context: _Context, trace: str, node: str = "provider", **values: object) -> None:
+    try:
+        await asyncio.wait_for(context.clients.phoenix.record(trace, node, **values), timeout=5)
+    except Exception:
+        logging.getLogger("wiseman").exception("External telemetry failed trace=%s", trace)
 
 
 def _tool_auth(context: _Context, supplied: str | None) -> None:
@@ -316,13 +335,14 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         url = normalize_image_url(payload.get("url"))
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
-        attachment_id = str(payload.get("attachment_id") or url.rstrip("/").split("/")[-2])
-        result = await describe_images(
-            [{"attachments": [{"id": attachment_id, "content_type": "image/*", "url": url}]}],
-            str(payload.get("question") or "")[:2_000],
-        )
+        attachment_id = str(payload.get("attachment_id") or url)
+        try:
+            result = await context.clients.provider.describe(url, str(payload.get("question") or "")[:2_000])
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise HTTPException(502, "Vision provider unavailable") from exc
+        result["attachments"] = [attachment_id]
         trace = str(payload.get("thread_id") or f"vision-tool-{hashlib.sha256(url.encode()).hexdigest()[:16]}")
-        await context.engine.config.phoenix.record(trace, "vision_tool", **result)
+        await _external_record(context, trace, "vision_tool", **result)
         return result
 
     async def set_reactions(

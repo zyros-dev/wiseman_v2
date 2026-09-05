@@ -23,6 +23,7 @@ def settings():
         phoenix_endpoint="http://phoenix.invalid/v1/traces",
         prompt_hub_url="http://phoenix.invalid",
         phoenix_key="phoenix-fixture",
+        provider_key="provider-fixture",
     )
 
 
@@ -89,6 +90,7 @@ def test_explicit_tokens_reach_the_real_adapters(monkeypatch):
         "runner_token",
         "phoenix_endpoint",
         "prompt_hub_url",
+        "provider_key",
     ],
 )
 def test_real_mode_rejects_incomplete_configuration(missing):

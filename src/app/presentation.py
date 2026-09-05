@@ -1,16 +1,10 @@
 # Copyright (c) 2026 Nick van der Merwe
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping, Sequence
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import discord
-import httpx
-from jinja2 import Environment, StrictUndefined
 
-from app.models import is_image_attachment
 from app.phoenix import route_info
 
 DEFAULT_REACTION_EMOJIS = {"processing": "👀", "success": "✅", "failure": "❌"}
@@ -51,86 +45,6 @@ def thread_name(number: int) -> str:
 def startup_embed() -> discord.Embed:
     title, _, description = banner().partition("\n")
     return discord.Embed(title=title.replace("**", ""), description=description, colour=0x57F287)
-
-
-async def describe_images(messages: Sequence[Mapping[str, object]], question: str = "") -> dict[str, object]:
-    images: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for message in messages:
-        for value in _sequence(message.get("attachments")):
-            attachment = _mapping(value)
-            url = str(attachment.get("url") or attachment.get("proxy_url") or "")
-            attachment_id = str(attachment.get("id") or url)
-            if is_image_attachment(attachment) and url and attachment_id not in seen:
-                images.append({"id": attachment_id, "url": url})
-                seen.add(attachment_id)
-    if not images:
-        return {"text": "", "attachments": [], "question": question or None}
-    model = os.getenv("WISEMAN_VISION_MODEL", "z-ai/glm-5.3-flash")
-    key = os.getenv("OPENROUTER_API_KEY", "")
-    if not key:
-        return {
-            "text": "[Image description unavailable: vision provider is not configured.]",
-            "model": model,
-            "attachments": [item["id"] for item in images],
-            "question": question or None,
-        }
-    content: list[dict[str, object]] = [
-        {"type": "text", "text": _vision_question(question)},
-        *({"type": "image_url", "image_url": {"url": item["url"]}} for item in images[:4]),
-    ]
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{os.getenv('OPENROUTER_URL', 'https://openrouter.ai')}/api/v1/chat/completions",
-                headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": content}],
-                    "max_tokens": 500,
-                },
-            )
-            response.raise_for_status()
-            value: object = response.json()
-        data = _mapping(value)
-        choices = _sequence(data.get("choices"))
-        first = _mapping(choices[0]) if choices else {}
-        answer = _mapping(first.get("message")).get("content", "")
-        if isinstance(answer, list):
-            answer = "".join(str(item.get("text", "")) for item in answer if isinstance(item, dict))
-        usage = data.get("usage")
-        return {
-            "text": str(answer),
-            "model": data.get("model", model),
-            "usage": usage,
-            "cost": _mapping(usage).get("cost") if isinstance(usage, dict) else data.get("cost"),
-            "attachments": [item["id"] for item in images],
-            "question": question or None,
-        }
-    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-        return {
-            "text": f"[Image description unavailable: {type(exc).__name__}].",
-            "model": model,
-            "attachments": [item["id"] for item in images],
-            "question": question or None,
-        }
-
-
-def _contract(name: str) -> str:
-    return (Path(__file__).parents[2] / "contracts" / name).read_text(encoding="utf-8")
-
-
-def _vision_question(question: str) -> str:
-    template = Environment(autoescape=True, undefined=StrictUndefined).from_string(_contract("vision-question.j2"))
-    return template.render(question=question)
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _sequence(value: object) -> Sequence[object]:
-    return value if isinstance(value, Sequence) and not isinstance(value, str) else ()
 
 
 def normalize_image_url(value: object) -> str:

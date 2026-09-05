@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -99,32 +98,3 @@ class HttpRunner:
         payload["message_id"] = MESSAGE_ID.get() or uuid4().hex
         data = await self._post("/steer", payload)
         return bool(data.get("steered", False))
-
-
-class FakeRunner:
-    async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
-        del thread, prompt, user, workspace
-        return False
-
-    async def acquire(self, user: str, workspace: str) -> None: ...
-
-    async def release(self, user: str, workspace: str) -> None: ...
-
-    async def start(self, thread: str, user: str, workspace: str = "") -> str:
-        del workspace
-        return thread or f"codex-{user}"
-
-    async def run(
-        self,
-        thread: str,
-        prompt: str,
-        user: str,
-        workspace: str = "",
-        progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str, str, dict[str, object]]:
-        del workspace, progress
-        return (
-            thread or f"codex-{user}",
-            f"Codex received: {prompt[:1000]}",
-            {"model": os.getenv("WISEMAN_MODEL", "local-fake")},
-        )

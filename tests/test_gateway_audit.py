@@ -5,18 +5,18 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
+from app.clients.mock_clients import MockRunner
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
 from app.models import Event, Message
 from app.phoenix import Phoenix, PromptHub
-from app.runner import FakeRunner
 
 if TYPE_CHECKING:
     import discord
 
 
 async def test_dispatch_audits_match_interleaved_messages_before_any_await(monkeypatch):
-    bot = Gateway(Engine(EngineConfig(Phoenix(), FakeRunner(), PromptHub())), set())
+    bot = Gateway(Engine(EngineConfig(Phoenix(), MockRunner(), PromptHub())), set())
     assert bot._enable_debug_events
     paused, release, second, first = (asyncio.Event() for _ in range(4))
     received = {}
@@ -53,7 +53,7 @@ async def test_dispatch_audits_match_interleaved_messages_before_any_await(monke
 
 
 async def test_raw_capture_is_bounded_and_ignored_messages_are_removed(monkeypatch):
-    bot = Gateway(Engine(EngineConfig(Phoenix(), FakeRunner(), PromptHub())), set())
+    bot = Gateway(Engine(EngineConfig(Phoenix(), MockRunner(), PromptHub())), set())
     for number in range(1100):
         await bot.on_socket_raw_receive(json.dumps({"t": "MESSAGE_CREATE", "d": {"id": str(number)}}))
     assert len(bot.raw_gateway_payloads) == 1024

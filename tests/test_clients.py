@@ -163,7 +163,8 @@ async def test_injected_clients_isolate_concurrent_threads() -> None:
     assert isinstance(container.discord, MockDiscord)
     state = container.discord.state
     calls = [call for call in state.calls if call.client == "runner" and call.operation == "run"]
-    assert {call.values[-1] for call in calls} == {"thread-1", "thread-2"}
+    assert {call.values[-2] for call in calls} == {"thread-1", "thread-2"}
+    assert len({result["state"]["codex_thread"] for result in results}) == 2
     assert {result["state"]["turn"] for result in results} == {1}
 
 

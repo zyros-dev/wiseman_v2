@@ -9,11 +9,10 @@ import httpx
 import pytest
 from openai_codex import ApprovalMode, AsyncThread, AsyncTurnHandle, Sandbox
 
-from app.clients.mock_clients import mock_container
+from app.clients.mock_clients import MockRunner, mock_container
 from app.engine import Engine, EngineConfig
 from app.models import Event, Message
 from app.phoenix import Phoenix, PromptHub
-from app.runner import FakeRunner
 from app.temporal_runtime import ThreadWorkflow
 from runner.api import CodexRunner, Turn, Workspace, create_app
 
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 async def test_followup_keeps_original_workspace_owner():
     owners = []
 
-    class Runner(FakeRunner):
+    class Runner(MockRunner):
         async def run(self, thread, prompt, user, workspace="", progress=None):
             owners.append(user)
             return await super().run(thread, prompt, user, workspace, progress)

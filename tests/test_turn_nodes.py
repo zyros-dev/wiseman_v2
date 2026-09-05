@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.clients.client_interfaces import DiscordClient
+from app.clients.mock_clients import MockRunner
 from app.engine import Engine, EngineConfig
 from app.models import Event, Message, MessageRef, State, TurnWork
 from app.nodes import TurnActivities
 from app.phoenix import Phoenix, PromptHub
-from app.runner import FakeRunner
 
 
 def work():
@@ -20,7 +20,7 @@ def work():
 
 
 def engine():
-    return Engine(EngineConfig(Phoenix(), FakeRunner(), PromptHub(), discord=AsyncMock(spec=DiscordClient)))
+    return Engine(EngineConfig(Phoenix(), MockRunner(), PromptHub(), discord=AsyncMock(spec=DiscordClient)))
 
 
 @pytest.mark.asyncio
