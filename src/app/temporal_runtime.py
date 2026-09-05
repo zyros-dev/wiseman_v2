@@ -299,8 +299,9 @@ class TemporalRuntime:
 
     async def start(self) -> None:
         from temporalio.client import Client
+        from temporalio.contrib.opentelemetry import TracingInterceptor
 
-        self.client = await Client.connect(self.address)
+        self.client = await Client.connect(self.address, interceptors=[TracingInterceptor(always_create_workflow_spans=True)])
         self.worker_task = asyncio.create_task(self._serve())
 
     async def _serve(self) -> None:

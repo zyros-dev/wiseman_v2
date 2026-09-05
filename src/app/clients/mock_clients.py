@@ -101,11 +101,17 @@ class MockDiscord(DiscordClient):
 class MockTemporal(TemporalClient):
     def __init__(self, state: MockState) -> None:
         self.state = state
+        self.seen: set[str] = set()
 
     async def submit(self, event: JsonObject) -> dict[str, object] | None:
-        self.state.call("temporal", "submit", str(event.get("trigger", "")))
+        trigger = event.get("trigger", {})
+        message_id = str(trigger.get("id", "")) if isinstance(trigger, dict) else ""
+        self.state.call("temporal", "submit", message_id)
+        if message_id in self.seen:
+            return {"status": "duplicate", "message_id": message_id}
+        self.seen.add(message_id)
         self.state.admitted.append(event)
-        return None
+        return {"status": "queued", "message_id": message_id}
 
     async def start(self) -> None:
         self.state.call("temporal", "start")
