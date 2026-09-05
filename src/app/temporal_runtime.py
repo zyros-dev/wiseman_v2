@@ -252,8 +252,7 @@ class ThreadWorkflow:
         self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
         if event := _object_map(first.get("event")):
             self.pending.insert(0, event)
-        self.result = {"state": self.state}
-        handled = 0
+        self.result, handled = {"state": self.state}, 0
         while True:
             try:
                 await workflow.wait_condition(

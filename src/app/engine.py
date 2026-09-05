@@ -66,8 +66,7 @@ class Engine:
             route=route_info(),
             input=raw,
         )
-        work.event.seen_ids = sorted(set(work.event.seen_ids) | work.state.seen)
-        work.event.kind = work.kind
+        work.event.seen_ids, work.event.kind = sorted(set(work.event.seen_ids) | work.state.seen), work.kind
         work.current = context(work.event, self.config.context)
         work.state.seen.update(cast("list[str]", work.current["selected_ids"]))
         await self.config.phoenix.record(

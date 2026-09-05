@@ -11,7 +11,9 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from app.clients.client_interfaces import ClientMode, ClientSettings
 from app.clients.mock_clients import MockRunner, mock_container
+from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
@@ -118,7 +120,7 @@ async def test_boundary_tools_and_provider(monkeypatch) -> None:
     for name in ("WISEMAN_PROVIDER_TOKEN", "WISEMAN_MCP_TOKEN"):
         monkeypatch.setenv(name, "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
-    app = create_app(clients=mock_container())
+    app = create_app(clients=build_clients(ClientMode.MOCK, ClientSettings()))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
         headers = {"authorization": "Bearer secret"}
         requests = (("/v1/tools/describe-image", {"url": "https://cdn.test/a.png"}), ("/v1/tools/send-file", {"thread_id": "thread", "filename": "a.txt", "data_base64": "b2s="}), ("/v1/tools/set-profile", {"username": "Wiseman"}), ("/v1/responses", {"model": "mock", "input": "hi"}))  # noqa: E501 # fmt: skip
