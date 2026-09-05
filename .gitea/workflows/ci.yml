@@ -14,7 +14,7 @@ jobs:
       - name: Install TLS trust store
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates default-jre-headless curl
+          apt-get install -y --no-install-recommends ca-certificates default-jre-headless curl docker.io
       - name: Install uv
         run: |
           set -eu
