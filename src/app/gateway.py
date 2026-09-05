@@ -158,6 +158,8 @@ class Gateway(discord.Client):
             )
         )
         if not eligible:
+            if self.temporal and isinstance(channel, discord.Thread) and channel.owner_id == getattr(self.user, "id", None) and self._guild_allowed(message):
+                await self.temporal.touch(Event(trigger=normalize_message(message, str(channel.id), str(channel.id))))
             LOGGER.debug("Ignoring non-admitted Discord message %s", message.id)
         return eligible
 

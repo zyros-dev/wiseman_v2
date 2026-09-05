@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 import discord
 import httpx
@@ -224,10 +224,12 @@ def _register_replay(app: FastAPI, context: _Context) -> None:
     async def replay_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
         artifact = _audit(context, audit_id)
-        payload = artifact.get("raw_request")
-        if not isinstance(payload, dict):
+        raw = artifact.get("raw_request")
+        payload = artifact.get("normalized_request")
+        if not isinstance(raw, dict) or not isinstance(payload, dict):
             raise HTTPException(422, "Phoenix audit has no replayable raw request")
         event = _event(payload, "Phoenix audit contains an invalid Discord event")
+        event.raw_payload = cast("JsonObject", raw)
         return {**(await _admit(context, event)), "audit_id": audit_id}
 
     app.add_api_route("/v1/replay/discord", replay, methods=["POST"])
