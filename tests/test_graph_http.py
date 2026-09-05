@@ -30,7 +30,9 @@ async def _action(client: httpx.AsyncClient, edge: str, message_id: str) -> http
         payload = {"t": "MESSAGE_CREATE", "d": _message(message_id, "question")}
         await client.post("/v1/replay/discord", json=payload)
         return await client.post("/v1/replay/discord", json=payload)
-    if edge in {"background-chatter", "idle-stop"}:
+    if edge == "idle-stop":
+        return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
+    if edge == "background-chatter":
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "background", mention=False)})
     if edge in {"steer-active-turn", "repeat-steer"}:
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "steer", thread="thread", reply_to="answer"), "kind": "steer"})  # noqa: E501 # fmt: skip
