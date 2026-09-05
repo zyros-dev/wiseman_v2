@@ -114,6 +114,9 @@ class MockTemporal(TemporalClient):
         self.state.admitted.append(event)
         return {"status": "queued", "message_id": message_id}
 
+    async def touch(self, event: Event) -> None:
+        self.state.call("temporal", "touch", event.trigger.id)
+
     async def start(self) -> None:
         self.state.call("temporal", "start")
 

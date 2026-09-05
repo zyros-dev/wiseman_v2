@@ -137,7 +137,7 @@ class Gateway(discord.Client):
     async def _eligible(self, message: discord.Message) -> bool:
         channel = message.channel
         reply_to_self = await self._replies_to_self(message)
-        if isinstance(channel, discord.Thread) and not self._is_self(message):
+        if isinstance(channel, discord.Thread) and not self._is_self(message) and self._guild_allowed(message):
             if message.content.strip() == "/stop" and self.temporal is not None:
                 await self.temporal.stop(Event(trigger=normalize_message(message, str(channel.id), str(channel.id)), kind="stop"))
                 return False
@@ -148,10 +148,9 @@ class Gateway(discord.Client):
                 and await self.temporal.steer(Event(trigger=normalize_message(message, str(channel.id), str(channel.id))))
             ):
                 return False
-        guild_id = getattr(getattr(channel, "guild", None), "id", None)
         eligible = (
             not self._is_self(message)
-            and (not self.allowlist or guild_id in self.allowlist)
+            and self._guild_allowed(message)
             and admitted(
                 normalize_message(message, str(getattr(channel, "id", "")), None),
                 str(getattr(self.user, "id", "")),
@@ -161,6 +160,10 @@ class Gateway(discord.Client):
         if not eligible:
             LOGGER.debug("Ignoring non-admitted Discord message %s", message.id)
         return eligible
+
+    def _guild_allowed(self, message: discord.Message) -> bool:
+        guild_id = getattr(getattr(message.channel, "guild", None), "id", None)
+        return not self.allowlist or guild_id in self.allowlist
 
     async def _replies_to_self(self, message: discord.Message) -> bool:
         reference = getattr(message, "reference", None)

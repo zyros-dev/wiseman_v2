@@ -80,6 +80,11 @@ class _TemporalBoundary:
             await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("stop", event.model_dump(mode="json"), id=event.trigger.id)
         )
 
+    async def touch(self, event) -> None:
+        thread_id = event.trigger.thread_id
+        if thread_id:
+            await self.client.get_workflow_handle(f"wiseman-{thread_id}").signal(ThreadWorkflow.touch, event.model_dump(mode="json"))
+
 
 async def _child_result(client, message_id: str) -> dict[str, object]:
     for _ in range(100):
@@ -111,6 +116,11 @@ async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
                     ("q1", "one", "thread", []),
                     ("q2", "two", "thread", [_message("chat", "background", mention=False)]),
                 ):
+                    if message_id == "q2":
+                        background = await client.post(
+                            "/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message("chat", "background", thread="thread", mention=False)}
+                        )
+                        assert background.json()["status"] == "ignored"
                     event = _message(message_id, content, thread=thread)
                     payload = {"t": "MESSAGE_CREATE", "d": event, "thread_messages": messages}
                     assert (await client.post("/v1/replay/discord", json=payload)).status_code == 200

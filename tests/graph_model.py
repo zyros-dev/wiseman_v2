@@ -52,7 +52,7 @@ class ModelState:
 
     def advance(self, name: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
         assert self.vertex == source
-        assert any(target == item[2] for item in EDGES if item[1] == self.vertex)
+        assert (name, source, target) in EDGES
         self.vertex = target
         if name in {"admit-question", "queue-question"} and message_id:
             self.pending += 1

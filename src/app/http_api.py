@@ -208,6 +208,8 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
         raise HTTPException(503, "Discord identity is unavailable")
     replies = (*event.parent_messages, *event.thread_messages)
     if not admitted(event.trigger, bot_id, reply_to_bot=any(item.id == event.trigger.reply_to and item.bot for item in replies)):
+        if event.trigger.thread_id:
+            await context.clients.temporal.touch(event)
         return {"status": "ignored", "message_id": event.trigger.id}
     result = await context.clients.temporal.submit(event.model_dump(mode="json"))
     return result or {"status": "queued", "message_id": event.trigger.id}
