@@ -19,6 +19,7 @@ from app.clients.client_interfaces import (
 )
 from app.clients.provider import OpenRouter
 from app.models import DeliveryReceipt
+from app.runner import STOPPED_STATUS, RunnerError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -117,11 +118,9 @@ class MockTemporal(TemporalClient):
     async def touch(self, event: Event) -> None:
         self.state.call("temporal", "touch", event.trigger.id)
 
-    async def start(self) -> None:
-        self.state.call("temporal", "start")
+    async def start(self) -> None: ...
 
-    async def close(self) -> None:
-        self.state.call("temporal", "close")
+    async def close(self) -> None: ...
 
     async def steer(self, event: Event) -> bool:
         self.state.call("temporal", "steer", event.trigger.id)
@@ -134,8 +133,7 @@ class MockTemporal(TemporalClient):
 
 class MockPhoenix(PhoenixClient):
     def __init__(self, state: MockState) -> None:
-        self.state = state
-        self.records = state.records
+        self.state, self.records = state, state.records
 
     async def record(self, trace: str, node: str, **data: object) -> None:
         self.state.call("phoenix", "record", trace, node)
@@ -149,8 +147,7 @@ class MockPhoenix(PhoenixClient):
 
 class MockPrompts(PromptClient):
     async def source(self, kind: str) -> str:
-        self_kind = {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)
-        if self_kind in {"startup-context", "followup-context"}:
+        if (self_kind := {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)) in {"startup-context", "followup-context"}:
             return '{"schema":"mock","mode":"{{ mode }}","messages":{{ messages | tojson }}}'
         return f"mock prompt: {self_kind}"
 
@@ -160,7 +157,7 @@ class MockRunner(RunnerClient):
         self.state = state or MockState()
         self.run_gate: asyncio.Event | None = None
         self.run_started = asyncio.Event()
-        self.stop_requested = False
+        self.stop_requested: set[str] = set()
 
     async def acquire(self, user: str, workspace: str) -> None:
         self.state.call("runner", "acquire", user, workspace)
@@ -184,8 +181,9 @@ class MockRunner(RunnerClient):
         self.run_started.set()
         if self.run_gate is not None:
             await self.run_gate.wait()
-        if self.stop_requested:
-            raise RuntimeError("turn stopped by user")
+        if thread in self.stop_requested:
+            self.stop_requested.remove(thread)
+            raise RunnerError(STOPPED_STATUS, "turn stopped by user")
         if progress is not None:
             for message in ("🤖 Codex turn started...", "✍️ Writing response..."):
                 await progress(message)
@@ -197,7 +195,7 @@ class MockRunner(RunnerClient):
 
     async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool:
         self.state.call("runner", "stop", thread, user, workspace, target_message_id, command_id)
-        self.stop_requested = True
+        self.stop_requested.add(thread)
         if self.run_gate is not None:
             self.run_gate.set()
         return True
@@ -211,7 +209,7 @@ def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
         if request.url.path.endswith("/responses"):
             return httpx.Response(
                 200,
-                text='data: {"type":"response.completed","response":{"model":"mock"}}\n\n',
+                content=b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n',
                 headers={"content-type": "text/event-stream"},
             )
         return httpx.Response(200, json={"model": "mock-vision", "choices": [{"message": {"content": "mock image description"}}]})

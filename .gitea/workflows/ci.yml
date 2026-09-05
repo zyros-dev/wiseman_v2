@@ -5,7 +5,7 @@ on:
   push:
 
 jobs:
-  checks:
+  quality:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -14,7 +14,7 @@ jobs:
       - name: Install TLS trust store
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates default-jre-headless curl
+          apt-get install -y --no-install-recommends ca-certificates default-jre-headless
       - name: Install uv
         run: |
           set -eu
@@ -64,3 +64,27 @@ jobs:
         run: uv run vulture src sandbox/src tests tools --min-confidence 100
       - name: Dependency audit
         run: uv run pip-audit
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates docker.io
+      - name: Compile and sandbox smoke
+        run: |
+          docker build -t wiseman-v2-gateway:ci .
+          docker build -t wiseman-v2-sandbox:ci -f sandbox/Dockerfile .
+          docker run --rm wiseman-v2-gateway:ci python -m compileall -q src
+          docker run --rm wiseman-v2-sandbox:ci python -m compileall -q sandbox/src
+          container=$(docker run -d wiseman-v2-sandbox:ci)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            docker exec "$container" curl --fail --silent http://127.0.0.1:8090/healthz && exit 0
+            sleep 1
+          done
+          docker logs "$container"
+          exit 1

@@ -33,7 +33,7 @@ class ContextConfig:
 
 
 def admitted(message: Message, bot_id: str, *, reply_to_bot: bool = False) -> bool:
-    return bot_id in message.mentions or reply_to_bot
+    return not message.bot and (bot_id in message.mentions or reply_to_bot)
 
 
 def _message(value: Mapping[str, object], thread_id: str | None = None) -> Message:

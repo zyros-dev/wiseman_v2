@@ -11,37 +11,39 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 import discord
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Security
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from httpx_sse import EventSource
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from app.models import Event
 
 from app.admission import admitted, normalize_event
 from app.clients.client_interfaces import ClientContainer, ClientMode, ClientSettings
 from app.clients.discord_client import RealDiscord
-from app.clients.provider import OpenRouter
+from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.gateway import Gateway
 from app.models import Upload
-from app.phoenix import Phoenix, PromptHub, json_text, provider_values
+from app.phoenix import json_text, provider_values
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
     MAX_DISCORD_UPLOAD_BYTES,
     normalize_image_url,
 )
-from app.runner import HttpRunner
-from app.temporal_runtime import TemporalRuntime, configure_engine
+from app.temporal_runtime import configure_engine
 from app.types import JsonObject
+
+BEARER = HTTPBearer(auto_error=False)
 
 
 @dataclass(slots=True)
@@ -52,6 +54,25 @@ class _Context:
     token: str
     discord_token: str
     discord_task: asyncio.Task[None] | None = None
+
+
+class _ByteTee(httpx.AsyncByteStream):
+    def __init__(self, queue: asyncio.Queue[bytes | None], source: httpx.AsyncByteStream | None = None) -> None:
+        self.queue, self.source = queue, source
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.source is None:
+            while (chunk := await self.queue.get()) is not None:
+                yield chunk
+            return
+        async for chunk in self.source:
+            await self.queue.put(chunk)
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self.source is not None:
+            await self.source.aclose()
+        await self.queue.put(None)
 
 
 class ImageToolRequest(BaseModel):
@@ -75,12 +96,7 @@ class FileRequest(BaseModel):
 
 def create_app(clients: ClientContainer | None = None) -> FastAPI:
     context = _context(clients)
-    app = FastAPI(
-        title="wiseman-v2",
-        docs_url=None,
-        redoc_url=None,
-        lifespan=partial(_lifespan, context),
-    )
+    app = FastAPI(title="wiseman-v2", docs_url=None, redoc_url=None, lifespan=partial(_lifespan, context))
     app.state.clients = context.clients
     _register_health(app, context)
     _register_replay(app, context)
@@ -92,54 +108,17 @@ def create_app(clients: ClientContainer | None = None) -> FastAPI:
 def _context(clients: ClientContainer | None) -> _Context:
     settings = clients.settings if clients is not None else ClientSettings.from_env()
     token, discord_token = settings.runner_token, settings.discord_token
-    real = clients is None or clients.mode is ClientMode.REAL
-    if real and not all(
-        (
-            discord_token,
-            settings.temporal_address,
-            settings.runner_url,
-            token,
-            settings.phoenix_endpoint,
-            settings.prompt_hub_url,
-            settings.provider_key,
-        )
-    ):
-        raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
-    services = None
     if clients is None:
-        services = (
-            Phoenix(
-                settings.phoenix_endpoint,
-                settings.phoenix_key,
-                settings.phoenix_project,
-                os.getenv("WISEMAN_AUDIT_DIR"),
-            ),
-            PromptHub(settings.prompt_hub_url, settings.phoenix_key),
-            HttpRunner(settings.runner_url, settings.runner_token),
-        )
-    if clients is not None:
-        engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
-    else:
-        assert services is not None
-        engine = Engine(EngineConfig(services[0], services[2], services[1]))
+        clients = build_clients(ClientMode.REAL, settings)
+    real = clients.mode is ClientMode.REAL
+    engine = Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord))
     configure_engine(engine)
     allowlist = {int(value) for value in os.getenv("WISEMAN_DISCORD_ALLOWLIST", "").split(",") if value}
     activity_file = os.getenv("WISEMAN_ACTIVITY_FILE")
     profile_file = os.getenv("WISEMAN_PROFILE_FILE") or (str(Path(activity_file).with_name("profile.json")) if activity_file else None)
     bot = Gateway(engine, allowlist, activity_file, profile_file)
-    if clients is None:
-        clients = ClientContainer.install(
-            ClientContainer(
-                ClientMode.REAL,
-                RealDiscord(bot),
-                TemporalRuntime(settings.temporal_address, settings.temporal_queue),
-                engine.config.phoenix,
-                engine.config.prompts,
-                engine.config.runner,
-                OpenRouter(settings, engine.config.prompts),
-                settings,
-            )
-        )
+    if isinstance(clients.discord, RealDiscord):
+        clients.discord.attach(bot)
     engine.config = EngineConfig(clients.phoenix, clients.runner, clients.prompts, engine.config.context, clients.discord)
     bot.temporal = clients.temporal
     if not real:
@@ -192,8 +171,16 @@ def _register_health(app: FastAPI, context: _Context) -> None:
 
 def _auth(context: _Context, supplied: str | None, variable: str, detail: str) -> None:
     expected = os.getenv(variable, context.token)
-    if expected and not hmac.compare_digest(supplied or "", f"Bearer {expected}"):
+    token = (supplied or "").removeprefix("Bearer ").strip()
+    if expected and not hmac.compare_digest(token, expected):
         raise HTTPException(401, detail)
+
+
+def _auth_dependency(context: _Context, variable: str, detail: str) -> Callable[[], None]:
+    def check(credentials: Annotated[HTTPAuthorizationCredentials | None, Security(BEARER)] = None) -> None:
+        _auth(context, credentials.credentials if credentials else None, variable, detail)
+
+    return check
 
 
 async def _admit(context: _Context, event: Event) -> dict[str, object]:
@@ -218,16 +205,18 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
 def _register_replay(app: FastAPI, context: _Context) -> None:
     async def replay(payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
-        event = _event(payload, "invalid Discord event")
+        event = _event(payload, "invalid Discord event", strict=context.clients.mode is ClientMode.REAL)
         return await _admit(context, event)
 
     async def replay_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
         artifact = _audit(context, audit_id)
-        payload = artifact.get("raw_request")
-        if not isinstance(payload, dict):
+        raw = artifact.get("raw_request")
+        payload = artifact.get("normalized_request")
+        if not isinstance(raw, dict) or not isinstance(payload, dict):
             raise HTTPException(422, "Phoenix audit has no replayable raw request")
-        event = _event(payload, "Phoenix audit contains an invalid Discord event")
+        event = _event(payload, "Phoenix audit contains an invalid Discord event", strict=context.clients.mode is ClientMode.REAL)
+        event.raw_payload = cast("JsonObject", raw)
         return {**(await _admit(context, event)), "audit_id": audit_id}
 
     app.add_api_route("/v1/replay/discord", replay, methods=["POST"])
@@ -242,18 +231,22 @@ def _audit(context: _Context, audit_id: str) -> dict[str, object]:
     return value
 
 
-def _event(payload: dict[str, object], detail: str) -> Event:
+def _event(payload: dict[str, object], detail: str, *, strict: bool = False) -> Event:
     try:
-        return normalize_event(payload)
+        event = normalize_event(payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, detail) from exc
+    if strict and not all(_snowflake(value) for value in (event.trigger.id, event.trigger.channel_id, event.trigger.thread_id, event.trigger.reply_to)):
+        raise HTTPException(422, "Discord IDs must be valid snowflakes")
+    return event
+
+
+def _snowflake(value: str | None) -> bool:
+    return value is None or (value.isascii() and value.isdigit() and int(value) <= 2**63 - 1)
 
 
 def _register_provider(app: FastAPI, context: _Context) -> None:
-    async def responses(payload: JsonObject, authorization: Annotated[str | None, Header()] = None) -> Response:
-        expected = os.getenv("WISEMAN_PROVIDER_TOKEN", context.token)
-        if expected and not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
-            raise HTTPException(401, "invalid provider token")
+    async def responses(payload: JsonObject) -> Response:
         trace = f"provider-{hashlib.sha256(json_text(payload).encode()).hexdigest()[:16]}"
         try:
             upstream = await context.clients.provider.responses(payload)
@@ -270,30 +263,40 @@ def _register_provider(app: FastAPI, context: _Context) -> None:
                 await upstream.aclose()
         return StreamingResponse(_provider_stream(context, upstream, payload, trace), status_code=upstream.status_code, headers=headers)
 
-    app.add_api_route("/v1/responses", responses, methods=["POST"])
+    app.add_api_route(
+        "/v1/responses", responses, methods=["POST"], dependencies=[Depends(_auth_dependency(context, "WISEMAN_RELAY_TOKEN", "invalid relay token"))]
+    )
 
 
 async def _provider_stream(context: _Context, response: httpx.Response, payload: JsonObject, trace: str) -> AsyncIterator[bytes]:
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    accounting = asyncio.create_task(_account_provider(context, response, payload, trace, queue))
+    tee = _ByteTee(queue, cast("httpx.AsyncByteStream", response.stream))
+    try:
+        async for chunk in tee:
+            yield chunk
+    finally:
+        await tee.aclose()
+        await accounting
+
+
+async def _account_provider(context: _Context, response: httpx.Response, payload: JsonObject, trace: str, queue: asyncio.Queue[bytes | None]) -> None:
     usage: object = None
     cost: object = None
     served_model: object = None
     complete = False
     try:
-        async for event in EventSource(response).aiter_sse():
+        parsed = httpx.Response(response.status_code, headers=response.headers, stream=_ByteTee(queue))
+        async for event in EventSource(parsed).aiter_sse():
             try:
                 value: object = event.json()
                 if isinstance(value, dict):
                     usage, cost, served_model = provider_values(value, usage, cost, served_model)
             except ValueError:
                 pass
-            if event.event:
-                yield f"event: {event.event}\n".encode()
-            for line in event.data.splitlines() or [""]:
-                yield f"data: {line}\n".encode()
-            yield b"\n"
         complete = True
     finally:
-        await asyncio.shield(response.aclose())
+        await asyncio.shield(parsed.aclose())
         await _external_record(
             context,
             trace,
@@ -314,8 +317,9 @@ async def _external_record(context: _Context, trace: str, node: str = "provider"
 
 
 def _register_tools(app: FastAPI, context: _Context) -> None:
-    async def describe_image(payload: ImageToolRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    auth = Depends(_auth_dependency(context, "WISEMAN_MCP_TOKEN", "invalid tool token"))
+
+    async def describe_image(payload: ImageToolRequest) -> dict[str, object]:
         url = normalize_image_url(payload.url)
         if not url:
             raise HTTPException(422, "image URL must use HTTP or HTTPS")
@@ -328,8 +332,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         await _external_record(context, trace, "vision_tool", **result)
         return result
 
-    async def set_reactions(payload: dict[str, object], authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def set_reactions(payload: dict[str, object]) -> dict[str, object]:
         try:
             values = {phase: str(payload[phase]) for phase in DEFAULT_REACTION_EMOJIS if phase in payload}
             configured = context.engine.set_reaction_emojis(values)
@@ -338,8 +341,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         context.bot.persist_profile()
         return {"reaction_emojis": configured}
 
-    async def set_profile(payload: ProfileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def set_profile(payload: ProfileRequest) -> dict[str, object]:
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
         avatar = _decode_upload(payload.avatar_base64, "avatar_base64")
@@ -351,8 +353,7 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
             raise HTTPException(503, "Discord profile is unavailable") from exc
         return {"status": "updated", "username": username}
 
-    async def send_file(payload: FileRequest, authorization: Annotated[str | None, Header()] = None) -> dict[str, object]:
-        _auth(context, authorization, "WISEMAN_MCP_TOKEN", "invalid tool token")
+    async def send_file(payload: FileRequest) -> dict[str, object]:
         filename = Path(payload.filename).name
         if filename in {".", ".."}:
             raise HTTPException(422, "filename is invalid")
@@ -367,10 +368,10 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
             raise HTTPException(422, str(exc)) from exc
         return {"status": "sent", "message_id": receipt.message_id, "url": receipt.url}
 
-    app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"])
-    app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"])
-    app.add_api_route("/v1/tools/set-profile", set_profile, methods=["POST"])
-    app.add_api_route("/v1/tools/send-file", send_file, methods=["POST"])
+    app.add_api_route("/v1/tools/describe-image", describe_image, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/set-reactions", set_reactions, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/set-profile", set_profile, methods=["POST"], dependencies=[auth])
+    app.add_api_route("/v1/tools/send-file", send_file, methods=["POST"], dependencies=[auth])
 
 
 def _decode_upload(encoded: str | None, name: str) -> bytes | None:

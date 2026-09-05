@@ -23,10 +23,6 @@ spec:
       remoteRef:
         key: k8s/wiseman-v2/gateway
         property: runner_api_token
-    - secretKey: WISEMAN_PROVIDER_TOKEN
-      remoteRef:
-        key: k8s/wiseman-v2/gateway
-        property: provider_token
     - secretKey: OPENROUTER_API_KEY
       remoteRef:
         key: k8s/wiseman-v2/gateway
@@ -53,7 +49,3 @@ spec:
       remoteRef:
         key: k8s/wiseman-v2/gateway
         property: runner_api_token
-    - secretKey: WISEMAN_PROVIDER_TOKEN
-      remoteRef:
-        key: k8s/wiseman-v2/gateway
-        property: provider_token

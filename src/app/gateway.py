@@ -137,7 +137,7 @@ class Gateway(discord.Client):
     async def _eligible(self, message: discord.Message) -> bool:
         channel = message.channel
         reply_to_self = await self._replies_to_self(message)
-        if isinstance(channel, discord.Thread) and not self._is_self(message) and self._guild_allowed(message):
+        if isinstance(channel, discord.Thread) and not getattr(message.author, "bot", False) and self._guild_allowed(message):
             if message.content.strip() == "/stop" and self.temporal is not None:
                 await self.temporal.stop(Event(trigger=normalize_message(message, str(channel.id), str(channel.id)), kind="stop"))
                 return False
@@ -158,6 +158,14 @@ class Gateway(discord.Client):
             )
         )
         if not eligible:
+            if (
+                self.temporal
+                and not getattr(message.author, "bot", False)
+                and isinstance(channel, discord.Thread)
+                and channel.owner_id == getattr(self.user, "id", None)
+                and self._guild_allowed(message)
+            ):
+                await self.temporal.touch(Event(trigger=normalize_message(message, str(channel.id), str(channel.id))))
             LOGGER.debug("Ignoring non-admitted Discord message %s", message.id)
         return eligible
 

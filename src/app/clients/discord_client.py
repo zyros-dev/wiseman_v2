@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import re
 import secrets
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 
@@ -17,7 +17,10 @@ if TYPE_CHECKING:
 
 
 class RealDiscord:
-    def __init__(self, gateway: Gateway) -> None:
+    def __init__(self, gateway: Gateway | None = None) -> None:
+        self.gateway = cast("Gateway", gateway)
+
+    def attach(self, gateway: Gateway) -> None:
         self.gateway = gateway
 
     async def channel(self, channel_id: str) -> discord.TextChannel | discord.Thread:

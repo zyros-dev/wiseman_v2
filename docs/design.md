@@ -81,10 +81,9 @@ trigger message remains the reaction target; all banner, progress, failure,
 and answer messages are delivered inside the managed thread.
 New threads use a sanitized, bounded preview of the triggering user message as
 their name, with `Wiseman thread` as the empty-message fallback.
-The gateway also sets Discord's one-hour auto-archive setting, persists
-last-human-activity timestamps on its mounted state volume, and closes and
-locks managed threads after that same one-hour idle interval; cleanup failures
-remain retryable.
+The gateway sets Discord's one-hour auto-archive setting on new and discovered
+managed threads. Discord owns that archive boundary; Temporal owns the
+three-day workspace retirement boundary, and cleanup failures remain retryable.
 
 ## Workspace
 

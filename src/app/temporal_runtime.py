@@ -95,7 +95,7 @@ class TurnWorkflow:
     @workflow.update
     async def steer(self, event: dict) -> bool:
         incoming = Event.model_validate(event)
-        if self.work is None or not self.inferencing or incoming.trigger.reply_to != self.work.state.delivery_id:
+        if self.work is None or not self.inferencing or incoming.trigger.reply_to != self.work.state.delivery_id or (incoming.anchor_id and incoming.anchor_id != self.work.event.trigger.id):  # noqa: E501 # fmt: skip
             return False
         if incoming.trigger.id in self.work.state.processed:
             return True
@@ -108,7 +108,11 @@ class TurnWorkflow:
     async def stop(self, event: dict) -> bool:
         incoming = Event.model_validate(event)
         if self.work is None or incoming.trigger.id in self.stop_commands:
+            self.stop_requested = True
+            self.stop_commands.add(incoming.trigger.id)
             return True
+        if incoming.anchor_id and incoming.anchor_id != self.work.event.trigger.id:
+            return False
         if not self.inferencing:
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
@@ -125,7 +129,7 @@ class TurnWorkflow:
             f"wiseman.{name}",
             {"work": self.work.model_dump(mode="json"), "event": event},
             start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=TRANSPORT_RETRY_POLICY,
+            retry_policy=RetryPolicy(maximum_attempts=1) if name == "stop" else TRANSPORT_RETRY_POLICY,
         )
         return bool(result["accepted"])
 
@@ -153,7 +157,7 @@ class TurnWorkflow:
     @workflow.run
     async def run(self, payload: dict) -> dict:
         self.work = TurnWork.model_validate(payload)
-        self.work.state.progress = ["🛠️ Workspace provisioning..." if not self.work.state.codex_thread else "🤖 Codex resuming..."]
+        self.work.state.progress = ["🛠️ Workspace provisioning..."] if not self.work.state.codex_thread else []
         try:
             await self._node("render", durable=True)
             await self._node("react")
@@ -222,7 +226,7 @@ class ThreadWorkflow:
     def __init__(self) -> None:
         self.pending: list[dict] = []
         self.state: JsonObject = {}
-        self.active_message = ""
+        self.active_message = self.active_timestamp = ""
 
     @workflow.signal
     async def submit(self, event: dict) -> None:
@@ -239,7 +243,7 @@ class ThreadWorkflow:
 
     @workflow.query
     def session(self) -> dict:
-        return {**self.state, "active_message": self.active_message}
+        return {**self.state, "active_message": self.active_message, "active_timestamp": self.active_timestamp}
 
     @workflow.run
     async def run(self, first: dict) -> dict:
@@ -248,8 +252,7 @@ class ThreadWorkflow:
         self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
         if event := _object_map(first.get("event")):
             self.pending.insert(0, event)
-        self.result = {"state": self.state}
-        handled = 0
+        self.result, handled = {"state": self.state}, 0
         while True:
             try:
                 await workflow.wait_condition(
@@ -268,7 +271,7 @@ class ThreadWorkflow:
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
-            self.active_message = message_id
+            self.active_message, self.active_timestamp = message_id, str(_object_map(event.get("trigger")).get("timestamp", ""))
             self.state.setdefault("owner_id", _object_map(event.get("trigger")).get("author_id", ""))
             try:
                 self.result = await self._turn(event)
@@ -279,7 +282,7 @@ class ThreadWorkflow:
                     timedelta(seconds=30),
                 )
             self.state = _object_map(self.result.get("state", self.state))
-            self.active_message = ""
+            self.active_message = self.active_timestamp = ""
             handled += 1
 
     async def _turn(self, event: dict) -> dict:
@@ -364,12 +367,13 @@ class TemporalRuntime:
         thread_id = event.trigger.thread_id or event.trigger.channel_id
         try:
             state = await client.get_workflow_handle(f"wiseman-{thread_id}").query(ThreadWorkflow.session)
-            if not (message_id := state.get("active_message")):
+            stale = bool(event.trigger.timestamp and event.trigger.timestamp < str(state.get("active_timestamp", "")))
+            if not (message_id := state.get("active_message")) or stale:
                 return False
             return bool(
                 await client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update(
                     name,
-                    event.model_dump(mode="json"),
+                    event.model_dump(mode="json") | {"anchor_id": str(message_id)},
                     id=event.trigger.id,
                 )
             )
@@ -378,11 +382,9 @@ class TemporalRuntime:
                 return False
             raise
 
-    async def steer(self, event: Event) -> bool:
-        return await self._update("steer", event)
+    async def steer(self, event: Event) -> bool: return await self._update("steer", event)  # fmt: skip
 
-    async def stop(self, event: Event) -> bool:
-        return await self._update("stop", event)
+    async def stop(self, event: Event) -> bool: return await self._update("stop", event)  # fmt: skip
 
     async def close(self) -> None:
         if self.worker_task is not None:
