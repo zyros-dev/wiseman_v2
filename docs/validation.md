@@ -23,6 +23,11 @@ Both coordinator and sandbox images build on Thor. The sandbox returns
 `{"status":"ok"}` from `/healthz` and exposes its low-cardinality Prometheus
 endpoint at `/metrics`.
 
+The deployed sandbox image was exercised on Thor as a managed non-root user:
+it installed `build-essential` with passwordless `sudo` and successfully ran
+GCC and Make. The toolchain is therefore available to agent workloads without
+being baked into the image.
+
 ## Live evidence
 
 On 2026-09-05, deployed revision `cd21c16` created Discord thread `Gurt 7`
