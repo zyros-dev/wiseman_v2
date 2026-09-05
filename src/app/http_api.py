@@ -229,7 +229,7 @@ async def _admit(context: _Context, event: Event) -> dict[str, object]:
 def _register_replay(app: FastAPI, context: _Context) -> None:
     async def replay(payload: dict[str, object], x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
         _auth(context, x_replay_token, "WISEMAN_REPLAY_TOKEN", "invalid replay token")
-        event = _event(payload, "invalid Discord event")
+        event = _event(payload, "invalid Discord event", strict=context.clients.mode is ClientMode.REAL)
         return await _admit(context, event)
 
     async def replay_audit(audit_id: str, x_replay_token: Annotated[str | None, Header()] = None) -> dict[str, object]:
@@ -239,7 +239,7 @@ def _register_replay(app: FastAPI, context: _Context) -> None:
         payload = artifact.get("normalized_request")
         if not isinstance(raw, dict) or not isinstance(payload, dict):
             raise HTTPException(422, "Phoenix audit has no replayable raw request")
-        event = _event(payload, "Phoenix audit contains an invalid Discord event")
+        event = _event(payload, "Phoenix audit contains an invalid Discord event", strict=context.clients.mode is ClientMode.REAL)
         event.raw_payload = cast("JsonObject", raw)
         return {**(await _admit(context, event)), "audit_id": audit_id}
 
@@ -255,11 +255,18 @@ def _audit(context: _Context, audit_id: str) -> dict[str, object]:
     return value
 
 
-def _event(payload: dict[str, object], detail: str) -> Event:
+def _event(payload: dict[str, object], detail: str, *, strict: bool = False) -> Event:
     try:
-        return normalize_event(payload)
+        event = normalize_event(payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(422, detail) from exc
+    if strict and not all(_snowflake(value) for value in (event.trigger.id, event.trigger.channel_id, event.trigger.thread_id, event.trigger.reply_to)):
+        raise HTTPException(422, "Discord IDs must be valid snowflakes")
+    return event
+
+
+def _snowflake(value: str | None) -> bool:
+    return value is None or (value.isascii() and value.isdigit() and int(value) <= 2**63 - 1)
 
 
 def _register_provider(app: FastAPI, context: _Context) -> None:

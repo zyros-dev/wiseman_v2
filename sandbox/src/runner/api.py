@@ -276,7 +276,13 @@ class CodexRunner:
 
     def _set_progress(self, thread_id: str, message: str) -> None:
         steps = self.progress_steps.setdefault(thread_id, [])
-        steps.extend([message] if steps[-1:] != [message] else [])
+        key = message.split("...", 1)[0]
+        for index, item in enumerate(steps):
+            if item.split("...", 1)[0] == key:
+                steps[index] = message
+                return
+        steps.append(message)
+        del steps[:-8]
 
     async def _run_thread(self, thread: AsyncThread, turn: Turn, path: Path) -> dict[str, object]:
         turn_number = turn.turn_number or self.turn_counts.get(turn.thread_id, 0) + 1
