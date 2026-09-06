@@ -80,13 +80,16 @@ class GraphRunner(MockHarnessRunner):
         self.completion_gate = asyncio.Event()
         self.progress_sent.clear()
         self.run_started.clear()
+        self._record("hold-next")
 
     def release_next_attempt(self) -> None:
+        self._record("release-next")
         for gate in (self.run_gate, self.completion_gate):
             if gate is not None:
                 gate.set()
 
     def release_attempt(self, message_id: str) -> None:
+        self._record(f"release-attempt message={message_id}")
         for thread, attempt in self._active_attempts.items():
             if self._active_message_ids.get(thread) != message_id:
                 continue
@@ -151,6 +154,7 @@ class GraphRunner(MockHarnessRunner):
             self._attempt_gates[attempt] = (run_gate, completion_gate)
             if run_gate is not None:
                 await run_gate.wait()
+            self._record(f"run-gate-open attempt={attempt} message={message_id}")
             if error := self._take_error(attempt, message_id):
                 self._mark_failure(thread)
                 raise error
