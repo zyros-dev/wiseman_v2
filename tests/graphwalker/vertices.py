@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from tests.graphwalker.model import (
@@ -128,6 +129,14 @@ def _assert_model_invariants(context: GraphContext) -> None:
             state.wiseman.active_question,
             "active question must remain pending until terminal delivery",
         )
+    if not state.wiseman.settled_questions <= state.wiseman.seen_questions:
+        _reject_invariant(
+            context,
+            "wiseman-state.settled_questions",
+            "settled questions were admitted",
+            str(state.wiseman.settled_questions),
+            "a terminal result was recorded for an unknown question",
+        )
 
 
 def _assert_question_transition(context: GraphContext, previous: GraphState) -> None:
@@ -159,6 +168,23 @@ def _assert_context_transition(context: GraphContext, previous: GraphState) -> N
         (*previous.chat.consumed_context, *previous.chat.background_context),
         tuple(context.state.chat.consumed_context),
         "context-ready did not consume background context",
+    )
+
+
+def _assert_resume_transition(context: GraphContext, previous: GraphState) -> None:
+    _assert_state_equal(
+        context,
+        "transition.resume_consumed_context",
+        tuple(previous.chat.consumed_context),
+        tuple(context.state.chat.consumed_context),
+        "resume-session changed the consumed context cursor",
+    )
+    _assert_state_equal(
+        context,
+        "transition.resume_background_context",
+        tuple(previous.chat.background_context),
+        tuple(context.state.chat.background_context),
+        "resume-session discarded unconsumed background context",
     )
 
 
@@ -195,7 +221,8 @@ def _assert_terminal_transition(context: GraphContext, previous: GraphState) -> 
         tuple(context.state.wiseman.pending_questions),
         "terminal edge lost queued questions",
     )
-    _assert_state_equal(context, "transition.turn", previous.wiseman.turns + bool(active), context.state.wiseman.turns, "terminal edge did not settle one turn")
+    expected_turn = previous.wiseman.turns + bool(active)
+    _assert_state_equal(context, "transition.turn", expected_turn, context.state.wiseman.turns, "terminal edge did not settle one turn")
 
 
 TRANSITION_ASSERTIONS: Mapping[str, Callable[[GraphContext, GraphState], None]] = {
@@ -204,7 +231,7 @@ TRANSITION_ASSERTIONS: Mapping[str, Callable[[GraphContext, GraphState], None]] 
     "background-chatter": _assert_background_transition,
     "running-background-chatter": _assert_background_transition,
     "context-ready": _assert_context_transition,
-    "resume-session": _assert_context_transition,
+    "resume-session": _assert_resume_transition,
     "steer-active-turn": _assert_steering_transition,
     "repeat-steer": _assert_steering_transition,
     "stop-preparing": _assert_stop_transition,
@@ -248,6 +275,8 @@ def _assert_transition(context: GraphContext) -> None:
 
 def _assert_observation_context(context: GraphContext, observation: RuntimeObservation) -> None:
     state = context.state
+    state.reconcile_processed(observation.wiseman.processed_question_ids)
+    state.reconcile_session(observation.wiseman.session_id)
     expected_messages = tuple(message.id for message in state.chat.messages)
     if not _assert_subsequence(expected_messages, observation.chat.message_ids):
         _reject_observation(
@@ -269,6 +298,16 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
     )
     for location, expected, observed, message in comparisons:
         _assert_equal(context, location, expected, observed, message)
+    processed = set(observation.wiseman.processed_question_ids)
+    missing = state.wiseman.settled_questions - processed
+    if missing:
+        _reject_observation(
+            context,
+            "wiseman.processed_questions",
+            str(sorted(state.wiseman.settled_questions)),
+            str(sorted(processed)),
+            f"Temporal has not processed settled questions {sorted(missing)}",
+        )
 
 
 def _assert_id_delta(
@@ -305,6 +344,23 @@ def _assert_context_delta(context: GraphContext, previous: RuntimeObservation, o
     _assert_equal(context, "delta.consumed_context", expected, observation.chat.consumed_context_ids, "context edge did not advance the consumed cursor")
 
 
+def _assert_resume_delta(context: GraphContext, previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    _assert_equal(
+        context,
+        "delta.resume_consumed_context",
+        previous.chat.consumed_context_ids,
+        observation.chat.consumed_context_ids,
+        "resume-session changed the consumed context cursor",
+    )
+    _assert_equal(
+        context,
+        "delta.resume_background_context",
+        previous.chat.background_context_ids,
+        observation.chat.background_context_ids,
+        "resume-session changed unconsumed background context",
+    )
+
+
 DELTA_ASSERTIONS: Mapping[str, Callable[[GraphContext, RuntimeObservation, RuntimeObservation], None]] = {
     "admit-question": _assert_question_delta,
     "queue-question": _assert_question_delta,
@@ -317,7 +373,7 @@ DELTA_ASSERTIONS: Mapping[str, Callable[[GraphContext, RuntimeObservation, Runti
     "stop-recovering": _assert_stop_delta,
     "stop-delivering": _assert_stop_delta,
     "context-ready": _assert_context_delta,
-    "resume-session": _assert_context_delta,
+    "resume-session": _assert_resume_delta,
 }
 
 
@@ -333,7 +389,45 @@ def _assert_observation_delta(context: GraphContext, observation: RuntimeObserva
 def _assert_phase(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
     _assert_equal(context, f"phase:{vertex}", vertex, observation.wiseman.phase, f"runtime Wiseman phase is not {vertex}")
     _assert_observation_context(context, observation)
+    _assert_temporal_state(context, observation, vertex)
     _assert_evidence(context, observation, vertex)
+
+
+def _assert_temporal_state(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    wiseman = observation.wiseman
+    expected_active = vertex not in {Vertex.IDLE, Vertex.RETIRED}
+    _assert_equal(
+        context,
+        f"{vertex}.active_question",
+        expected_active,
+        wiseman.active_question is not None,
+        "Temporal active message disagrees with lifecycle state",
+    )
+    if vertex is Vertex.RUNNING:
+        expected_inferencing = vertex is Vertex.RUNNING
+        _assert_equal(context, "running.inferencing", expected_inferencing, wiseman.inferencing, "running state is not executing inference")
+        _assert_equal(context, "running.delivery_phase", "progress", wiseman.delivery_phase, "running state lost progress delivery")
+    elif vertex is Vertex.DELIVERING:
+        expected_inferencing = vertex is Vertex.RUNNING
+        _assert_equal(context, "delivering.inferencing", expected_inferencing, wiseman.inferencing, "delivery still reports inference active")
+        _assert_equal(context, "delivering.delivery_phase", "answer", wiseman.delivery_phase, "delivery state has no answer phase")
+        if wiseman.reaction_phase not in {"success", "failure"}:
+            _reject_observation(
+                context,
+                "delivering.reaction_phase",
+                "success or failure",
+                wiseman.reaction_phase,
+                "delivery has not reconciled its terminal reaction",
+            )
+    elif vertex is Vertex.CANCELLING:
+        expected_stop = vertex is Vertex.CANCELLING
+        _assert_equal(context, "cancelling.stop_requested", expected_stop, wiseman.stop_requested, "cancelling state lost its stop request")
+    elif vertex is Vertex.OUTCOME_UNKNOWN:
+        expected_unknown = vertex is Vertex.OUTCOME_UNKNOWN
+        _assert_equal(context, "outcome_unknown.flag", expected_unknown, wiseman.outcome_unknown, "unknown outcome state is not recorded in Temporal")
+    elif vertex is Vertex.RETIRED:
+        expected_closed = vertex is Vertex.RETIRED
+        _assert_equal(context, "retired.closed", expected_closed, observation.chat.archived, "retired state is not closed in Temporal")
 
 
 def _assert_evidence(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
@@ -351,6 +445,25 @@ def _assert_evidence(context: GraphContext, observation: RuntimeObservation, ver
     missing = tuple(sorted(required - set(observation.phoenix_nodes)))
     if missing:
         _reject_observation(context, f"phoenix:{vertex}", str(sorted(required)), str(observation.phoenix_nodes), f"Phoenix evidence missing {missing}")
+    if vertex in {Vertex.RUNNING, Vertex.DELIVERING, Vertex.ERROR}:
+        _assert_phoenix_order(context, observation, vertex)
+
+
+def _assert_phoenix_order(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    sequence = observation.phoenix_sequence
+    positions = {node: sequence.index(node) for node in set(sequence)}
+    required_order = ("admission", "turn", "context", "grammar", "prompt")
+    missing = tuple(node for node in required_order if node not in positions)
+    if missing:
+        return
+    if any(positions[left] >= positions[right] for left, right in pairwise(required_order)):
+        _reject_observation(
+            context,
+            f"phoenix:{vertex}.order",
+            "admission < turn < context < grammar < prompt",
+            str(sequence),
+            "Phoenix nodes are out of lifecycle order",
+        )
 
 
 def _assert_no_terminal_result(context: GraphContext, observation: RuntimeObservation, location: str) -> None:
@@ -367,7 +480,8 @@ def _assert_active_phase(context: GraphContext, observation: RuntimeObservation,
 def _assert_active_turn_number(context: GraphContext, observation: RuntimeObservation, location: str) -> None:
     if observation.wiseman.active_question is None:
         _reject_observation(context, f"{location}.active_question", "question id", "none", f"{location} runtime has no active question")
-    _assert_equal(context, f"{location}.active_turn", context.state.wiseman.turns + 1, observation.wiseman.active_turn, "active turn number changed")
+    expected = context.state.wiseman.turns if location == "delivering" else context.state.wiseman.turns + 1
+    _assert_equal(context, f"{location}.active_turn", expected, observation.wiseman.active_turn, "active turn number changed")
 
 
 def _assert_progress_bound(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:

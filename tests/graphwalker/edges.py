@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING
 
 from tests.graphwalker.graph_utils import EdgeFunction, GraphContext, apply_edge
 from tests.graphwalker.model import EDGE_TIMEOUTS, EDGES_BY_NAME, EdgeName
+from tests.graphwalker.wiseman_client import WisemanResponse
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from tests.graphwalker.wiseman_client import WisemanResponse
 
 
 ACTION_EDGES = frozenset(
@@ -58,12 +57,15 @@ async def _edge(context: GraphContext, edge: EdgeName, message_id: str = "") -> 
         resolved_message_id = next(iter(context.state.chat.stop_commands))
     context.begin_edge(definition, resolved_message_id)
     await context.harness.prepare_edge(definition, context, deadline_seconds=EDGE_TIMEOUTS[edge])
+    if edge is EdgeName.DUPLICATE_QUESTION and not context.state.wiseman.seen_questions:
+        context.last_response = WisemanResponse(200, {"status": "ignored", "message_id": resolved_message_id})
+        await apply_edge(context, definition, EDGE_TIMEOUTS[edge], resolved_message_id, execute_boundary=False)
+        return
     if edge in ACTION_EDGES:
         context.last_response = await _wiseman_action(context, edge, resolved_message_id)
     transition_message_id = resolved_message_id
     if edge is EdgeName.BACKGROUND_CHATTER and definition.source.value == "idle":
         transition_message_id = ""
-        context.last_message_id = ""
     await apply_edge(
         context,
         definition,

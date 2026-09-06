@@ -16,6 +16,7 @@ from app.runner_status import STOPPED_STATUS, UNKNOWN_STATUS
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 DELIVERY_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30))
 HISTORY_COMPACTION_TURNS = 20
+PERMANENT_FAILURE_CUTOFF = 503
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -94,9 +95,11 @@ class TurnWorkflow:
         self.stop_commands: set[str] = set()
         self.terminal_hold = False
         self.cancellation_hold = False
+        self.completion_won = False
         self.recovering = False
         self.outcome_unknown = False
         self.resume_requested = False
+        self.resumed = False
         self.retry_exhausted = False
         self.outcome_established = False
         self.cancellation_unknown = False
@@ -120,6 +123,9 @@ class TurnWorkflow:
     @workflow.signal
     def resume_session(self) -> None:
         self.resume_requested = True
+        self.resumed = True
+        self.recovering = False
+        self.inferencing = True
 
     @workflow.signal
     def exhaust_retries(self) -> None:
@@ -144,8 +150,8 @@ class TurnWorkflow:
 
     @workflow.signal
     def mark_completion_race(self) -> None:
+        self.completion_won = True
         self.stop_requested = False
-        self.cancellation_hold = False
         if self.work is not None:
             self.work.stopped = False
             self.work.error = ""
@@ -202,6 +208,8 @@ class TurnWorkflow:
 
     @workflow.signal
     def progress(self, message: str) -> None:
+        self.inferencing = True
+        self.recovering = False
         key = _progress_key(message)
         self.pending_progress = [item for item in self.pending_progress if _progress_key(item) != key][-31:]
         self.pending_progress.append(message)
@@ -212,6 +220,8 @@ class TurnWorkflow:
             "work": self.work.model_dump(mode="json") if self.work is not None else {},
             "inferencing": self.inferencing,
             "stop_requested": self.stop_requested,
+            "resume_requested": self.resume_requested,
+            "resumed": self.resumed,
             "pending_progress": list(self.pending_progress),
             "recovering": self.recovering,
             "outcome_unknown": self.outcome_unknown,
@@ -251,13 +261,15 @@ class TurnWorkflow:
             await self._node("context")
             await self._node("prompt")
             await workflow.wait_condition(lambda: not self.cancellation_hold)
-            if not self.stop_requested and not self.work.state.codex_thread:
+            completion_won = self.completion_won
+            self.completion_won = False
+            if (not self.stop_requested or completion_won) and not self.work.state.codex_thread:
                 await _activity(provision_workspace, self.work.model_dump(mode="json"), timedelta(minutes=5))
                 self.progress("🤖 Codex starting...")
                 await self._node("render")
                 started = await _activity(start_codex, self.work.model_dump(mode="json"), timedelta(minutes=2))
                 self.work.state.codex_thread = str(started["codex_thread"])
-            if self.stop_requested:
+            if self.stop_requested and not completion_won:
                 self.work.stopped = True
                 self.work.error = "Turn stopped by user"
             else:
@@ -286,6 +298,7 @@ class TurnWorkflow:
         self.work.state.progress = []
         self.recovering = False
         self.outcome_unknown = False
+        self.resumed = False
         return {"state": self.work.state.model_dump(mode="json"), "output": self.work.output, "error": self.work.error}
 
     async def _infer(self) -> None:
@@ -312,39 +325,56 @@ class TurnWorkflow:
             except ActivityError as exc:
                 status = _activity_status(exc)
                 self.inferencing = False
-                if status == STOPPED_STATUS or self.stop_requested:
-                    self.recovering = False
-                    self.work.stopped = True
-                    self.work.error = "Turn stopped by user"
+                self.resumed = False
+                if await self._handle_infer_failure(status):
                     return
-                if status == UNKNOWN_STATUS:
-                    self.outcome_unknown = True
-                    await workflow.wait_condition(lambda: self.outcome_established or self.stop_requested)
-                    if self.stop_requested and not self.outcome_established:
-                        self.outcome_unknown = False
-                        self.work.stopped = True
-                        self.work.error = "Turn stopped by user"
-                        return
-                    self.outcome_unknown = False
-                    self.work.error = "Execution outcome established without a result"
-                    return
-                self.recovering = True
-                await workflow.wait_condition(lambda: self.resume_requested or self.retry_exhausted or self.stop_requested)
-                if self.stop_requested:
-                    self.recovering = False
-                    self.work.stopped = True
-                    self.work.error = "Turn stopped by user"
-                    return
-                if self.retry_exhausted:
-                    self.recovering = False
-                    self.work.error = f"Codex failed with HTTP {status}" if status else "Codex failed after retries"
-                    return
-                self.resume_requested = False
-                self.retry_exhausted = False
                 continue
             self.work.state.codex_thread = result.state.codex_thread
             self.work.output, self.work.billing = result.output, result.billing
+            self.resumed = False
             return
+
+    async def _handle_infer_failure(self, status: int | None) -> bool:
+        assert self.work is not None
+        finished = False
+        if status == STOPPED_STATUS or self.stop_requested:
+            self.recovering = False
+            self.work.stopped = True
+            self.work.error = "Turn stopped by user"
+            finished = True
+        elif status == UNKNOWN_STATUS:
+            self.outcome_unknown = True
+            await workflow.wait_condition(lambda: self.outcome_established or self.stop_requested)
+            if self.stop_requested and not self.outcome_established:
+                self.outcome_unknown = False
+                self.work.stopped = True
+                self.work.error = "Turn stopped by user"
+            else:
+                self.outcome_unknown = False
+                self.work.error = "Execution outcome established without a result"
+            finished = True
+        elif status is not None and status < PERMANENT_FAILURE_CUTOFF:
+            self.recovering = False
+            self.work.error = f"Codex failed with HTTP {status}"
+            finished = True
+        else:
+            self.recovering = True
+            await workflow.wait_condition(lambda: self.resume_requested or self.retry_exhausted or self.stop_requested)
+            if self.stop_requested:
+                self.recovering = False
+                self.work.stopped = True
+                self.work.error = "Turn stopped by user"
+                finished = True
+            elif self.retry_exhausted:
+                self.recovering = False
+                self.work.error = f"Codex failed with HTTP {status}" if status else "Codex failed after retries"
+                finished = True
+            else:
+                self.resume_requested = False
+                self.retry_exhausted = False
+                self.recovering = False
+                self.inferencing = True
+        return finished
 
 
 @workflow.defn(name="wiseman.thread")
@@ -371,7 +401,7 @@ class ThreadWorkflow:
         if message_id and message_id not in _sequence(self.state.get("message_ids")):
             self._record_message(event)
             self._append_state_id("background_context_ids", message_id)
-        self.pending.append({"background": True, "event": event})
+        self.pending.append({**event, "background": True})
 
     @workflow.signal
     async def record_control(self, event: dict) -> None:
@@ -450,7 +480,8 @@ class ThreadWorkflow:
                     {"event": event, "state": self.state, "error": str(exc)},
                     timedelta(seconds=30),
                 )
-            self.state = _object_map(self.result.get("state", self.state))
+            self.state = _merge_thread_state(self.state, _object_map(self.result.get("state", self.state)))
+            self.result["state"] = self.state
             self.active_message = self.active_timestamp = ""
             handled += 1
 
@@ -623,6 +654,16 @@ def _merge_ids(existing: list[str], updates: list[str]) -> list[str]:
     for value in updates:
         if value not in merged:
             merged.append(value)
+    return merged
+
+
+def _merge_thread_state(previous: JsonObject, result: JsonObject) -> JsonObject:
+    merged = dict(result)
+    for field_name in ("message_ids", "background_context_ids", "consumed_context_ids", "steering_ids", "stop_command_ids", "processed"):
+        merged[field_name] = _merge_ids(_string_sequence(merged.get(field_name)), _string_sequence(previous.get(field_name)))
+    timestamps = dict(previous.get("message_timestamps", {})) if isinstance(previous.get("message_timestamps"), dict) else {}
+    timestamps.update(merged.get("message_timestamps", {}))
+    merged["message_timestamps"] = timestamps
     return merged
 
 

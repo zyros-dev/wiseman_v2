@@ -20,7 +20,7 @@ from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
-from app.runner import STOPPED_STATUS, RunnerError
+from app.runner import RunnerError
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
 from tests.graphwalker.edges import EDGE_FUNCTIONS
 from tests.graphwalker.graph_utils import GraphContext, GraphElement, GraphHarness
@@ -61,6 +61,8 @@ def _session_ids(session: JsonObject, name: str) -> tuple[str, ...]:
 def _edge_observed(context: GraphContext, vertex: Vertex, observation: RuntimeObservation) -> bool:
     message_id = context.last_message_id
     edge = context.last_edge
+    if vertex in {Vertex.DELIVERING, Vertex.ERROR} and observation.wiseman.reaction_phase not in {"success", "failure"}:
+        return False
     edge_result = False
     if context.last_edge == "background-chatter" and context.previous_state and context.previous_state.vertex is Vertex.IDLE:
         edge_result = True
@@ -85,8 +87,14 @@ def _edge_observed(context: GraphContext, vertex: Vertex, observation: RuntimeOb
         }
         if edge is not None and (ids := collections.get(edge)) is not None:
             edge_result = message_id in ids
-        elif edge in {"context-ready", "resume-session"}:
+        elif edge == "context-ready":
             edge_result = bool(context.previous_state and observation.chat.consumed_context_ids == tuple(context.state.chat.consumed_context))
+        elif edge == "resume-session":
+            edge_result = bool(
+                context.previous_state
+                and observation.chat.consumed_context_ids == tuple(context.state.chat.consumed_context)
+                and observation.chat.background_context_ids == tuple(context.state.chat.background_context)
+            )
         else:
             required_evidence = {Vertex.DELIVERING: {"completed", "reaction"}, Vertex.ERROR: {"failure", "reaction"}}.get(vertex, set())
             edge_result = required_evidence.issubset(observation.phoenix_nodes)
@@ -103,8 +111,8 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
 
 
 class _ReplayHarness(GraphHarness):
-    def __init__(self, observer: RuntimeObserver, runner: GraphRunner, client, environment: WorkflowEnvironment) -> None:
-        self.observer, self.runner, self.client, self.environment = observer, runner, client, environment
+    def __init__(self, observer: RuntimeObserver, runner: GraphRunner, engine: Engine, client, environment: WorkflowEnvironment) -> None:
+        self.observer, self.runner, self.engine, self.client, self.environment = observer, runner, engine, client, environment
 
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
         assert context.state.vertex is vertex
@@ -114,15 +122,15 @@ class _ReplayHarness(GraphHarness):
                     try:
                         observation = await self.observer.observe(context.state.chat.thread_id)
                     except RPCError as exc:
-                        if exc.status != RPCStatusCode.NOT_FOUND or vertex is not Vertex.IDLE:
+                        if exc.status != RPCStatusCode.NOT_FOUND or vertex not in {Vertex.IDLE, Vertex.RETIRED}:
                             raise
-                        return RuntimeObservation(ObservedChatState(), ObservedWisemanState(Vertex.IDLE))
+                        return RuntimeObservation(ObservedChatState(), ObservedWisemanState(vertex))
                     if observation.wiseman.phase is vertex and self._edge_observed(context, vertex, observation):
                         return observation
                     await asyncio.sleep(0.02)
         except TimeoutError as exc:
             snapshot = await self.observer.clients.temporal.snapshot(context.state.chat.thread_id)
-            message = f"timed out waiting for {vertex} after {context.last_edge}: {snapshot}"
+            message = f"timed out waiting for {vertex} after {context.last_edge}: {snapshot}; runner={self.runner.history[-16:]}"
             raise AssertionError(message) from exc
 
     @staticmethod
@@ -132,6 +140,11 @@ class _ReplayHarness(GraphHarness):
     async def prepare_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name == EdgeName.ADMIT_QUESTION:
+            self.runner = GraphRunner(self.runner.state)
+            object.__setattr__(self.engine.config, "runner", self.runner)
+            self.runner.hold_stop = False
+            self.runner.clear_error()
+            self.runner.clear_stops()
             self.runner.run_gate = asyncio.Event()
             self.runner.completion_gate = asyncio.Event()
             self.runner.progress_sent.clear()
@@ -146,21 +159,24 @@ class _ReplayHarness(GraphHarness):
         }:
             await self._prepare_failure(edge, context)
         elif edge.name in {EdgeName.STOP_PREPARING, EdgeName.STOP_RUNNING, EdgeName.STOP_RECOVERING}:
+            self.runner.hold_stop = True
             await self._signal_active(context, "hold_cancellation")
         elif edge.name is EdgeName.STOP_DELIVERING:
             await self._signal_active(context, "hold_terminal")
 
     async def _prepare_failure(self, edge: GraphElement, context: GraphContext) -> None:
+        active_message_id = context.state.wiseman.active_question or context.last_message_id
         if edge.name in {EdgeName.PREPARATION_FAILED, EdgeName.PERMANENT_FAILURE, EdgeName.RETRY_EXHAUSTED, EdgeName.OUTCOME_ESTABLISHED}:
             await self._signal_active(context, "hold_terminal")
         errors: dict[str, tuple[str, RunnerError]] = {
-            EdgeName.PREPARATION_FAILED: ("start_error", RunnerError(STOPPED_STATUS, "graph preparation failure")),
             EdgeName.TRANSIENT_FAILURE: ("next_error", RunnerError(503, "graph transient failure")),
-            EdgeName.PERMANENT_FAILURE: ("next_error", RunnerError(STOPPED_STATUS, "graph permanent failure")),
+            EdgeName.PERMANENT_FAILURE: ("next_error", RunnerError(500, "graph permanent failure")),
             EdgeName.EXECUTION_UNCERTAIN: ("next_error", RunnerError(520, "graph outcome is unknown")),
         }
+        if edge.name is EdgeName.PREPARATION_FAILED:
+            self.runner.inject_error(RunnerError(400, "graph preparation failure"), active_message_id)
         if setting := errors.get(edge.name):
-            setattr(self.runner, setting[0], setting[1])
+            self.runner.inject_error(setting[1], active_message_id)
 
     async def _signal_active(self, context: GraphContext, signal: str) -> None:
         if active := context.state.wiseman.active_question:
@@ -174,7 +190,10 @@ class _ReplayHarness(GraphHarness):
             await self._execute_inference_complete(context)
         elif edge.name is EdgeName.TRANSIENT_FAILURE:
             self._release_runner()
+            await self.runner.wait_until_idle(context.state.wiseman.session_id or f"codex-{context.state.chat.thread_id}")
+            self.runner.clear_error()
             self.runner.completion_gate = asyncio.Event()
+            self.runner.progress_sent.clear()
         elif edge.name is EdgeName.EXECUTION_UNCERTAIN:
             self._release_runner()
         elif edge.name in {
@@ -184,6 +203,7 @@ class _ReplayHarness(GraphHarness):
             EdgeName.CANCELLATION_UNKNOWN,
             EdgeName.COMPLETION_RACE,
         }:
+            await ({EdgeName.RESUME_SESSION: self._prepare_resume}.get(edge.name, self._noop))(context)
             signals = {
                 EdgeName.RESUME_SESSION: "resume_session",
                 EdgeName.RETRY_EXHAUSTED: "exhaust_retries",
@@ -191,9 +211,16 @@ class _ReplayHarness(GraphHarness):
                 EdgeName.CANCELLATION_UNKNOWN: "mark_cancellation_unknown",
                 EdgeName.COMPLETION_RACE: "mark_completion_race",
             }
+            if edge.name is EdgeName.COMPLETION_RACE:
+                self.runner.clear_stops()
+                self.runner.hold_stop = False
             await self._signal_active(context, signals[edge.name])
-            if edge.name is EdgeName.OUTCOME_ESTABLISHED:
-                await self._signal_active(context, "release_cancellation")
+            await ({EdgeName.RESUME_SESSION: self._wait_for_resume}.get(edge.name, self._noop))(context, deadline_seconds)
+            follow_up = {
+                EdgeName.COMPLETION_RACE: self._completion_wins,
+                EdgeName.OUTCOME_ESTABLISHED: self._release_active_cancellation,
+            }.get(edge.name, self._noop)
+            await follow_up(context)
         elif edge.name in {EdgeName.ANSWER_FINALIZED, EdgeName.ERROR_FINALIZED, EdgeName.STOP_CONFIRMED}:
             await self._execute_terminal(edge, context)
         elif edge.name in {EdgeName.PREPARATION_FAILED, EdgeName.PERMANENT_FAILURE}:
@@ -201,7 +228,24 @@ class _ReplayHarness(GraphHarness):
         elif edge.name == EdgeName.IDLE_RETIREMENT:
             await self.environment.sleep(timedelta(days=3))
         elif edge.name is EdgeName.FIXTURE_RESET:
+            self.runner = GraphRunner(self.runner.state)
+            object.__setattr__(self.engine.config, "runner", self.runner)
             context.state.chat.thread_id = f"thread-reset-{context.state.step}"
+            fixture_event = {
+                "background": True,
+                "trigger": {
+                    "id": f"fixture-{context.state.chat.thread_id}",
+                    "author_id": "fixture",
+                    "channel_id": context.state.chat.thread_id,
+                    "thread_id": context.state.chat.thread_id,
+                },
+            }
+            await self.client.start_workflow(
+                ThreadWorkflow.run,
+                {"state": {}, "pending": [fixture_event]},
+                id=f"wiseman-{context.state.chat.thread_id}",
+                task_queue="graph",
+            )
         await self._wait_for_phase(edge.target, deadline_seconds, context.state.chat.thread_id)
 
     async def _execute_progress(self, deadline_seconds: int) -> None:
@@ -209,14 +253,44 @@ class _ReplayHarness(GraphHarness):
             self.runner.run_gate.set()
         await asyncio.wait_for(self.runner.progress_sent.wait(), deadline_seconds)
 
+    async def _completion_wins(self, context: GraphContext) -> None:
+        self.runner.clear_stops()
+        await self._signal_active(context, "hold_terminal")
+        self.runner.hold_stop = False
+        self.runner.clear_error()
+        await self._signal_active(context, "release_cancellation")
+        self._release_runner()
+
+    async def _release_active_cancellation(self, context: GraphContext) -> None:
+        await self._signal_active(context, "release_cancellation")
+
+    async def _prepare_resume(self, _context: GraphContext) -> None:
+        self.runner.clear_error()
+        self.runner.clear_stops()
+        if self.runner.run_gate is not None:
+            self.runner.run_gate.set()
+
+    async def _wait_for_resume(self, _context: GraphContext, deadline_seconds: int) -> None:
+        await asyncio.wait_for(self.runner.progress_sent.wait(), deadline_seconds)
+
+    async def _noop(self, _context: GraphContext, _deadline_seconds: int = 0) -> None:
+        return
+
     async def _execute_inference_complete(self, context: GraphContext) -> None:
         await self._signal_active(context, "hold_terminal")
         self._release_runner()
 
     async def _execute_terminal(self, edge: GraphElement, context: GraphContext) -> None:
         if active := context.state.wiseman.active_question:
-            signal = "release_cancellation" if edge.name is EdgeName.STOP_CONFIRMED else "release_terminal"
-            await self.client.get_workflow_handle(f"wiseman-turn-{active}").signal(signal)
+            handle = self.client.get_workflow_handle(f"wiseman-turn-{active}")
+            if edge.name is EdgeName.STOP_CONFIRMED:
+                await handle.signal("release_cancellation")
+                await handle.signal("release_terminal")
+            else:
+                await handle.signal("release_terminal")
+            if edge.name is EdgeName.STOP_CONFIRMED:
+                self.runner.hold_stop = False
+                self._release_runner()
 
     def _release_runner(self) -> None:
         for gate in (self.runner.run_gate, self.runner.completion_gate):
@@ -230,7 +304,7 @@ class _ReplayHarness(GraphHarness):
                     try:
                         observation = await self.observer.observe(thread_id)
                     except RPCError as exc:
-                        if vertex is Vertex.IDLE and exc.status == RPCStatusCode.NOT_FOUND:
+                        if vertex in {Vertex.IDLE, Vertex.RETIRED} and exc.status == RPCStatusCode.NOT_FOUND:
                             return
                         raise
                     if observation.wiseman.phase is vertex:
@@ -238,7 +312,7 @@ class _ReplayHarness(GraphHarness):
                     await asyncio.sleep(0.02)
         except TimeoutError as exc:
             snapshot = await self.observer.clients.temporal.snapshot(thread_id)
-            message = f"timed out waiting for boundary phase {vertex}: {snapshot}"
+            message = f"timed out waiting for boundary phase {vertex}: {snapshot}; runner={self.runner.history[-16:]}"
             raise AssertionError(message) from exc
 
 
@@ -271,7 +345,12 @@ class _TemporalBoundary:
         return None
 
     async def stop(self, event: Event) -> bool:
-        state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
+        try:
+            state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                return False
+            raise
         message_id = str(state.get("active_message", ""))
         return bool(
             message_id
@@ -395,7 +474,7 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
             elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
                 wiseman = WisemanClient(client)
-                harness = _ReplayHarness(RuntimeObserver(clients), runner, env.client, env)
+                harness = _ReplayHarness(RuntimeObserver(clients), runner, activities.engine, env.client, env)
                 context = GraphContext(harness, clients, wiseman)
                 for index in range(0, len(elements) - 2, 2):
                     source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])
@@ -422,7 +501,8 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
                         assert response is not None
                         assert response.status_code == 200
                         if edge == EdgeName.DUPLICATE_QUESTION:
-                            assert response.body["status"] == "duplicate"
+                            expected = "duplicate" if context.previous_state and context.previous_state.wiseman.seen_questions else "ignored"
+                            assert response.body["status"] == expected
                         elif edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER, EdgeName.IDLE_STOP}:
                             assert response.body["status"] == "ignored"
                         elif edge in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:

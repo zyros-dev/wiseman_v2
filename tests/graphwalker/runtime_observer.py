@@ -24,8 +24,8 @@ class RuntimeObserver:
         work = _object(turn_snapshot.get("work"))
         state = _object(work.get("state")) or session
         delivery = _object(state.get("delivery"))
-        records = self._records(active_id, session)
         phase = _phase(session, turn_snapshot, work, delivery)
+        records = self._records(active_id)
         terminal = phase in {Vertex.DELIVERING, Vertex.ERROR}
         error = bool(work.get("error")) or any(record.get("node") == "failure" for record in records)
         pending = _ids(session.get("pending_message_ids"))
@@ -55,18 +55,28 @@ class RuntimeObserver:
                 pending_question_ids=pending,
                 session_id=_optional_string(state.get("codex_thread")),
                 turn=_integer(state.get("turn", session.get("turn"))),
-                active_turn=_integer(state.get("turn")) + 1 if active_id else None,
+                active_turn=_integer(state.get("turn")) if phase is Vertex.DELIVERING and active_id else _integer(state.get("turn")) + 1 if active_id else None,
                 result_known=terminal,
                 error=error,
                 stop_target_question_id=active_id if phase is Vertex.CANCELLING else None,
+                processed_question_ids=_merge_ids(session.get("processed"), state.get("processed")),
+                inferencing=bool(turn_snapshot.get("inferencing")),
+                stop_requested=bool(turn_snapshot.get("stop_requested")),
+                resume_requested=bool(turn_snapshot.get("resume_requested")),
+                resumed=bool(turn_snapshot.get("resumed")),
+                recovering=bool(turn_snapshot.get("recovering")),
+                outcome_unknown=bool(turn_snapshot.get("outcome_unknown")),
+                cancellation_unknown=bool(turn_snapshot.get("cancellation_unknown")),
+                delivery_phase=_string(delivery.get("phase")) or "idle",
+                reaction_phase=_string(delivery.get("reaction_phase")) or "none",
             ),
             phoenix_nodes=tuple(sorted({str(record.get("node")) for record in records if record.get("node")})),
+            phoenix_sequence=tuple(str(record["node"]) for record in records if record.get("node")),
         )
 
-    def _records(self, active_id: str, session: JsonObject) -> list[dict[str, object]]:
-        message_ids = {active_id, *_ids(session.get("message_ids"))}
-        traces = {f"discord-{message_id}" for message_id in message_ids if message_id}
-        return [record for record in self.clients.phoenix.records if str(record.get("trace", "")) in traces]
+    def _records(self, active_id: str) -> list[dict[str, object]]:
+        trace = f"discord-{active_id}" if active_id else ""
+        return [record for record in self.clients.phoenix.records if str(record.get("trace", "")) == trace]
 
 
 def _phase(session: JsonObject, turn_snapshot: JsonObject, work: JsonObject, delivery: JsonObject) -> Vertex:
@@ -77,6 +87,8 @@ def _phase(session: JsonObject, turn_snapshot: JsonObject, work: JsonObject, del
         phase = Vertex.IDLE
     elif turn_snapshot.get("stop_requested"):
         phase = Vertex.CANCELLING
+    elif turn_snapshot.get("resumed"):
+        phase = Vertex.RUNNING
     elif turn_snapshot.get("recovering"):
         phase = Vertex.RECOVERING
     elif turn_snapshot.get("outcome_unknown"):

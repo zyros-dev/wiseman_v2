@@ -202,6 +202,16 @@ class ObservedWisemanState:
     result_known: bool = False
     error: bool = False
     stop_target_question_id: str | None = None
+    processed_question_ids: tuple[str, ...] = ()
+    inferencing: bool = False
+    stop_requested: bool = False
+    resume_requested: bool = False
+    resumed: bool = False
+    recovering: bool = False
+    outcome_unknown: bool = False
+    cancellation_unknown: bool = False
+    delivery_phase: str = "idle"
+    reaction_phase: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +219,7 @@ class RuntimeObservation:
     chat: ObservedChatState
     wiseman: ObservedWisemanState
     phoenix_nodes: tuple[str, ...] = ()
+    phoenix_sequence: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -224,27 +235,47 @@ class GraphState:
         return len(self.wiseman.pending_questions)
 
     def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
+        if edge == "fixture-reset":
+            self.chat = ChatState(thread_id=self.chat.thread_id)
+            self.wiseman = WisemanState()
         self.vertex = target
         self._record_chat_message(edge, message_id)
         if edge in {"admit-question", "queue-question"}:
+            if edge == "admit-question" and source is Vertex.IDLE:
+                self._consume_background()
             self._remember_question(message_id)
         elif edge in {"background-chatter", "running-background-chatter"}:
             self._remember_background(message_id)
-        elif edge in {"context-ready", "resume-session"}:
+        elif edge == "context-ready":
             self._consume_background()
-            self.wiseman.session_id = self.wiseman.session_id or "codex-thread"
         elif edge in {"steer-active-turn", "repeat-steer"}:
             self._remember_steering(message_id)
         elif edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
             self._remember_stop(message_id)
         elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
             self._settle_active()
+            if self.wiseman.pending_questions:
+                self._consume_background()
+                self.wiseman.active_question = None
         self.step += 1
 
     def reject(self, details: FailureDetails) -> NoReturn:
         failure = VerificationFailure(self.step, details.kind, details.location, details.expected, details.observed, details.message, details.message_id)
         self.failures.append(failure)
         raise GraphVerificationError(failure)
+
+    def reconcile_processed(self, processed_ids: tuple[str, ...]) -> None:
+        processed = set(processed_ids)
+        while self.wiseman.pending_questions and self.wiseman.pending_questions[0] in processed:
+            question = self.wiseman.pending_questions.pop(0)
+            self.wiseman.settled_questions.add(question)
+            if self.wiseman.active_question == question:
+                self.wiseman.active_question = None
+            self.wiseman.turns += 1
+
+    def reconcile_session(self, session_id: str | None) -> None:
+        if self.wiseman.session_id is None and session_id is not None:
+            self.wiseman.session_id = session_id
 
     def _remember_question(self, message_id: str) -> None:
         if message_id and message_id not in self.wiseman.seen_questions:
@@ -282,6 +313,10 @@ class GraphState:
         self.wiseman.turns += 1
 
     def _record_chat_message(self, edge: str, message_id: str) -> None:
+        if edge == "duplicate-question" and message_id not in self.wiseman.seen_questions:
+            return
+        if edge == "duplicate-stop" and message_id not in self.chat.stop_commands:
+            return
         kind = {
             "admit-question": ChatMessageKind.QUESTION,
             "queue-question": ChatMessageKind.QUESTION,
@@ -290,7 +325,6 @@ class GraphState:
             "running-background-chatter": ChatMessageKind.BACKGROUND,
             "steer-active-turn": ChatMessageKind.STEERING,
             "repeat-steer": ChatMessageKind.STEERING,
-            "idle-stop": ChatMessageKind.STOP,
             "stop-preparing": ChatMessageKind.STOP,
             "stop-running": ChatMessageKind.STOP,
             "stop-recovering": ChatMessageKind.STOP,
