@@ -430,9 +430,13 @@ class _TemporalBoundary:
                 raise
             return {**state, "active_message": "", "active_timestamp": "", "closed": True}
         if message_id := session.get("active_message"):
-            session["active_turn_snapshot"] = cast(
-                "JsonObject", await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").query(TurnWorkflow.snapshot)
-            )
+            try:
+                session["active_turn_snapshot"] = cast(
+                    "JsonObject", await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").query(TurnWorkflow.snapshot)
+                )
+            except RPCError as exc:
+                if exc.status != RPCStatusCode.NOT_FOUND:
+                    raise
         return session
 
 
