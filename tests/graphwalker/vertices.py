@@ -316,7 +316,12 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
         ("chat.background_context", tuple(state.chat.background_context), observation.chat.background_context_ids, "unconsumed context changed"),
         ("chat.consumed_context", tuple(state.chat.consumed_context), observation.chat.consumed_context_ids, "consumed cursor changed"),
         ("wiseman.pending_questions", tuple(state.wiseman.pending_questions), observation.wiseman.pending_question_ids, "queued questions lost or reordered"),
-        ("wiseman.active_question", state.wiseman.active_question, observation.wiseman.active_question, "active question changed"),
+        (
+            "wiseman.active_question",
+            None if state.handoff_pending else state.wiseman.active_question,
+            observation.wiseman.active_question,
+            "active question changed",
+        ),
         ("wiseman.session_id", state.wiseman.session_id, observation.wiseman.session_id, "Codex session changed"),
         ("wiseman.turn", state.wiseman.turns, observation.wiseman.turn, "settled turn count changed"),
         ("chat.steering", tuple(state.chat.steering_messages), observation.chat.steering_ids, "steering lost or duplicated"),
