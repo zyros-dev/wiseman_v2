@@ -10,8 +10,8 @@ from app.clients.client_interfaces import (
     ClientMode,
     ClientSettings,
     DiscordClient,
+    HarnessRunner,
     PromptClient,
-    RunnerClient,
     TemporalClient,
 )
 from app.clients.provider import MockOpenRouter
@@ -103,7 +103,7 @@ class MockPrompts(PromptClient):
         return f"mock prompt: {self_kind}"
 
 
-class MockRunner(RunnerClient):
+class MockHarnessRunner(HarnessRunner):
     def __init__(self, state: MockState | None = None) -> None:
         self.state = state or MockState()
         self.run_gate: asyncio.Event | None = None
@@ -162,7 +162,7 @@ def mock_container(settings: ClientSettings | None = None, *, temporal: Temporal
         temporal=temporal or TemporalRuntime(settings.temporal_address, settings.temporal_queue),
         phoenix=Phoenix(settings.phoenix_endpoint, settings.phoenix_key, settings.phoenix_project),
         prompts=MockPrompts(),
-        runner=MockRunner(state),
+        runner=MockHarnessRunner(state),
         provider=MockOpenRouter(),
         settings=settings,
     )

@@ -22,7 +22,7 @@ from app.runner import MESSAGE_ID, TURN_NUMBER
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from app.clients.client_interfaces import DiscordClient, PhoenixClient, PromptClient, RunnerClient
+    from app.clients.client_interfaces import DiscordClient, HarnessRunner, PhoenixClient, PromptClient
     from app.types import JsonObject, StateData
 
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
@@ -31,7 +31,7 @@ TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
     phoenix: PhoenixClient
-    runner: RunnerClient
+    runner: HarnessRunner
     prompts: PromptClient
     context: ContextConfig = field(default_factory=ContextConfig.from_env)
     discord: DiscordClient | None = None

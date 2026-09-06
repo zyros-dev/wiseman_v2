@@ -14,7 +14,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.clients.client_interfaces import ClientMode, ClientSettings
-from app.clients.mock_clients import MockRunner, mock_container
+from app.clients.mock_clients import MockHarnessRunner, mock_container
 from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
@@ -189,7 +189,7 @@ async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
     async with await WorkflowEnvironment.start_time_skipping() as env:
         clients = mock_container(temporal=_TemporalBoundary(env.client))
-        runner = cast("MockRunner", clients.runner)
+        runner = cast("MockHarnessRunner", clients.runner)
         activities = TurnActivities(Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord)), env.client)
         async with Worker(
             env.client,

@@ -36,7 +36,7 @@ def _payload(thread: str, user: str, workspace: str, prompt: str = "") -> dict[s
     }
 
 
-class HttpRunner:
+class HttpHarnessRunner:
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 

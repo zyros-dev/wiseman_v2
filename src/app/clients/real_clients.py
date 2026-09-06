@@ -8,7 +8,7 @@ from app.clients.discord_client import RealDiscord
 from app.clients.mock_clients import mock_container
 from app.clients.provider import RealOpenRouter
 from app.phoenix import Phoenix, PromptHub
-from app.runner import HttpRunner
+from app.runner import HttpHarnessRunner
 from app.temporal_runtime import TemporalRuntime
 
 
@@ -19,6 +19,6 @@ def build_clients(mode: ClientMode, settings: ClientSettings) -> ClientContainer
     if not all(required):
         raise ValueError("real mode requires Discord, Temporal, runner and Phoenix configuration")
     phoenix = Phoenix(settings.phoenix_endpoint, settings.phoenix_key, settings.phoenix_project, os.getenv("WISEMAN_AUDIT_DIR"))
-    prompts, runner = PromptHub(settings.prompt_hub_url, settings.phoenix_key), HttpRunner(settings.runner_url, settings.runner_token)  # fmt: skip
+    prompts, runner = PromptHub(settings.prompt_hub_url, settings.phoenix_key), HttpHarnessRunner(settings.runner_url, settings.runner_token)  # fmt: skip
     container = ClientContainer(ClientMode.REAL, RealDiscord(), TemporalRuntime(settings.temporal_address, settings.temporal_queue), phoenix, prompts, runner, RealOpenRouter(settings, prompts), settings)  # noqa: E501 # fmt: skip
     return ClientContainer.install(container)

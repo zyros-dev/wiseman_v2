@@ -93,7 +93,7 @@ class PromptClient(Protocol):
     async def source(self, kind: str) -> str: ...
 
 
-class RunnerClient(Protocol):
+class HarnessRunner(Protocol):
     async def acquire(self, user: str, workspace: str) -> None: ...
 
     async def release(self, user: str, workspace: str) -> None: ...
@@ -129,7 +129,7 @@ class ClientContainer:
     temporal: TemporalClient
     phoenix: PhoenixClient
     prompts: PromptClient
-    runner: RunnerClient
+    runner: HarnessRunner
     provider: OpenRouter
     settings: ClientSettings = field(default_factory=ClientSettings)
 
