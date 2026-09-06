@@ -272,7 +272,18 @@ class GraphState:
             self.wiseman.settled_questions.add(question)
             if self.wiseman.active_question == question:
                 self.wiseman.active_question = None
+                self.handoff_pending = False
             self.wiseman.turns += 1
+        if self.vertex in {
+            Vertex.PREPARING,
+            Vertex.RUNNING,
+            Vertex.RECOVERING,
+            Vertex.CANCELLING,
+            Vertex.DELIVERING,
+            Vertex.OUTCOME_UNKNOWN,
+            Vertex.ERROR,
+        } and self.wiseman.active_question is None and self.wiseman.pending_questions:
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
 
     def reconcile_session(self, session_id: str | None) -> None:
         if self.wiseman.session_id is None and session_id is not None:

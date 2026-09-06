@@ -94,6 +94,15 @@ class GraphRunner(MockHarnessRunner):
         gates[0].set()
         self._record(f"release-message {message_id}")
 
+    def release_message_attempt(self, message_id: str) -> bool:
+        gates = self._message_gates.get(message_id)
+        if gates is None:
+            return False
+        self.release_message(message_id)
+        gates[1].set()
+        self._record(f"release-message-attempt {message_id}")
+        return True
+
     def release_attempt(self, message_id: str) -> bool:
         self._record(f"release-attempt message={message_id}")
         released = False

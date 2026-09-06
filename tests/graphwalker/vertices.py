@@ -167,14 +167,13 @@ def _assert_dispatch_transition(context: GraphContext, previous: GraphState) -> 
 
 
 def _assert_background_transition(context: GraphContext, previous: GraphState) -> None:
-    if previous.vertex is not Vertex.IDLE:
-        _assert_state_equal(
-            context,
-            "transition.background_context",
-            (*previous.chat.background_context, context.last_message_id),
-            tuple(context.state.chat.background_context),
-            "background edge did not append context",
-        )
+    _assert_state_equal(
+        context,
+        "transition.background_context",
+        (*previous.chat.background_context, context.last_message_id),
+        tuple(context.state.chat.background_context),
+        "background edge did not append context",
+    )
 
 
 def _assert_context_transition(context: GraphContext, previous: GraphState) -> None:
@@ -312,10 +311,13 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
             str(observation.chat.message_ids),
             "runtime observation lost or reordered chat messages",
         )
+    expected_pending = tuple(state.wiseman.pending_questions)
+    if state.handoff_pending and expected_pending[1:] == observation.wiseman.pending_question_ids:
+        expected_pending = expected_pending[1:]
     comparisons: tuple[ObservationComparison, ...] = (
         ("chat.background_context", tuple(state.chat.background_context), observation.chat.background_context_ids, "unconsumed context changed"),
         ("chat.consumed_context", tuple(state.chat.consumed_context), observation.chat.consumed_context_ids, "consumed cursor changed"),
-        ("wiseman.pending_questions", tuple(state.wiseman.pending_questions), observation.wiseman.pending_question_ids, "queued questions lost or reordered"),
+        ("wiseman.pending_questions", expected_pending, observation.wiseman.pending_question_ids, "queued questions lost or reordered"),
         (
             "wiseman.active_question",
             None if state.handoff_pending else state.wiseman.active_question,

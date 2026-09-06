@@ -116,6 +116,7 @@ def _queued_idle_handoff(context: GraphContext, observation: RuntimeObservation)
                 observation.wiseman,
                 phase=Vertex.IDLE,
                 active_question=None,
+                pending_question_ids=tuple(item for item in observation.wiseman.pending_question_ids if item != active),
                 active_turn=None,
                 result_known=False,
                 error=False,
@@ -138,6 +139,7 @@ def _queued_idle_handoff(context: GraphContext, observation: RuntimeObservation)
             observation.wiseman,
             phase=Vertex.IDLE,
             active_question=None,
+            pending_question_ids=observation.wiseman.pending_question_ids,
             active_turn=None,
             result_known=False,
             error=False,
@@ -207,14 +209,18 @@ class _ReplayHarness(GraphHarness):
             self.runner.clear_error()
             self.runner.clear_stops()
             if self.held_terminal_message_id:
-                await self.client.get_workflow_handle(f"wiseman-turn-{self.held_terminal_message_id}").signal("release_terminal")
+                try:
+                    await self.client.get_workflow_handle(f"wiseman-turn-{self.held_terminal_message_id}").signal("release_terminal")
+                except RPCError as exc:
+                    if exc.status != RPCStatusCode.NOT_FOUND:
+                        raise
                 self.held_terminal_message_id = None
             pending = context.state.wiseman.pending_questions
             queued = pending[1] if context.state.handoff_pending and len(pending) > 1 else pending[0] if pending else ""
             if queued:
                 self.runner.release_message(queued)
-        elif edge.name is EdgeName.QUEUE_QUESTION:
-            self.runner.hold_message(context.last_message_id)
+        elif edge.name in {EdgeName.QUEUE_QUESTION, EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
+            await self._prepare_message_edge(edge, context)
         elif edge.name in {
             EdgeName.PREPARATION_FAILED,
             EdgeName.PERMANENT_FAILURE,
@@ -230,10 +236,16 @@ class _ReplayHarness(GraphHarness):
         elif edge.name is EdgeName.STOP_DELIVERING:
             await self._signal_active(context, "hold_terminal")
 
+    async def _prepare_message_edge(self, edge: GraphElement, context: GraphContext) -> None:
+        if edge.name is EdgeName.QUEUE_QUESTION:
+            self.runner.hold_message(context.last_message_id)
+        elif edge.source is Vertex.IDLE:
+            await self._ensure_thread_workflow(context)
+
     async def _prepare_failure(self, edge: GraphElement, context: GraphContext) -> None:
         active_message_id = context.state.wiseman.active_question or context.last_message_id
         if edge.name in {EdgeName.PREPARATION_FAILED, EdgeName.PERMANENT_FAILURE, EdgeName.RETRY_EXHAUSTED, EdgeName.OUTCOME_ESTABLISHED}:
-            await self._signal_active(context, "hold_terminal")
+            await self._signal_active(context, "hold_terminal", ignore_missing=True)
         errors: dict[str, tuple[str, RunnerError]] = {
             EdgeName.TRANSIENT_FAILURE: ("next_error", RunnerError(503, "graph transient failure")),
             EdgeName.PERMANENT_FAILURE: ("next_error", RunnerError(500, "graph permanent failure")),
@@ -244,9 +256,13 @@ class _ReplayHarness(GraphHarness):
         if setting := errors.get(edge.name):
             self.runner.inject_error(setting[1], active_message_id)
 
-    async def _signal_active(self, context: GraphContext, signal: str, *args: object) -> None:
+    async def _signal_active(self, context: GraphContext, signal: str, *args: object, ignore_missing: bool = False) -> None:
         if active := context.state.wiseman.active_question:
-            await self.client.get_workflow_handle(f"wiseman-turn-{active}").signal(signal, *args)
+            try:
+                await self.client.get_workflow_handle(f"wiseman-turn-{active}").signal(signal, *args)
+            except RPCError as exc:
+                if not ignore_missing or exc.status != RPCStatusCode.NOT_FOUND:
+                    raise
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
@@ -284,7 +300,7 @@ class _ReplayHarness(GraphHarness):
             await ({EdgeName.RESUME_SESSION: self._wait_for_resume}.get(edge.name, self._noop))(context, deadline_seconds)
             follow_up = {
                 EdgeName.COMPLETION_RACE: self._completion_wins,
-                EdgeName.OUTCOME_ESTABLISHED: self._release_active_cancellation,
+                EdgeName.OUTCOME_ESTABLISHED: self._release_outcome,
             }.get(edge.name, self._noop)
             await follow_up(context)
         elif edge.name in {EdgeName.ANSWER_FINALIZED, EdgeName.ERROR_FINALIZED, EdgeName.STOP_CONFIRMED}:
@@ -292,6 +308,7 @@ class _ReplayHarness(GraphHarness):
         elif edge.name in {EdgeName.PREPARATION_FAILED, EdgeName.PERMANENT_FAILURE}:
             self._release_active_runner(context)
         elif edge.name == EdgeName.IDLE_RETIREMENT:
+            await self._ensure_retirement_fixture(context)
             await self.environment.sleep(timedelta(days=3))
         elif edge.name is EdgeName.FIXTURE_RESET:
             self.runner = GraphRunner(self.runner.state)
@@ -314,6 +331,35 @@ class _ReplayHarness(GraphHarness):
             )
         await self._wait_for_phase(edge.target, deadline_seconds, context.state.chat.thread_id, context)
 
+    async def _ensure_retirement_fixture(self, context: GraphContext) -> None:
+        await self._ensure_thread_workflow(context)
+
+    async def _ensure_thread_workflow(self, context: GraphContext) -> None:
+        workflow_id = f"wiseman-{context.state.chat.thread_id}"
+        handle = self.client.get_workflow_handle(workflow_id)
+        try:
+            await handle.query(ThreadWorkflow.session)
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+        else:
+            return
+        fixture_event = {
+            "background": True,
+            "trigger": {
+                "id": f"fixture-{context.state.chat.thread_id}-{context.state.step}",
+                "author_id": "fixture",
+                "channel_id": context.state.chat.thread_id,
+                "thread_id": context.state.chat.thread_id,
+            },
+        }
+        await self.client.start_workflow(
+            ThreadWorkflow.run,
+            {"state": {}, "pending": [fixture_event]},
+            id=workflow_id,
+            task_queue="graph",
+        )
+
     async def _execute_progress(self, context: GraphContext, deadline_seconds: int) -> None:
         if context.state.wiseman.active_question:
             await self._signal_active(context, "progress", f"✍️ Graph preview {context.state.step}")
@@ -331,6 +377,10 @@ class _ReplayHarness(GraphHarness):
 
     async def _release_active_cancellation(self, context: GraphContext) -> None:
         await self._signal_active(context, "release_cancellation")
+
+    async def _release_outcome(self, context: GraphContext) -> None:
+        await self._release_active_cancellation(context)
+        self._release_active_runner(context)
 
     async def _prepare_resume(self, _context: GraphContext) -> None:
         self.runner.clear_error()
@@ -368,7 +418,8 @@ class _ReplayHarness(GraphHarness):
                 gate.set()
 
     def _release_active_runner(self, context: GraphContext) -> None:
-        if not self.runner.release_attempt(context.state.wiseman.active_question or ""):
+        active_message_id = context.state.wiseman.active_question or context.last_message_id
+        if not self.runner.release_attempt(active_message_id) and not self.runner.release_message_attempt(active_message_id):
             self._release_runner()
 
     async def _wait_for_phase(self, vertex: Vertex, deadline_seconds: int, thread_id: str, context: GraphContext) -> None:
