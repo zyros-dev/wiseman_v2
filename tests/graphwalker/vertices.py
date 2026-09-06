@@ -3,39 +3,14 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-if TYPE_CHECKING:
     from tests.graphwalker.graph_utils import GraphHarness, ModelState, StateFunction
 
-
-class Vertex(StrEnum):
-    IDLE = "idle"
-    PREPARING = "preparing"
-    RUNNING = "running"
-    RECOVERING = "recovering"
-    CANCELLING = "cancelling"
-    DELIVERING = "delivering"
-    OUTCOME_UNKNOWN = "outcome-unknown"
-    ERROR = "error"
-    RETIRED = "retired"
-
-
-STATE_TIMEOUTS: Mapping[Vertex, int] = {
-    Vertex.IDLE: 10,
-    Vertex.PREPARING: 60,
-    Vertex.RUNNING: 60,
-    Vertex.RECOVERING: 60,
-    Vertex.CANCELLING: 30,
-    Vertex.DELIVERING: 60,
-    Vertex.OUTCOME_UNKNOWN: 60,
-    Vertex.ERROR: 30,
-    Vertex.RETIRED: 10,
-}
+from tests.graphwalker.model import STATE_TIMEOUTS, Vertex
 
 
 async def idle(harness: GraphHarness, state: ModelState) -> None:

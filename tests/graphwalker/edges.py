@@ -3,107 +3,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tests.graphwalker.graph_utils import EdgeFunction, GraphHarness, ModelState, apply_edge
-from tests.graphwalker.vertices import Vertex
+from tests.graphwalker.model import EDGE_TIMEOUTS, EDGES_BY_NAME, EdgeName
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-
-class EdgeName(StrEnum):
-    ADMIT_QUESTION = "admit-question"
-    BACKGROUND_CHATTER = "background-chatter"
-    DUPLICATE_QUESTION = "duplicate-question"
-    IDLE_STOP = "idle-stop"
-    CONTEXT_READY = "context-ready"
-    PREPARATION_FAILED = "preparation-failed"
-    STOP_PREPARING = "stop-preparing"
-    RUNNING_BACKGROUND_CHATTER = "running-background-chatter"
-    STEER_ACTIVE_TURN = "steer-active-turn"
-    REPEAT_STEER = "repeat-steer"
-    QUEUE_QUESTION = "queue-question"
-    PROGRESS_PREVIEW = "progress-preview"
-    WORKER_RESTART_RUNNING = "worker-restart-running"
-    INFERENCE_COMPLETE = "inference-complete"
-    TRANSIENT_FAILURE = "transient-failure"
-    PERMANENT_FAILURE = "permanent-failure"
-    EXECUTION_UNCERTAIN = "execution-uncertain"
-    RESUME_SESSION = "resume-session"
-    RETRY_EXHAUSTED = "retry-exhausted"
-    STOP_RUNNING = "stop-running"
-    STOP_RECOVERING = "stop-recovering"
-    STOP_DELIVERING = "stop-delivering"
-    DUPLICATE_STOP = "duplicate-stop"
-    WORKER_RESTART_CANCELLING = "worker-restart-cancelling"
-    COMPLETION_RACE = "completion-race"
-    STOP_CONFIRMED = "stop-confirmed"
-    CANCELLATION_UNKNOWN = "cancellation-unknown"
-    DELIVERY_RETRY = "delivery-retry"
-    WORKER_RESTART_DELIVERING = "worker-restart-delivering"
-    ANSWER_FINALIZED = "answer-finalized"
-    WORKER_RESTART_ERROR = "worker-restart-error"
-    ERROR_FINALIZED = "error-finalized"
-    OUTCOME_ESTABLISHED = "outcome-established"
-    IDLE_RETIREMENT = "idle-retirement"
-    FIXTURE_RESET = "fixture-reset"
-
-
-@dataclass(frozen=True, slots=True)
-class Edge:
-    name: EdgeName
-    source: Vertex
-    target: Vertex
-
-    @property
-    def id(self) -> str:
-        return f"e-{self.name}"
-
-
-EDGES: tuple[tuple[str, Vertex, Vertex], ...] = (
-    (EdgeName.ADMIT_QUESTION, Vertex.IDLE, Vertex.PREPARING),
-    (EdgeName.BACKGROUND_CHATTER, Vertex.IDLE, Vertex.IDLE),
-    (EdgeName.DUPLICATE_QUESTION, Vertex.IDLE, Vertex.IDLE),
-    (EdgeName.IDLE_STOP, Vertex.IDLE, Vertex.IDLE),
-    (EdgeName.CONTEXT_READY, Vertex.PREPARING, Vertex.RUNNING),
-    (EdgeName.PREPARATION_FAILED, Vertex.PREPARING, Vertex.ERROR),
-    (EdgeName.STOP_PREPARING, Vertex.PREPARING, Vertex.CANCELLING),
-    (EdgeName.RUNNING_BACKGROUND_CHATTER, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.STEER_ACTIVE_TURN, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.REPEAT_STEER, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.QUEUE_QUESTION, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.PROGRESS_PREVIEW, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.WORKER_RESTART_RUNNING, Vertex.RUNNING, Vertex.RUNNING),
-    (EdgeName.INFERENCE_COMPLETE, Vertex.RUNNING, Vertex.DELIVERING),
-    (EdgeName.TRANSIENT_FAILURE, Vertex.RUNNING, Vertex.RECOVERING),
-    (EdgeName.PERMANENT_FAILURE, Vertex.RUNNING, Vertex.ERROR),
-    (EdgeName.EXECUTION_UNCERTAIN, Vertex.RUNNING, Vertex.OUTCOME_UNKNOWN),
-    (EdgeName.RESUME_SESSION, Vertex.RECOVERING, Vertex.RUNNING),
-    (EdgeName.RETRY_EXHAUSTED, Vertex.RECOVERING, Vertex.ERROR),
-    (EdgeName.STOP_RUNNING, Vertex.RUNNING, Vertex.CANCELLING),
-    (EdgeName.STOP_RECOVERING, Vertex.RECOVERING, Vertex.CANCELLING),
-    (EdgeName.STOP_DELIVERING, Vertex.DELIVERING, Vertex.CANCELLING),
-    (EdgeName.DUPLICATE_STOP, Vertex.CANCELLING, Vertex.CANCELLING),
-    (EdgeName.WORKER_RESTART_CANCELLING, Vertex.CANCELLING, Vertex.CANCELLING),
-    (EdgeName.COMPLETION_RACE, Vertex.CANCELLING, Vertex.DELIVERING),
-    (EdgeName.STOP_CONFIRMED, Vertex.CANCELLING, Vertex.IDLE),
-    (EdgeName.CANCELLATION_UNKNOWN, Vertex.CANCELLING, Vertex.OUTCOME_UNKNOWN),
-    (EdgeName.DELIVERY_RETRY, Vertex.DELIVERING, Vertex.DELIVERING),
-    (EdgeName.WORKER_RESTART_DELIVERING, Vertex.DELIVERING, Vertex.DELIVERING),
-    (EdgeName.ANSWER_FINALIZED, Vertex.DELIVERING, Vertex.IDLE),
-    (EdgeName.WORKER_RESTART_ERROR, Vertex.ERROR, Vertex.ERROR),
-    (EdgeName.ERROR_FINALIZED, Vertex.ERROR, Vertex.IDLE),
-    (EdgeName.OUTCOME_ESTABLISHED, Vertex.OUTCOME_UNKNOWN, Vertex.ERROR),
-    (EdgeName.IDLE_RETIREMENT, Vertex.IDLE, Vertex.RETIRED),
-    (EdgeName.FIXTURE_RESET, Vertex.RETIRED, Vertex.IDLE),
-)
-
-GRAPH_EDGES: tuple[Edge, ...] = tuple(Edge(EdgeName(name), source, target) for name, source, target in EDGES)
-EDGES_BY_NAME: Mapping[str, Edge] = {edge.name: edge for edge in GRAPH_EDGES}
-EDGE_TIMEOUTS: Mapping[EdgeName, int] = {edge.name: 60 for edge in GRAPH_EDGES}
 
 
 async def _edge(harness: GraphHarness, state: ModelState, edge: EdgeName, message_id: str = "") -> None:

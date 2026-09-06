@@ -5,40 +5,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypedDict
+from typing import Protocol
 
-from tests.graphwalker.vertices import Vertex
-
-GraphValue = str | int | bool
-
-
-class GraphVertex(TypedDict):
-    id: str
-    name: str
-    properties: dict[str, GraphValue]
-
-
-class GraphEdge(TypedDict):
-    id: str
-    name: str
-    sourceVertexId: str
-    targetVertexId: str
-    properties: dict[str, GraphValue]
-
-
-class GraphDocumentModel(TypedDict):
-    id: str
-    name: str
-    generator: str
-    startElementId: str
-    properties: dict[str, GraphValue]
-    vertices: list[GraphVertex]
-    edges: list[GraphEdge]
-
-
-class GraphDocument(TypedDict):
-    name: str
-    models: list[GraphDocumentModel]
+from tests.graphwalker.model import Vertex
 
 
 @dataclass(slots=True)

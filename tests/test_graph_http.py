@@ -18,9 +18,10 @@ from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
-from tests.graphwalker.edges import EDGE_FUNCTIONS, EDGES, EDGES_BY_NAME, EdgeName
+from tests.graphwalker.edges import EDGE_FUNCTIONS
 from tests.graphwalker.graph_utils import GraphElement, GraphHarness, ModelState
-from tests.graphwalker.vertices import STATE_FUNCTIONS, Vertex
+from tests.graphwalker.model import EDGES, EDGES_BY_NAME, EdgeName, Vertex
+from tests.graphwalker.vertices import STATE_FUNCTIONS
 
 ACTION_EDGES = {
     EdgeName.BACKGROUND_CHATTER,
