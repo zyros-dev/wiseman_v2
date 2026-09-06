@@ -84,6 +84,8 @@ class TemporalClient(Protocol):
 
     async def stop(self, event: Event) -> bool: ...
 
+    async def snapshot(self, thread_id: str) -> JsonObject: ...
+
 
 class PhoenixClient(Protocol):
     records: list[dict[str, object]]

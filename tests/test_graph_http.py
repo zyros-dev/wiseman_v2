@@ -26,13 +26,28 @@ from tests.graphwalker.model import (
     EDGES,
     EDGES_BY_NAME,
     EdgeName,
-    ObservedChatState,
-    ObservedWisemanState,
     RuntimeObservation,
     Vertex,
 )
+from tests.graphwalker.runtime_observer import RuntimeObserver
 from tests.graphwalker.vertices import STATE_FUNCTIONS
-from tests.graphwalker.wiseman_client import ACTION_EDGES, WisemanClient
+from tests.graphwalker.wiseman_client import WisemanClient, WisemanResponse
+
+ACTION_EDGES = {
+    EdgeName.BACKGROUND_CHATTER,
+    EdgeName.RUNNING_BACKGROUND_CHATTER,
+    EdgeName.DUPLICATE_QUESTION,
+    EdgeName.IDLE_STOP,
+    EdgeName.STEER_ACTIVE_TURN,
+    EdgeName.REPEAT_STEER,
+    EdgeName.STOP_PREPARING,
+    EdgeName.STOP_RUNNING,
+    EdgeName.STOP_RECOVERING,
+    EdgeName.STOP_DELIVERING,
+    EdgeName.DUPLICATE_STOP,
+    EdgeName.ADMIT_QUESTION,
+    EdgeName.QUEUE_QUESTION,
+}
 
 if TYPE_CHECKING:
     from app.models import Event
@@ -44,47 +59,34 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
 
 
 class _ReplayHarness(GraphHarness):
-    def __init__(self) -> None:
+    def __init__(self, observer: RuntimeObserver) -> None:
+        self.observer = observer
         self.response: httpx.Response | None = None
 
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
         assert context.state.vertex is vertex
         assert deadline_seconds > 0
-        state = context.state
-        active_question = state.wiseman.active_question
-        terminal = vertex in {Vertex.DELIVERING, Vertex.ERROR}
-        return RuntimeObservation(
-            chat=ObservedChatState(
-                message_ids=tuple(message.id for message in state.chat.messages),
-                background_context_ids=tuple(state.chat.background_context),
-                consumed_context_ids=tuple(state.chat.consumed_context),
-                steering_ids=tuple(state.chat.steering_messages),
-                stop_command_ids=tuple(state.chat.stop_commands),
-                answer_message_ids=(f"answer-{active_question}",) if vertex is Vertex.DELIVERING and active_question else (),
-                progress_message_ids=(f"progress-{active_question}",) if vertex in {Vertex.PREPARING, Vertex.RUNNING} and active_question else (),
-                progress_edit_count=1 if vertex in {Vertex.PREPARING, Vertex.RUNNING} and active_question else 0,
-                answer_edit_count=1 if vertex is Vertex.DELIVERING and active_question else 0,
-                typing=vertex is Vertex.RUNNING,
-                archived=vertex is Vertex.RETIRED,
-            ),
-            wiseman=ObservedWisemanState(
-                phase=vertex,
-                active_question=active_question,
-                pending_question_ids=tuple(state.wiseman.pending_questions),
-                session_id=state.wiseman.session_id,
-                turn=state.wiseman.turns,
-                active_turn=state.wiseman.turns + 1 if active_question else None,
-                result_known=terminal,
-                error=vertex is Vertex.ERROR,
-                stop_target_question_id=active_question if vertex is Vertex.CANCELLING else None,
-            ),
-        )
+        return await self.observer.observe(context.state.chat.thread_id)
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name in ACTION_EDGES:
-            result = await context.wiseman.send(EdgeName(edge.name), context.message_id, thread_id=context.state.chat.thread_id)
+            result = await _execute_wiseman_edge(context.wiseman, EdgeName(edge.name), context.message_id, context.state.chat.thread_id)
             self.response = httpx.Response(result.status_code, json=result.body)
+
+
+async def _execute_wiseman_edge(client: WisemanClient, edge: EdgeName, message_id: str, thread_id: str) -> WisemanResponse:
+    if edge is EdgeName.ADMIT_QUESTION:
+        return await client.ask(message_id, thread_id=None)
+    if edge is EdgeName.QUEUE_QUESTION:
+        return await client.ask(message_id, thread_id=thread_id)
+    if edge is EdgeName.DUPLICATE_QUESTION:
+        return await client.ask(message_id, thread_id=None, duplicate=True)
+    if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
+        return await client.background(message_id, thread_id=thread_id)
+    if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
+        return await client.steer(message_id, thread_id=thread_id)
+    return await client.stop(message_id, thread_id=thread_id)
 
 
 class _TemporalBoundary:
@@ -121,6 +123,14 @@ class _TemporalBoundary:
 
     async def touch(self, event: Event) -> None:
         return None
+
+    async def snapshot(self, thread_id: str) -> JsonObject:
+        session = cast("JsonObject", await self.client.get_workflow_handle(f"wiseman-{thread_id}").query(ThreadWorkflow.session))
+        if message_id := session.get("active_message"):
+            session["active_turn_snapshot"] = cast(
+                "JsonObject", await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").query(TurnWorkflow.snapshot)
+            )
+        return session
 
 
 async def _child_result(client, message_id: str) -> dict[str, object]:
@@ -193,7 +203,7 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
         wiseman = WisemanClient(client)
-        harness = _ReplayHarness()
+        harness = _ReplayHarness(RuntimeObserver(clients))
         context = GraphContext(harness, clients, wiseman)
         for index in range(0, len(elements) - 2, 2):
             source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])

@@ -241,19 +241,43 @@ class ThreadWorkflow:
     @workflow.signal
     async def submit(self, event: dict) -> None:
         message_id = _object_map(event.get("trigger")).get("id")
-        known = [self.active_message, *_sequence(self.state.get("processed"))]
+        known = [self.active_message, *_sequence(self.state.get("processed")), *_sequence(self.state.get("message_ids"))]
         known.extend(_object_map(item.get("trigger")).get("id") for item in self.pending)
         if message_id and message_id in known:
             return
+        if message_id:
+            self._append_state_id("message_ids", str(message_id))
         self.pending.append(dict(event))
 
     @workflow.signal
     async def touch(self, event: dict) -> None:
+        message_id = str(_object_map(event.get("trigger")).get("id", ""))
+        if message_id and message_id not in _sequence(self.state.get("message_ids")):
+            self._append_state_id("message_ids", message_id)
+            self._append_state_id("background_context_ids", message_id)
         self.pending.append({"background": True, "event": event})
+
+    @workflow.signal
+    async def record_control(self, event: dict) -> None:
+        message_id = str(_object_map(event.get("trigger")).get("id", ""))
+        target = "stop_command_ids" if event.get("kind") == "stop" else "steering_ids"
+        if message_id:
+            self._append_state_id(target, message_id)
+
+    def _append_state_id(self, name: str, message_id: str) -> None:
+        values = self.state.setdefault(name, [])
+        if isinstance(values, list) and message_id not in values:
+            values.append(message_id)
 
     @workflow.query
     def session(self) -> dict:
-        return {**self.state, "active_message": self.active_message, "active_timestamp": self.active_timestamp}
+        pending = tuple(str(_object_map(item.get("trigger")).get("id", "")) for item in self.pending if not _object_map(item).get("background"))
+        return {
+            **self.state,
+            "active_message": self.active_message,
+            "active_timestamp": self.active_timestamp,
+            "pending_message_ids": pending,
+        }
 
     @workflow.run
     async def run(self, first: dict) -> dict:
@@ -261,6 +285,9 @@ class ThreadWorkflow:
         self.state = _object_map(first.get("state"))
         self.pending.extend(_object_map(item) for item in _sequence(first.get("pending")))
         if event := _object_map(first.get("event")):
+            message_id = str(_object_map(event.get("trigger")).get("id", ""))
+            if message_id:
+                self._append_state_id("message_ids", message_id)
             self.pending.insert(0, event)
         self.result, handled = {"state": self.state}, 0
         while True:
@@ -278,6 +305,11 @@ class ThreadWorkflow:
             event = self.pending.pop(0)
             if _object_map(event).get("background"):
                 continue
+            self.state["consumed_context_ids"] = [
+                *_string_sequence(self.state.get("consumed_context_ids")),
+                *_string_sequence(self.state.get("background_context_ids")),
+            ]
+            self.state["background_context_ids"] = []
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id and message_id in _sequence(self.state.get("processed", [])):
                 continue
@@ -380,21 +412,36 @@ class TemporalRuntime:
             stale = bool(event.trigger.timestamp and event.trigger.timestamp < str(state.get("active_timestamp", "")))
             if not (message_id := state.get("active_message")) or stale:
                 return False
-            return bool(
+            accepted = bool(
                 await client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update(
                     name,
                     event.model_dump(mode="json") | {"anchor_id": str(message_id)},
                     id=event.trigger.id,
                 )
             )
+            if accepted:
+                await client.get_workflow_handle(f"wiseman-{thread_id}").signal(ThreadWorkflow.record_control, event.model_dump(mode="json"))
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:
                 return False
             raise
+        else:
+            return accepted
 
     async def steer(self, event: Event) -> bool: return await self._update("steer", event)  # fmt: skip
 
     async def stop(self, event: Event) -> bool: return await self._update("stop", event)  # fmt: skip
+
+    async def snapshot(self, thread_id: str) -> JsonObject:
+        if self.client is None:
+            raise RuntimeError("Temporal is not connected")
+        client = cast("Client", self.client)
+        session = await client.get_workflow_handle(f"wiseman-{thread_id}").query(ThreadWorkflow.session)
+        snapshot: JsonObject = cast("JsonObject", session)
+        if message_id := snapshot.get("active_message"):
+            child = await client.get_workflow_handle(f"wiseman-turn-{message_id}").query(TurnWorkflow.snapshot)
+            snapshot["active_turn_snapshot"] = cast("JsonObject", child)
+        return snapshot
 
     async def close(self) -> None:
         if self.worker_task is not None:
@@ -432,6 +479,10 @@ def _merge_progress(existing: list[str], updates: list[str]) -> list[str]:
 
 def _sequence(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else []
+
+
+def _string_sequence(value: object) -> list[str]:
+    return [item for item in _sequence(value) if isinstance(item, str)]
 
 
 def _error_message(error: BaseException) -> str:

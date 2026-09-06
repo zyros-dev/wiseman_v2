@@ -6,30 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from tests.graphwalker.model import EdgeName
-
 if TYPE_CHECKING:
     import httpx
 
     from app.types import JsonObject
-
-ACTION_EDGES = frozenset(
-    {
-        EdgeName.BACKGROUND_CHATTER,
-        EdgeName.RUNNING_BACKGROUND_CHATTER,
-        EdgeName.DUPLICATE_QUESTION,
-        EdgeName.IDLE_STOP,
-        EdgeName.STEER_ACTIVE_TURN,
-        EdgeName.REPEAT_STEER,
-        EdgeName.STOP_PREPARING,
-        EdgeName.STOP_RUNNING,
-        EdgeName.STOP_RECOVERING,
-        EdgeName.STOP_DELIVERING,
-        EdgeName.DUPLICATE_STOP,
-        EdgeName.ADMIT_QUESTION,
-        EdgeName.QUEUE_QUESTION,
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,34 +22,30 @@ class WisemanClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self.client = client
 
-    async def send(self, edge: EdgeName, message_id: str, *, thread_id: str) -> WisemanResponse:
-        response = await self.client.post("/v1/replay/discord", json=self._payload(edge, message_id, thread_id))
-        if edge is EdgeName.DUPLICATE_QUESTION:
-            response = await self.client.post("/v1/replay/discord", json=self._payload(edge, message_id, thread_id))
+    async def ask(self, message_id: str, *, thread_id: str | None, duplicate: bool = False) -> WisemanResponse:
+        response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id))
+        if duplicate:
+            response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id))
         return WisemanResponse(response.status_code, _json_object(response))
 
-    def _payload(self, edge: EdgeName, message_id: str, thread_id: str) -> JsonObject:
-        if edge is EdgeName.IDLE_STOP or edge in {
-            EdgeName.STOP_PREPARING,
-            EdgeName.STOP_RUNNING,
-            EdgeName.STOP_RECOVERING,
-            EdgeName.STOP_DELIVERING,
-            EdgeName.DUPLICATE_STOP,
-        }:
-            return {"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread_id), "kind": "stop"}
-        if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
-            return {"t": "MESSAGE_CREATE", "d": _message(message_id, "background", thread_id, mention=False)}
-        if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
-            return {
-                "t": "MESSAGE_CREATE",
-                "d": _message(message_id, "steer", thread_id, reply_to="answer"),
-                "kind": "steer",
-            }
-        return {
-            "t": "MESSAGE_CREATE",
-            "d": _message(message_id, "question", None if edge is EdgeName.ADMIT_QUESTION else thread_id),
-            "kind": "startup" if edge is EdgeName.ADMIT_QUESTION else "followup",
-        }
+    async def background(self, message_id: str, *, thread_id: str) -> WisemanResponse:
+        return await self._post(_message(message_id, "background", thread_id, mention=False))
+
+    async def steer(self, message_id: str, *, thread_id: str) -> WisemanResponse:
+        return await self._post(_message(message_id, "steer", thread_id, reply_to="answer"), kind="steer")
+
+    async def stop(self, message_id: str, *, thread_id: str) -> WisemanResponse:
+        return await self._post(_message(message_id, "/stop", thread_id), kind="stop")
+
+    async def _post(self, message: JsonObject, *, kind: str | None = None) -> WisemanResponse:
+        payload: JsonObject = {"t": "MESSAGE_CREATE", "d": message}
+        if kind is not None:
+            payload["kind"] = kind
+        response = await self.client.post("/v1/replay/discord", json=payload)
+        return WisemanResponse(response.status_code, _json_object(response))
+
+    def _question_payload(self, message_id: str, thread_id: str | None) -> JsonObject:
+        return {"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread_id), "kind": "startup" if thread_id is None else "followup"}
 
 
 def _message(
