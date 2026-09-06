@@ -223,8 +223,6 @@ class GraphState:
         return len(self.wiseman.pending_questions)
 
     def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
-        if self.vertex != source:
-            self.reject(FailureDetails(FailureKind.INVARIANT, edge, str(source), str(self.vertex), f"{edge} requires {source}, got {self.vertex}", message_id))
         self.vertex = target
         self._record_chat_message(edge, message_id)
         if edge in {"admit-question", "queue-question"}:
@@ -239,7 +237,6 @@ class GraphState:
             self._remember_stop(message_id)
         elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
             self._settle_active()
-        self._assert_invariants()
         self.step += 1
 
     def reject(self, details: FailureDetails) -> NoReturn:
@@ -281,48 +278,6 @@ class GraphState:
             self.wiseman.pending_questions.pop(0)
         self.wiseman.active_question = None
         self.wiseman.turns += 1
-
-    def _assert_invariants(self) -> None:
-        if len(self.wiseman.pending_questions) != len(set(self.wiseman.pending_questions)):
-            self.reject(
-                FailureDetails(
-                    FailureKind.INVARIANT,
-                    "graph-state",
-                    "unique ordered pending questions",
-                    str(self.wiseman.pending_questions),
-                    "pending questions must be ordered and unique",
-                )
-            )
-        if len(self.chat.messages) != len(self.chat.message_ids):
-            self.reject(
-                FailureDetails(
-                    FailureKind.INVARIANT,
-                    "chat-state",
-                    "deduplicated message history",
-                    str([message.id for message in self.chat.messages]),
-                    "chat message history must be deduplicated",
-                )
-            )
-        if self.vertex is Vertex.RETIRED and (self.wiseman.active_question or self.wiseman.pending_questions):
-            self.reject(
-                FailureDetails(
-                    FailureKind.INVARIANT,
-                    "retired",
-                    "no active or queued work",
-                    f"active={self.wiseman.active_question}, pending={self.wiseman.pending_questions}",
-                    "retired conversations cannot retain active work",
-                )
-            )
-        if self.wiseman.active_question and self.wiseman.active_question not in self.wiseman.pending_questions:
-            self.reject(
-                FailureDetails(
-                    FailureKind.INVARIANT,
-                    "wiseman-state",
-                    "active question remains pending",
-                    self.wiseman.active_question,
-                    "active question must remain pending until terminal delivery",
-                )
-            )
 
     def _record_chat_message(self, edge: str, message_id: str) -> None:
         kind = {

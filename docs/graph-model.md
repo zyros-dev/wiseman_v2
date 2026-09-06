@@ -12,6 +12,12 @@ boundaries. The HTTP harness executes those
 actions through `/v1/replay/discord`; it does not call `Engine` or mutate
 Temporal state directly.
 
+`GraphContext` keeps the mutable current `GraphState` and a deep-copied
+`previous_state`. The latter is captured before every edge action. Edges only
+execute the boundary action and apply the deterministic transition; vertices
+validate current invariants and compare both snapshots to prove additions,
+consumption, queue changes, turn settlement, and retained history.
+
 ```mermaid
 flowchart TD
     I["Idle"] -->|admit-question| P["Preparing"]

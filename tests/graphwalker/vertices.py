@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 StateAssertion = Callable[["GraphContext"], None]
 ObservationAssertion = Callable[["GraphContext", RuntimeObservation], None]
-ObservationValue = tuple[str, ...] | str | int | Vertex | None
+ObservationValue = tuple[str, ...] | str | int | bool | Vertex | None
 ObservationComparison = tuple[str, ObservationValue, ObservationValue, str]
 
 
@@ -79,6 +79,10 @@ def _reject_observation(context: GraphContext, location: str, expected: str, obs
     context.state.reject(FailureDetails(FailureKind.OBSERVATION, location, expected, observed, message, context.message_id))
 
 
+def _reject_invariant(context: GraphContext, location: str, expected: str, observed: str, message: str) -> None:
+    context.state.reject(FailureDetails(FailureKind.INVARIANT, location, expected, observed, message, context.message_id))
+
+
 def _assert_subsequence(expected: tuple[str, ...], observed: tuple[str, ...]) -> bool:
     position = 0
     for message_id in observed:
@@ -90,6 +94,105 @@ def _assert_subsequence(expected: tuple[str, ...], observed: tuple[str, ...]) ->
 def _assert_equal(context: GraphContext, location: str, expected: ObservationValue, observed: ObservationValue, message: str) -> None:
     if expected != observed:
         _reject_observation(context, location, str(expected), str(observed), message)
+
+
+def _assert_state_equal(context: GraphContext, location: str, expected: ObservationValue, observed: ObservationValue, message: str) -> None:
+    if expected != observed:
+        _reject_invariant(context, location, str(expected), str(observed), message)
+
+
+def _assert_model_invariants(context: GraphContext) -> None:
+    state = context.state
+    if len(state.wiseman.pending_questions) != len(set(state.wiseman.pending_questions)):
+        _reject_invariant(
+            context, "graph-state", "unique ordered pending questions", str(state.wiseman.pending_questions), "pending questions must be ordered and unique"
+        )
+    if len(state.chat.messages) != len(state.chat.message_ids):
+        _reject_invariant(
+            context, "chat-state", "deduplicated message history", str([message.id for message in state.chat.messages]), "chat history must be deduplicated"
+        )
+    if state.vertex is Vertex.RETIRED and (state.wiseman.active_question or state.wiseman.pending_questions):
+        _reject_invariant(
+            context,
+            "retired",
+            "no active or queued work",
+            f"active={state.wiseman.active_question}, pending={state.wiseman.pending_questions}",
+            "retired conversations cannot retain active work",
+        )
+    if state.wiseman.active_question and state.wiseman.active_question not in state.wiseman.pending_questions:
+        _reject_invariant(
+            context,
+            "wiseman-state",
+            "active question remains pending",
+            state.wiseman.active_question,
+            "active question must remain pending until terminal delivery",
+        )
+
+
+def _assert_transition(context: GraphContext) -> None:
+    previous = context.previous_state
+    if previous is None:
+        return
+    state = context.state
+    _assert_state_equal(context, "transition.vertex", context.last_target, state.vertex, "edge did not reach its declared target")
+    _assert_state_equal(context, "transition.step", previous.step + 1, state.step, "edge did not advance the model step")
+    if context.last_edge == "fixture-reset":
+        return
+    if not {message.id for message in previous.chat.messages}.issubset(state.chat.message_ids):
+        _reject_invariant(context, "transition.messages", "previous messages retained", str(state.chat.message_ids), "edge discarded chat history")
+    if not set(previous.wiseman.seen_questions).issubset(state.wiseman.seen_questions):
+        _reject_invariant(context, "transition.questions", "previous questions retained", str(state.wiseman.seen_questions), "edge discarded question history")
+    if context.last_edge in {"admit-question", "queue-question"}:
+        _assert_state_equal(
+            context,
+            "transition.pending_questions",
+            (*previous.wiseman.pending_questions, context.last_message_id),
+            tuple(state.wiseman.pending_questions),
+            "question edge did not append the new question",
+        )
+    elif context.last_edge in {"background-chatter", "running-background-chatter"}:
+        _assert_state_equal(
+            context,
+            "transition.background_context",
+            (*previous.chat.background_context, context.last_message_id),
+            tuple(state.chat.background_context),
+            "background edge did not append context",
+        )
+    elif context.last_edge in {"context-ready", "resume-session"}:
+        _assert_state_equal(context, "transition.consumed_context", (), tuple(state.chat.background_context), "context-ready retained background context")
+        _assert_state_equal(
+            context,
+            "transition.consumed_context",
+            (*previous.chat.consumed_context, *previous.chat.background_context),
+            tuple(state.chat.consumed_context),
+            "context-ready did not consume background context",
+        )
+    elif context.last_edge in {"steer-active-turn", "repeat-steer"}:
+        _assert_state_equal(
+            context,
+            "transition.steering",
+            (*previous.chat.steering_messages, context.last_message_id),
+            tuple(state.chat.steering_messages),
+            "steering edge did not append the steering message",
+        )
+    elif context.last_edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
+        _assert_state_equal(
+            context,
+            "transition.stop_commands",
+            tuple(sorted((*previous.chat.stop_commands, context.last_message_id))),
+            tuple(sorted(state.chat.stop_commands)),
+            "stop edge did not record its command",
+        )
+    elif context.last_edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
+        active = previous.wiseman.active_question
+        expected_pending = (
+            previous.wiseman.pending_questions[1:] if active and previous.wiseman.pending_questions[:1] == [active] else previous.wiseman.pending_questions
+        )
+        _assert_state_equal(context, "transition.active_question", None, state.wiseman.active_question, "terminal edge retained active work")
+        _assert_state_equal(
+            context, "transition.pending_questions", tuple(expected_pending), tuple(state.wiseman.pending_questions), "terminal edge lost queued questions"
+        )
+        _assert_state_equal(context, "transition.turn", previous.wiseman.turns + bool(active), state.wiseman.turns, "terminal edge did not settle one turn")
 
 
 def _assert_observation_context(context: GraphContext, observation: RuntimeObservation) -> None:
@@ -234,6 +337,8 @@ async def _wait_for_vertex(context: GraphContext, vertex: Vertex, assertion: Obs
                 f"{vertex} condition requires model state {vertex}, got {state.vertex}",
             )
         )
+    _assert_model_invariants(context)
+    _assert_transition(context)
     STATE_ASSERTIONS[vertex](context)
     observation = await context.harness.wait_for_state(vertex, context, deadline_seconds=STATE_TIMEOUTS[vertex])
     assertion(context, observation)
