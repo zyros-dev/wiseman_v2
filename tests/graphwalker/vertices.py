@@ -227,10 +227,18 @@ def _assert_stop_transition(context: GraphContext, previous: GraphState) -> None
 
 def _assert_terminal_transition(context: GraphContext, previous: GraphState) -> None:
     active = previous.wiseman.active_question
+    queued_handoff = bool(active and previous.wiseman.pending_questions[:1] == [active] and len(previous.wiseman.pending_questions) > 1)
+    expected_active = active if queued_handoff else None
     expected_pending = (
-        previous.wiseman.pending_questions[1:] if active and previous.wiseman.pending_questions[:1] == [active] else previous.wiseman.pending_questions
+        previous.wiseman.pending_questions
+        if queued_handoff
+        else previous.wiseman.pending_questions[1:]
+        if active and previous.wiseman.pending_questions[:1] == [active]
+        else previous.wiseman.pending_questions
     )
-    _assert_state_equal(context, "transition.active_question", None, context.state.wiseman.active_question, "terminal edge retained active work")
+    _assert_state_equal(
+        context, "transition.active_question", expected_active, context.state.wiseman.active_question, "terminal edge changed active work incorrectly"
+    )
     _assert_state_equal(
         context,
         "transition.pending_questions",
@@ -238,7 +246,7 @@ def _assert_terminal_transition(context: GraphContext, previous: GraphState) -> 
         tuple(context.state.wiseman.pending_questions),
         "terminal edge lost queued questions",
     )
-    expected_turn = previous.wiseman.turns + bool(active)
+    expected_turn = previous.wiseman.turns if queued_handoff else previous.wiseman.turns + bool(active)
     _assert_state_equal(context, "transition.turn", expected_turn, context.state.wiseman.turns, "terminal edge did not settle one turn")
 
 
