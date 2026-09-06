@@ -26,7 +26,6 @@ from tests.graphwalker.edges import EDGE_FUNCTIONS
 from tests.graphwalker.graph_utils import GraphContext, GraphElement, GraphHarness
 from tests.graphwalker.model import (
     EDGES,
-    EDGES_BY_NAME,
     EdgeName,
     ObservedChatState,
     ObservedWisemanState,
@@ -557,7 +556,4 @@ def _vertex(value: str) -> Vertex:
 
 
 def _edge_name(value: str) -> EdgeName:
-    name = value.removeprefix("e-")
-    if name in EDGES_BY_NAME:
-        return EDGES_BY_NAME[name].name
-    return EdgeName(name)
+    return EdgeName(value.removeprefix("e-"))

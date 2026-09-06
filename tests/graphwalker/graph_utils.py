@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
-from tests.graphwalker.model import FailureDetails, GraphState, RuntimeObservation, Vertex
+from tests.graphwalker.model import EdgeName, FailureDetails, GraphState, RuntimeObservation, Vertex
 
 if TYPE_CHECKING:
     from app.clients.client_interfaces import ClientContainer
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 class GraphElement(Protocol):
     @property
-    def name(self) -> str: ...
+    def name(self) -> EdgeName: ...
 
     @property
     def source(self) -> Vertex: ...

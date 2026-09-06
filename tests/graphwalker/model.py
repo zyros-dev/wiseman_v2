@@ -466,6 +466,28 @@ def _edge_actions(edge: Edge) -> list[str]:
     return []
 
 
+def _graph_edge(edge: Edge, action_name: str) -> GraphEdge:
+    graph_edge: GraphEdge = {
+        "id": edge.id,
+        "name": edge.name.value,
+        "sourceVertexId": f"v-{edge.source.value}",
+        "targetVertexId": f"v-{edge.target.value}",
+        "properties": {
+            "action": action_name,
+            "source_state": edge.source.value,
+            "target_state": edge.target.value,
+            "deadline_seconds": EDGE_TIMEOUTS[edge.name],
+        },
+    }
+    if actions := _edge_actions(edge):
+        graph_edge["actions"] = actions
+    if edge.name in IDLE_EMPTY_EDGES:
+        graph_edge["guard"] = "global.pendingQuestions == 0"
+    elif edge.name is EdgeName.DISPATCH_QUEUED:
+        graph_edge["guard"] = "global.pendingQuestions > 0"
+    return graph_edge
+
+
 def model() -> GraphDocument:
     """Build the complete GraphWalker JSON-shaped document."""
 
@@ -474,39 +496,17 @@ def model() -> GraphDocument:
 
     vertices: list[GraphVertex] = [
         {
-            "id": f"v-{vertex}",
-            "name": vertex,
+            "id": f"v-{vertex.value}",
+            "name": vertex.value,
             "properties": {
-                "state": vertex,
+                "state": vertex.value,
                 "condition": STATE_FUNCTIONS[vertex].__name__,
                 "deadline_seconds": STATE_TIMEOUTS[vertex],
             },
         }
         for vertex in Vertex
     ]
-    edges: list[GraphEdge] = [
-        {
-            "id": edge.id,
-            "name": edge.name,
-            "sourceVertexId": f"v-{edge.source}",
-            "targetVertexId": f"v-{edge.target}",
-            "properties": {
-                "action": EDGE_FUNCTIONS[edge.name].__name__,
-                "source_state": edge.source,
-                "target_state": edge.target,
-                "deadline_seconds": EDGE_TIMEOUTS[edge.name],
-            },
-            **({"actions": actions} if (actions := _edge_actions(edge)) else {}),
-            **(
-                {"guard": "global.pendingQuestions == 0"}
-                if edge.name in IDLE_EMPTY_EDGES
-                else {"guard": "global.pendingQuestions > 0"}
-                if edge.name is EdgeName.DISPATCH_QUEUED
-                else {}
-            ),
-        }
-        for edge in GRAPH_EDGES
-    ]
+    edges = [_graph_edge(edge, EDGE_FUNCTIONS[edge.name].__name__) for edge in GRAPH_EDGES]
     return {
         "name": "wiseman-v2",
         "models": [
@@ -517,7 +517,7 @@ def model() -> GraphDocument:
                 "startElementId": "v-idle",
                 "properties": {
                     "model_version": 1,
-                    "initial_state": Vertex.IDLE,
+                    "initial_state": Vertex.IDLE.value,
                     "owner": "temporal-thread-workflow",
                     "harness": "authenticated-discord-http-replay",
                     "state_data": "ids,owners,pending,histories,cursors,cancellation_targets,failure_log",

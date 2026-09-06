@@ -14,10 +14,12 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Context, Span, set_span_in_context
+from opentelemetry.trace import Span, set_span_in_context
 from phoenix.client import Client
 
 if TYPE_CHECKING:
+    from opentelemetry.context import Context
+
     from app.types import JsonObject
 
 LOGGER = logging.getLogger("wiseman")

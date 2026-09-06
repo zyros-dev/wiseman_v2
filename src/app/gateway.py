@@ -176,9 +176,10 @@ class Gateway(discord.Client):
     async def _replies_to_self(self, message: discord.Message) -> bool:
         reference = getattr(message, "reference", None)
         resolved = getattr(reference, "resolved", None)
-        if resolved is None and getattr(reference, "message_id", None) and callable(fetch := getattr(message.channel, "fetch_message", None)):
+        reference_id = getattr(reference, "message_id", None)
+        if resolved is None and reference_id and callable(fetch := getattr(message.channel, "fetch_message", None)):
             with suppress(discord.DiscordException, ValueError):
-                resolved = await cast("Callable[[int], Awaitable[object]]", fetch)(int(reference.message_id))
+                resolved = await cast("Callable[[int], Awaitable[object]]", fetch)(int(reference_id))
         return resolved is not None and self._is_self(cast("discord.Message", resolved))
 
     def _is_self(self, message: discord.Message) -> bool:

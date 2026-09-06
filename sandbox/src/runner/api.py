@@ -61,12 +61,12 @@ class Turn(BaseModel):
 
 
 class SteeringTurn(Turn):
-    message_id: str = Field(min_length=1)
+    message_id: str = Field(default="", min_length=1, validate_default=True)
 
 
 class StopTurn(Turn):
-    message_id: str = Field(min_length=1)
-    target_message_id: str = Field(min_length=1)
+    message_id: str = Field(default="", min_length=1, validate_default=True)
+    target_message_id: str = Field(default="", min_length=1, validate_default=True)
 
 
 class Workspace:

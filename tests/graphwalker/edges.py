@@ -76,14 +76,8 @@ async def _edge(context: GraphContext, edge: EdgeName, message_id: str = "") -> 
 
 
 def _edge_action(edge: EdgeName) -> EdgeFunction:
-    if edge in ACTION_EDGES:
-
-        async def action(context: GraphContext, message_id: str = "") -> None:
-            await _edge(context, edge, message_id)
-    else:
-
-        async def action(context: GraphContext) -> None:
-            await _edge(context, edge)
+    async def action(context: GraphContext, message_id: str = "") -> None:
+        await _edge(context, edge, message_id if edge in ACTION_EDGES else "")
 
     action.__name__ = edge.value.replace("-", "_")
     return action

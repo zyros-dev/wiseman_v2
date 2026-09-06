@@ -96,7 +96,7 @@ class HttpHarnessRunner:
         result = value.get("result", value)
         if not isinstance(result, dict):
             raise RunnerError(502, "runner returned a non-object result")
-        billing = {key: result[key] for key in ("model", "cost", "usage") if key in result}
+        billing: dict[str, object] = {key: cast("object", result[key]) for key in ("model", "cost", "usage") if key in result}
         return str(result.get("thread_id", thread)), str(result.get("output", "")), billing
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:
