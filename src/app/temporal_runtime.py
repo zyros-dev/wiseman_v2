@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING, cast
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from app.models import DeliveryState, Event, TurnWork
+from app.models import DeliveryState, Event, State, TurnWork
+from app.runner_status import STOPPED_STATUS, UNKNOWN_STATUS
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 DELIVERY_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30))
@@ -91,6 +92,63 @@ class TurnWorkflow:
         self.inferencing = False
         self.stop_requested = False
         self.stop_commands: set[str] = set()
+        self.terminal_hold = False
+        self.cancellation_hold = False
+        self.recovering = False
+        self.outcome_unknown = False
+        self.resume_requested = False
+        self.retry_exhausted = False
+        self.outcome_established = False
+        self.cancellation_unknown = False
+
+    @workflow.signal
+    def hold_terminal(self) -> None:
+        self.terminal_hold = True
+
+    @workflow.signal
+    def release_terminal(self) -> None:
+        self.terminal_hold = False
+
+    @workflow.signal
+    def hold_cancellation(self) -> None:
+        self.cancellation_hold = True
+
+    @workflow.signal
+    def release_cancellation(self) -> None:
+        self.cancellation_hold = False
+
+    @workflow.signal
+    def resume_session(self) -> None:
+        self.resume_requested = True
+
+    @workflow.signal
+    def exhaust_retries(self) -> None:
+        self.retry_exhausted = True
+
+    @workflow.signal
+    def establish_outcome(self) -> None:
+        self.outcome_established = True
+        self.cancellation_unknown = False
+        if self.outcome_unknown and self.work is not None:
+            self.outcome_unknown = False
+            self.work.error = "Execution outcome established without a result"
+
+    @workflow.signal
+    def mark_cancellation_unknown(self) -> None:
+        self.cancellation_unknown = True
+        self.outcome_unknown = True
+        self.stop_requested = False
+        if self.work is not None:
+            self.work.stopped = False
+            self.work.error = ""
+
+    @workflow.signal
+    def mark_completion_race(self) -> None:
+        self.stop_requested = False
+        self.cancellation_hold = False
+        if self.work is not None:
+            self.work.stopped = False
+            self.work.error = ""
 
     @workflow.update
     async def steer(self, event: dict) -> bool:
@@ -100,6 +158,9 @@ class TurnWorkflow:
         if incoming.trigger.id in self.work.state.processed:
             return True
         if await self._control("steer", event):
+            _record_state_message(self.work.state, incoming)
+            if incoming.trigger.id not in self.work.state.steering_ids:
+                self.work.state.steering_ids.append(incoming.trigger.id)
             self.work.state.processed.add(incoming.trigger.id)
             return True
         return False
@@ -116,10 +177,16 @@ class TurnWorkflow:
         if not self.inferencing:
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
+            _record_state_message(self.work.state, incoming)
+            if incoming.trigger.id not in self.work.state.stop_command_ids:
+                self.work.state.stop_command_ids.append(incoming.trigger.id)
             return True
         if await self._control("stop", event):
             self.stop_requested = True
             self.stop_commands.add(incoming.trigger.id)
+            _record_state_message(self.work.state, incoming)
+            if incoming.trigger.id not in self.work.state.stop_command_ids:
+                self.work.state.stop_command_ids.append(incoming.trigger.id)
             return True
         return False
 
@@ -146,6 +213,8 @@ class TurnWorkflow:
             "inferencing": self.inferencing,
             "stop_requested": self.stop_requested,
             "pending_progress": list(self.pending_progress),
+            "recovering": self.recovering,
+            "outcome_unknown": self.outcome_unknown,
         }
 
     async def _node(self, name: str, *, durable: bool = False) -> None:
@@ -161,6 +230,11 @@ class TurnWorkflow:
             )
         )
         result.state.processed.update(self.work.state.processed)
+        for field_name in ("message_ids", "background_context_ids", "consumed_context_ids", "steering_ids", "stop_command_ids"):
+            values = list(getattr(self.work.state, field_name))
+            merged = list(getattr(result.state, field_name))
+            setattr(result.state, field_name, _merge_ids(merged, values))
+        result.state.message_timestamps.update(self.work.state.message_timestamps)
         self.work = result
 
     @workflow.run
@@ -176,6 +250,7 @@ class TurnWorkflow:
         try:
             await self._node("context")
             await self._node("prompt")
+            await workflow.wait_condition(lambda: not self.cancellation_hold)
             if not self.stop_requested and not self.work.state.codex_thread:
                 await _activity(provision_workspace, self.work.model_dump(mode="json"), timedelta(minutes=5))
                 self.progress("🤖 Codex starting...")
@@ -187,7 +262,7 @@ class TurnWorkflow:
                 self.work.error = "Turn stopped by user"
             else:
                 await self._infer()
-            if not self.work.output.strip() and not self.work.stopped:
+            if not self.work.output.strip() and not self.work.stopped and not self.work.error:
                 self.work.error = "Codex returned no answer"
         except Exception as exc:
             if self.stop_requested:
@@ -197,38 +272,79 @@ class TurnWorkflow:
                 self.work.error = _error_message(exc)
         self.inferencing = False
         await workflow.wait_condition(workflow.all_handlers_finished)
+        await workflow.wait_condition(lambda: not self.cancellation_hold and not self.cancellation_unknown)
         await self._node("deliver", durable=True)
         await self._node("react", durable=True)
         try:
             await self._node("observe")
         except Exception:
             workflow.logger.exception("Terminal telemetry exhausted retries")
+        await workflow.wait_condition(lambda: not self.terminal_hold)
         self.work.state.processed.add(self.work.event.trigger.id)
         self.work.state.turn += 1
         self.work.state.delivery_id = None
         self.work.state.progress = []
+        self.recovering = False
+        self.outcome_unknown = False
         return {"state": self.work.state.model_dump(mode="json"), "output": self.work.output, "error": self.work.error}
 
     async def _infer(self) -> None:
         assert self.work is not None
-        self.inferencing = True
-        pending = workflow.start_activity(
-            "wiseman.infer",
-            self.work.model_dump(mode="json"),
-            start_to_close_timeout=timedelta(hours=1),
-            heartbeat_timeout=timedelta(seconds=45),
-            retry_policy=TRANSPORT_RETRY_POLICY,
-        )
-        while not pending.done():
-            await workflow.wait_condition(lambda: pending.done() or bool(self.pending_progress))
-            if self.pending_progress:
-                try:
-                    await self._node("render")
-                except Exception:
-                    workflow.logger.exception("Progress delivery exhausted retries; inference remains active")
-        result = TurnWork.model_validate(await pending)
-        self.work.state.codex_thread = result.state.codex_thread
-        self.work.output, self.work.billing = result.output, result.billing
+        while True:
+            self.inferencing = True
+            self.recovering = False
+            pending = workflow.start_activity(
+                "wiseman.infer",
+                self.work.model_dump(mode="json"),
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(seconds=45),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            try:
+                while not pending.done():
+                    await workflow.wait_condition(lambda pending=pending: pending.done() or bool(self.pending_progress))
+                    if self.pending_progress:
+                        try:
+                            await self._node("render")
+                        except Exception:
+                            workflow.logger.exception("Progress delivery exhausted retries; inference remains active")
+                result = TurnWork.model_validate(await pending)
+            except ActivityError as exc:
+                status = _activity_status(exc)
+                self.inferencing = False
+                if status == STOPPED_STATUS or self.stop_requested:
+                    self.recovering = False
+                    self.work.stopped = True
+                    self.work.error = "Turn stopped by user"
+                    return
+                if status == UNKNOWN_STATUS:
+                    self.outcome_unknown = True
+                    await workflow.wait_condition(lambda: self.outcome_established or self.stop_requested)
+                    if self.stop_requested and not self.outcome_established:
+                        self.outcome_unknown = False
+                        self.work.stopped = True
+                        self.work.error = "Turn stopped by user"
+                        return
+                    self.outcome_unknown = False
+                    self.work.error = "Execution outcome established without a result"
+                    return
+                self.recovering = True
+                await workflow.wait_condition(lambda: self.resume_requested or self.retry_exhausted or self.stop_requested)
+                if self.stop_requested:
+                    self.recovering = False
+                    self.work.stopped = True
+                    self.work.error = "Turn stopped by user"
+                    return
+                if self.retry_exhausted:
+                    self.recovering = False
+                    self.work.error = f"Codex failed with HTTP {status}" if status else "Codex failed after retries"
+                    return
+                self.resume_requested = False
+                self.retry_exhausted = False
+                continue
+            self.work.state.codex_thread = result.state.codex_thread
+            self.work.output, self.work.billing = result.output, result.billing
+            return
 
 
 @workflow.defn(name="wiseman.thread")
@@ -246,14 +362,14 @@ class ThreadWorkflow:
         if message_id and message_id in known:
             return
         if message_id:
-            self._append_state_id("message_ids", str(message_id))
+            self._record_message(event)
         self.pending.append(dict(event))
 
     @workflow.signal
     async def touch(self, event: dict) -> None:
         message_id = str(_object_map(event.get("trigger")).get("id", ""))
         if message_id and message_id not in _sequence(self.state.get("message_ids")):
-            self._append_state_id("message_ids", message_id)
+            self._record_message(event)
             self._append_state_id("background_context_ids", message_id)
         self.pending.append({"background": True, "event": event})
 
@@ -262,7 +378,18 @@ class ThreadWorkflow:
         message_id = str(_object_map(event.get("trigger")).get("id", ""))
         target = "stop_command_ids" if event.get("kind") == "stop" else "steering_ids"
         if message_id:
+            self._record_message(event)
             self._append_state_id(target, message_id)
+
+    def _record_message(self, event: dict) -> None:
+        trigger = _object_map(event.get("trigger"))
+        message_id = str(trigger.get("id", ""))
+        if not message_id:
+            return
+        self._append_state_id("message_ids", message_id)
+        timestamps = self.state.setdefault("message_timestamps", {})
+        if isinstance(timestamps, dict):
+            timestamps[message_id] = str(trigger.get("timestamp", ""))
 
     def _append_state_id(self, name: str, message_id: str) -> None:
         values = self.state.setdefault(name, [])
@@ -287,7 +414,7 @@ class ThreadWorkflow:
         if event := _object_map(first.get("event")):
             message_id = str(_object_map(event.get("trigger")).get("id", ""))
             if message_id:
-                self._append_state_id("message_ids", message_id)
+                self._record_message(event)
             self.pending.insert(0, event)
         self.result, handled = {"state": self.state}, 0
         while True:
@@ -374,7 +501,7 @@ class TemporalRuntime:
         ):
             await asyncio.Event().wait()
 
-    async def submit(self, event: dict) -> None:
+    async def submit(self, event: dict) -> dict[str, object] | None:
         if self.client is None:
             raise RuntimeError("Temporal is not connected")
         trigger = _object_map(event["trigger"])
@@ -389,7 +516,13 @@ class TemporalRuntime:
                 task_queue=self.queue,
             )
         except WorkflowAlreadyStartedError:
-            await client.get_workflow_handle(workflow_id).signal(ThreadWorkflow.submit, event)
+            handle = client.get_workflow_handle(workflow_id)
+            message_id = str(trigger.get("id", ""))
+            session = cast("JsonObject", await handle.query(ThreadWorkflow.session))
+            if _known_message(session, message_id):
+                return {"status": "duplicate", "message_id": message_id}
+            await handle.signal(ThreadWorkflow.submit, event)
+        return None
 
     async def touch(self, event: Event) -> None:
         if self.client is None:
@@ -461,6 +594,14 @@ def _state(payload: dict) -> JsonObject:
     return _object_map(payload.get("state"))
 
 
+def _record_state_message(state: State, event: Event) -> None:
+    message_id, timestamp = event.trigger.id, event.trigger.timestamp
+    if message_id not in state.message_ids:
+        state.message_ids.append(message_id)
+    if timestamp:
+        state.message_timestamps[message_id] = timestamp
+
+
 def _progress_key(message: str) -> str:
     return message.split("...", 1)[0].split('"', 1)[0].strip()
 
@@ -477,6 +618,14 @@ def _merge_progress(existing: list[str], updates: list[str]) -> list[str]:
     return merged[-32:]
 
 
+def _merge_ids(existing: list[str], updates: list[str]) -> list[str]:
+    merged = list(existing)
+    for value in updates:
+        if value not in merged:
+            merged.append(value)
+    return merged
+
+
 def _sequence(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else []
 
@@ -485,6 +634,37 @@ def _string_sequence(value: object) -> list[str]:
     return [item for item in _sequence(value) if isinstance(item, str)]
 
 
+def _known_message(session: JsonObject, message_id: str) -> bool:
+    if not message_id:
+        return False
+    known = {
+        str(session.get("active_message", "")),
+        *_string_sequence(session.get("processed")),
+        *_string_sequence(session.get("message_ids")),
+        *_string_sequence(session.get("pending_message_ids")),
+    }
+    return message_id in known
+
+
 def _error_message(error: BaseException) -> str:
     cause = getattr(error, "cause", None) or error.__cause__
     return str(cause or error).strip() or type(error).__name__
+
+
+def _activity_status(error: ActivityError) -> int | None:
+    cause = error.cause
+    if isinstance(cause, ApplicationError):
+        error_type = cause.type or ""
+        if error_type.startswith("runner:"):
+            try:
+                return int(error_type.removeprefix("runner:"))
+            except ValueError:
+                return None
+    message = str(cause or error)
+    marker = "HTTP "
+    if marker in message:
+        try:
+            return int(message.split(marker, 1)[1].split(None, 1)[0])
+        except (IndexError, ValueError):
+            return None
+    return None

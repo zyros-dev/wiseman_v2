@@ -29,6 +29,8 @@ class GraphElement(Protocol):
 class GraphHarness(Protocol):
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation: ...
 
+    async def prepare_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None: ...
+
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None: ...
 
 
@@ -44,9 +46,18 @@ class GraphContext:
     last_message_id: str = ""
     message_id: str = ""
     last_response: WisemanResponse | None = None
+    previous_observation: RuntimeObservation | None = None
+    observation: RuntimeObservation | None = None
 
     def reject(self, details: FailureDetails) -> NoReturn:
         self.state.reject(details)
+
+    def begin_edge(self, edge: GraphElement, message_id: str) -> None:
+        self.previous_state = deepcopy(self.state)
+        self.previous_observation = self.observation
+        self.last_edge = edge.name
+        self.last_target = edge.target
+        self.last_message_id = message_id or self.message_id
 
 
 StateFunction = Callable[[GraphContext], Awaitable[None]]
@@ -61,10 +72,8 @@ async def apply_edge(
     *,
     execute_boundary: bool = True,
 ) -> None:
-    context.previous_state = deepcopy(context.state)
-    context.last_edge = edge.name
-    context.last_target = edge.target
-    context.last_message_id = message_id or context.message_id
+    if context.last_edge != edge.name or context.previous_state is None:
+        context.begin_edge(edge, message_id)
     if execute_boundary:
         await context.harness.execute_edge(edge, context, deadline_seconds=deadline_seconds)
     context.state.advance(edge.name, edge.source, edge.target, context.last_message_id)

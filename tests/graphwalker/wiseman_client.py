@@ -22,17 +22,17 @@ class WisemanClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self.client = client
 
-    async def ask(self, message_id: str, *, thread_id: str | None, duplicate: bool = False) -> WisemanResponse:
-        response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id))
+    async def ask(self, message_id: str, *, thread_id: str | None, duplicate: bool = False, startup: bool = False) -> WisemanResponse:
+        response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id, startup=startup))
         if duplicate:
-            response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id))
+            response = await self.client.post("/v1/replay/discord", json=self._question_payload(message_id, thread_id, startup=startup))
         return WisemanResponse(response.status_code, _json_object(response))
 
     async def background(self, message_id: str, *, thread_id: str) -> WisemanResponse:
         return await self._post(_message(message_id, "background", thread_id, mention=False))
 
-    async def steer(self, message_id: str, *, thread_id: str) -> WisemanResponse:
-        return await self._post(_message(message_id, "steer", thread_id, reply_to="answer"), kind="steer")
+    async def steer(self, message_id: str, *, thread_id: str, reply_to: str = "answer") -> WisemanResponse:
+        return await self._post(_message(message_id, "steer", thread_id, reply_to=reply_to), kind="steer")
 
     async def stop(self, message_id: str, *, thread_id: str) -> WisemanResponse:
         return await self._post(_message(message_id, "/stop", thread_id), kind="stop")
@@ -44,8 +44,8 @@ class WisemanClient:
         response = await self.client.post("/v1/replay/discord", json=payload)
         return WisemanResponse(response.status_code, _json_object(response))
 
-    def _question_payload(self, message_id: str, thread_id: str | None) -> JsonObject:
-        return {"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread_id), "kind": "startup" if thread_id is None else "followup"}
+    def _question_payload(self, message_id: str, thread_id: str | None, *, startup: bool) -> JsonObject:
+        return {"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread_id), "kind": "startup" if startup else "followup"}
 
 
 def _message(
@@ -56,13 +56,17 @@ def _message(
     mention: bool = True,
     reply_to: str | None = None,
 ) -> JsonObject:
+    try:
+        sequence = int(message_id.rsplit("-", 1)[-1])
+    except ValueError:
+        sequence = 0
     return {
         "id": message_id,
         "author": {"id": "human", "username": "human"},
         "content": content,
         "channel_id": "home",
         "thread_id": thread_id,
-        "timestamp": f"2026-09-05T00:00:{message_id[-1:]}Z",
+        "timestamp": f"2026-09-05T00:{sequence // 60:02d}:{sequence % 60:02d}Z",
         "mentions": [{"id": "bot"}] if mention else [],
         "message_reference": {"message_id": reply_to} if reply_to else {},
     }

@@ -7,7 +7,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.models import Event, TurnWork
-from app.runner import MESSAGE_ID, STOPPED_STATUS, UNKNOWN_STATUS, RunnerError
+from app.runner import MESSAGE_ID, RunnerError
+from app.runner_status import STOPPED_STATUS, UNKNOWN_STATUS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -50,7 +51,11 @@ class TurnActivities:
         try:
             return (await self.engine.execute(TurnWork.model_validate(payload), report)).model_dump(mode="json")
         except RunnerError as exc:
-            raise ApplicationError(str(exc), non_retryable=exc.status in {STOPPED_STATUS, UNKNOWN_STATUS}) from exc
+            raise ApplicationError(
+                str(exc),
+                type=f"runner:{exc.status}",
+                non_retryable=exc.status in {STOPPED_STATUS, UNKNOWN_STATUS},
+            ) from exc
 
     @activity.defn(name="wiseman.deliver")
     async def deliver(self, payload: dict) -> dict:
@@ -61,14 +66,20 @@ class TurnActivities:
         work = TurnWork.model_validate(payload)
         if work.output or work.error:
             work.terminal_emoji = work.terminal_emoji or self.engine.reaction_emojis["failure" if work.error else "success"]
-        return (await self.engine.reconcile(work)).model_dump(mode="json")
+        result = await self.engine.reconcile(work)
+        await self.engine.config.phoenix.record(
+            work.trace,
+            "reaction",
+            operations=[f"add:{result.terminal_emoji or result.processing_emoji}", *([f"remove:{result.processing_emoji}"] if result.terminal_emoji else [])],
+        )
+        return result.model_dump(mode="json")
 
     @activity.defn(name="wiseman.observe")
     async def observe(self, payload: dict) -> dict:
         work = TurnWork.model_validate(payload)
         await self.engine.config.phoenix.record(
             work.trace,
-            "completed",
+            "failure" if work.error else "completed",
             thread_id=work.event.trigger.thread_id,
             output=work.output,
             error=work.error,

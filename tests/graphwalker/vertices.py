@@ -10,6 +10,7 @@ from tests.graphwalker.model import (
     STATE_TIMEOUTS,
     FailureDetails,
     FailureKind,
+    GraphState,
     RuntimeObservation,
     Vertex,
 )
@@ -129,70 +130,120 @@ def _assert_model_invariants(context: GraphContext) -> None:
         )
 
 
-def _assert_transition(context: GraphContext) -> None:
-    previous = context.previous_state
-    if previous is None:
-        return
-    state = context.state
-    _assert_state_equal(context, "transition.vertex", context.last_target, state.vertex, "edge did not reach its declared target")
-    _assert_state_equal(context, "transition.step", previous.step + 1, state.step, "edge did not advance the model step")
-    if context.last_edge == "fixture-reset":
-        return
-    if not {message.id for message in previous.chat.messages}.issubset(state.chat.message_ids):
-        _reject_invariant(context, "transition.messages", "previous messages retained", str(state.chat.message_ids), "edge discarded chat history")
-    if not set(previous.wiseman.seen_questions).issubset(state.wiseman.seen_questions):
-        _reject_invariant(context, "transition.questions", "previous questions retained", str(state.wiseman.seen_questions), "edge discarded question history")
-    if context.last_edge in {"admit-question", "queue-question"}:
-        _assert_state_equal(
-            context,
-            "transition.pending_questions",
-            (*previous.wiseman.pending_questions, context.last_message_id),
-            tuple(state.wiseman.pending_questions),
-            "question edge did not append the new question",
-        )
-    elif context.last_edge in {"background-chatter", "running-background-chatter"}:
+def _assert_question_transition(context: GraphContext, previous: GraphState) -> None:
+    _assert_state_equal(
+        context,
+        "transition.pending_questions",
+        (*previous.wiseman.pending_questions, context.last_message_id),
+        tuple(context.state.wiseman.pending_questions),
+        "question edge did not append the new question",
+    )
+
+
+def _assert_background_transition(context: GraphContext, previous: GraphState) -> None:
+    if previous.vertex is not Vertex.IDLE:
         _assert_state_equal(
             context,
             "transition.background_context",
             (*previous.chat.background_context, context.last_message_id),
-            tuple(state.chat.background_context),
+            tuple(context.state.chat.background_context),
             "background edge did not append context",
         )
-    elif context.last_edge in {"context-ready", "resume-session"}:
-        _assert_state_equal(context, "transition.consumed_context", (), tuple(state.chat.background_context), "context-ready retained background context")
-        _assert_state_equal(
+
+
+def _assert_context_transition(context: GraphContext, previous: GraphState) -> None:
+    _assert_state_equal(context, "transition.consumed_context", (), tuple(context.state.chat.background_context), "context-ready retained background context")
+    _assert_state_equal(
+        context,
+        "transition.consumed_context",
+        (*previous.chat.consumed_context, *previous.chat.background_context),
+        tuple(context.state.chat.consumed_context),
+        "context-ready did not consume background context",
+    )
+
+
+def _assert_steering_transition(context: GraphContext, previous: GraphState) -> None:
+    _assert_state_equal(
+        context,
+        "transition.steering",
+        (*previous.chat.steering_messages, context.last_message_id),
+        tuple(context.state.chat.steering_messages),
+        "steering edge did not append the steering message",
+    )
+
+
+def _assert_stop_transition(context: GraphContext, previous: GraphState) -> None:
+    _assert_state_equal(
+        context,
+        "transition.stop_commands",
+        tuple(sorted((*previous.chat.stop_commands, context.last_message_id))),
+        tuple(sorted(context.state.chat.stop_commands)),
+        "stop edge did not record its command",
+    )
+
+
+def _assert_terminal_transition(context: GraphContext, previous: GraphState) -> None:
+    active = previous.wiseman.active_question
+    expected_pending = (
+        previous.wiseman.pending_questions[1:] if active and previous.wiseman.pending_questions[:1] == [active] else previous.wiseman.pending_questions
+    )
+    _assert_state_equal(context, "transition.active_question", None, context.state.wiseman.active_question, "terminal edge retained active work")
+    _assert_state_equal(
+        context,
+        "transition.pending_questions",
+        tuple(expected_pending),
+        tuple(context.state.wiseman.pending_questions),
+        "terminal edge lost queued questions",
+    )
+    _assert_state_equal(context, "transition.turn", previous.wiseman.turns + bool(active), context.state.wiseman.turns, "terminal edge did not settle one turn")
+
+
+TRANSITION_ASSERTIONS: Mapping[str, Callable[[GraphContext, GraphState], None]] = {
+    "admit-question": _assert_question_transition,
+    "queue-question": _assert_question_transition,
+    "background-chatter": _assert_background_transition,
+    "running-background-chatter": _assert_background_transition,
+    "context-ready": _assert_context_transition,
+    "resume-session": _assert_context_transition,
+    "steer-active-turn": _assert_steering_transition,
+    "repeat-steer": _assert_steering_transition,
+    "stop-preparing": _assert_stop_transition,
+    "stop-running": _assert_stop_transition,
+    "stop-recovering": _assert_stop_transition,
+    "stop-delivering": _assert_stop_transition,
+    "stop-confirmed": _assert_terminal_transition,
+    "answer-finalized": _assert_terminal_transition,
+    "error-finalized": _assert_terminal_transition,
+}
+
+
+def _assert_transition(context: GraphContext) -> None:
+    previous = context.previous_state
+    if previous is None:
+        return
+    _assert_state_equal(context, "transition.vertex", context.last_target, context.state.vertex, "edge did not reach its declared target")
+    _assert_state_equal(context, "transition.step", previous.step + 1, context.state.step, "edge did not advance the model step")
+    if context.last_edge == "fixture-reset":
+        return
+    if not {message.id for message in previous.chat.messages}.issubset(context.state.chat.message_ids):
+        _reject_invariant(
             context,
-            "transition.consumed_context",
-            (*previous.chat.consumed_context, *previous.chat.background_context),
-            tuple(state.chat.consumed_context),
-            "context-ready did not consume background context",
+            "transition.messages",
+            "previous messages retained",
+            str(context.state.chat.message_ids),
+            "edge discarded chat history",
         )
-    elif context.last_edge in {"steer-active-turn", "repeat-steer"}:
-        _assert_state_equal(
+    if not set(previous.wiseman.seen_questions).issubset(context.state.wiseman.seen_questions):
+        _reject_invariant(
             context,
-            "transition.steering",
-            (*previous.chat.steering_messages, context.last_message_id),
-            tuple(state.chat.steering_messages),
-            "steering edge did not append the steering message",
+            "transition.questions",
+            "previous questions retained",
+            str(context.state.wiseman.seen_questions),
+            "edge discarded question history",
         )
-    elif context.last_edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
-        _assert_state_equal(
-            context,
-            "transition.stop_commands",
-            tuple(sorted((*previous.chat.stop_commands, context.last_message_id))),
-            tuple(sorted(state.chat.stop_commands)),
-            "stop edge did not record its command",
-        )
-    elif context.last_edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
-        active = previous.wiseman.active_question
-        expected_pending = (
-            previous.wiseman.pending_questions[1:] if active and previous.wiseman.pending_questions[:1] == [active] else previous.wiseman.pending_questions
-        )
-        _assert_state_equal(context, "transition.active_question", None, state.wiseman.active_question, "terminal edge retained active work")
-        _assert_state_equal(
-            context, "transition.pending_questions", tuple(expected_pending), tuple(state.wiseman.pending_questions), "terminal edge lost queued questions"
-        )
-        _assert_state_equal(context, "transition.turn", previous.wiseman.turns + bool(active), state.wiseman.turns, "terminal edge did not settle one turn")
+    assertion = TRANSITION_ASSERTIONS.get(context.last_edge or "")
+    if assertion is not None:
+        assertion(context, previous)
 
 
 def _assert_observation_context(context: GraphContext, observation: RuntimeObservation) -> None:
@@ -220,9 +271,86 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
         _assert_equal(context, location, expected, observed, message)
 
 
+def _assert_id_delta(
+    context: GraphContext,
+    observation: RuntimeObservation,
+    ids: tuple[str, ...],
+    location: str,
+    message: str,
+) -> None:
+    if context.last_message_id not in ids:
+        _reject_observation(context, location, context.last_message_id, str(ids), message)
+
+
+def _assert_question_delta(context: GraphContext, _previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    if context.last_message_id not in observation.chat.message_ids or context.last_message_id not in observation.wiseman.pending_question_ids:
+        _reject_observation(context, "delta.question", "message admitted and queued", str(observation), "question edge produced no queued message")
+
+
+def _assert_background_delta(context: GraphContext, previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    if previous.wiseman.phase is not Vertex.IDLE:
+        _assert_id_delta(context, observation, observation.chat.background_context_ids, "delta.background", "background message was not retained")
+
+
+def _assert_steering_delta(context: GraphContext, _previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    _assert_id_delta(context, observation, observation.chat.steering_ids, "delta.steering", "steering message was not retained")
+
+
+def _assert_stop_delta(context: GraphContext, _previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    _assert_id_delta(context, observation, observation.chat.stop_command_ids, "delta.stop", "stop command was not retained")
+
+
+def _assert_context_delta(context: GraphContext, previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    expected = (*previous.chat.consumed_context_ids, *previous.chat.background_context_ids)
+    _assert_equal(context, "delta.consumed_context", expected, observation.chat.consumed_context_ids, "context edge did not advance the consumed cursor")
+
+
+DELTA_ASSERTIONS: Mapping[str, Callable[[GraphContext, RuntimeObservation, RuntimeObservation], None]] = {
+    "admit-question": _assert_question_delta,
+    "queue-question": _assert_question_delta,
+    "background-chatter": _assert_background_delta,
+    "running-background-chatter": _assert_background_delta,
+    "steer-active-turn": _assert_steering_delta,
+    "repeat-steer": _assert_steering_delta,
+    "stop-preparing": _assert_stop_delta,
+    "stop-running": _assert_stop_delta,
+    "stop-recovering": _assert_stop_delta,
+    "stop-delivering": _assert_stop_delta,
+    "context-ready": _assert_context_delta,
+    "resume-session": _assert_context_delta,
+}
+
+
+def _assert_observation_delta(context: GraphContext, observation: RuntimeObservation) -> None:
+    previous = context.previous_observation
+    if previous is None:
+        return
+    assertion = DELTA_ASSERTIONS.get(context.last_edge or "")
+    if assertion is not None:
+        assertion(context, previous, observation)
+
+
 def _assert_phase(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
     _assert_equal(context, f"phase:{vertex}", vertex, observation.wiseman.phase, f"runtime Wiseman phase is not {vertex}")
     _assert_observation_context(context, observation)
+    _assert_evidence(context, observation, vertex)
+
+
+def _assert_evidence(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    required: set[str] = set()
+    if vertex in {Vertex.RUNNING, Vertex.DELIVERING, Vertex.ERROR}:
+        required.update({"admission", "turn"})
+    if vertex in {Vertex.RUNNING, Vertex.DELIVERING}:
+        required.update({"context", "grammar", "prompt"})
+    if vertex is Vertex.DELIVERING:
+        required.add("completed")
+    if vertex is Vertex.ERROR:
+        required.add("failure")
+    if vertex in {Vertex.DELIVERING, Vertex.ERROR}:
+        required.add("reaction")
+    missing = tuple(sorted(required - set(observation.phoenix_nodes)))
+    if missing:
+        _reject_observation(context, f"phoenix:{vertex}", str(sorted(required)), str(observation.phoenix_nodes), f"Phoenix evidence missing {missing}")
 
 
 def _assert_no_terminal_result(context: GraphContext, observation: RuntimeObservation, location: str) -> None:
@@ -341,6 +469,8 @@ async def _wait_for_vertex(context: GraphContext, vertex: Vertex, assertion: Obs
     _assert_transition(context)
     STATE_ASSERTIONS[vertex](context)
     observation = await context.harness.wait_for_state(vertex, context, deadline_seconds=STATE_TIMEOUTS[vertex])
+    context.observation = observation
+    _assert_observation_delta(context, observation)
     assertion(context, observation)
 
 

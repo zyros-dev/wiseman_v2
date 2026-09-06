@@ -100,6 +100,7 @@ class State(BaseModel):
     progress: list[str] = Field(default_factory=list)
     delivery: DeliveryState = Field(default_factory=DeliveryState)
     message_ids: list[str] = Field(default_factory=list)
+    message_timestamps: dict[str, str] = Field(default_factory=dict)
     background_context_ids: list[str] = Field(default_factory=list)
     consumed_context_ids: list[str] = Field(default_factory=list)
     steering_ids: list[str] = Field(default_factory=list)

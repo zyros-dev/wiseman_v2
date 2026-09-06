@@ -9,6 +9,8 @@ from uuid import uuid4
 import httpx
 from temporalio import activity
 
+from app.runner_status import STOPPED_STATUS, UNKNOWN_STATUS
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -17,8 +19,6 @@ if TYPE_CHECKING:
 
 TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
 MESSAGE_ID: ContextVar[str] = ContextVar("wiseman_message_id", default="")
-STOPPED_STATUS = 499
-UNKNOWN_STATUS = 520
 
 
 class RunnerError(RuntimeError):

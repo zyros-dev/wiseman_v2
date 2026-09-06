@@ -77,10 +77,10 @@ Each vertex condition asks the harness for a `RuntimeObservation` and checks
 the observed Wiseman phase, active and queued questions, session and turn
 continuity, chat message order, background/consumed context, steering and
 stop IDs, terminal result cardinality, progress-preview cardinality, and
-retirement archival. The current replay harness supplies a deterministic
-observation from the model so this contract is exercised through the HTTP
-boundary; a live Temporal/Discord harness can replace that observation
-provider without changing the graph conditions. Running additionally requires
-Discord's typing signal to be observable. Active states must retain the
-current turn number; running must have one repeatedly updated progress message,
-and delivery must replace that buildup with one edited answer message.
+retirement archival. The replay harness submits through the HTTP admission
+boundary and observes the actual Temporal workflow plus recorded Phoenix
+evidence; only the runner and external Discord/provider transports are graph
+fixtures. Running additionally requires Discord's typing signal to be
+observable. Active states must retain the current turn number; running must
+have one repeatedly updated progress message, and delivery must replace that
+buildup with one edited answer message.

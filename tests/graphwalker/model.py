@@ -208,6 +208,7 @@ class ObservedWisemanState:
 class RuntimeObservation:
     chat: ObservedChatState
     wiseman: ObservedWisemanState
+    phoenix_nodes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -231,6 +232,7 @@ class GraphState:
             self._remember_background(message_id)
         elif edge in {"context-ready", "resume-session"}:
             self._consume_background()
+            self.wiseman.session_id = self.wiseman.session_id or "codex-thread"
         elif edge in {"steer-active-turn", "repeat-steer"}:
             self._remember_steering(message_id)
         elif edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
