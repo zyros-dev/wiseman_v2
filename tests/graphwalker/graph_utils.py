@@ -5,9 +5,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import NoReturn, Protocol
+from typing import TYPE_CHECKING, NoReturn, Protocol
 
 from tests.graphwalker.model import FailureDetails, GraphState, RuntimeObservation, Vertex
+
+if TYPE_CHECKING:
+    from app.clients.client_interfaces import ClientContainer
 
 
 class GraphElement(Protocol):
@@ -30,6 +33,7 @@ class GraphHarness(Protocol):
 @dataclass(slots=True)
 class GraphContext:
     harness: GraphHarness
+    clients: ClientContainer
     state: GraphState = field(default_factory=GraphState)
     message_id: str = ""
 

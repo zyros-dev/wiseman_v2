@@ -233,11 +233,12 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
     path = os.getenv("GRAPHWALKER_PATH")
     if not path: return  # noqa: E701 # fmt: skip
-    app, executed = create_app(clients=mock_container()), set()
+    clients = mock_container()
+    app, executed = create_app(clients=clients), set()
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
         harness = _ReplayHarness(client)
-        context = GraphContext(harness)
+        context = GraphContext(harness, clients)
         for index in range(0, len(elements) - 2, 2):
             source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])
             executed.add((edge, source, target))
