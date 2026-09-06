@@ -32,65 +32,19 @@ from tests.graphwalker.model import (
     Vertex,
 )
 from tests.graphwalker.vertices import STATE_FUNCTIONS
+from tests.graphwalker.wiseman_client import ACTION_EDGES, HttpWisemanClient
 
 if TYPE_CHECKING:
     from app.models import Event
     from app.types import JsonObject
-
-ACTION_EDGES = {
-    EdgeName.BACKGROUND_CHATTER,
-    EdgeName.RUNNING_BACKGROUND_CHATTER,
-    EdgeName.DUPLICATE_QUESTION,
-    EdgeName.IDLE_STOP,
-    EdgeName.STEER_ACTIVE_TURN,
-    EdgeName.REPEAT_STEER,
-    EdgeName.STOP_PREPARING,
-    EdgeName.STOP_RUNNING,
-    EdgeName.STOP_RECOVERING,
-    EdgeName.STOP_DELIVERING,
-    EdgeName.DUPLICATE_STOP,
-    EdgeName.ADMIT_QUESTION,
-    EdgeName.QUEUE_QUESTION,
-}
 
 
 def _message(message_id: str, content: str, *, thread: str | None = None, reply_to: str | None = None, mention: bool = True) -> dict[str, object]:
     return {"id": message_id, "author": {"id": "human", "username": "human"}, "content": content, "channel_id": "home", "thread_id": thread, "timestamp": f"2026-09-05T00:00:{message_id[-1:]}Z", "mentions": [{"id": "bot"}] if mention else [], "message_reference": {"message_id": reply_to} if reply_to else {}}  # noqa: E501 # fmt: skip
 
 
-async def _action(client: httpx.AsyncClient, edge: EdgeName | str, message_id: str) -> httpx.Response:
-    edge = EdgeName(edge)
-    if edge == EdgeName.DUPLICATE_QUESTION:
-        payload = {"t": "MESSAGE_CREATE", "d": _message(message_id, "question")}
-        await client.post("/v1/replay/discord", json=payload)
-        return await client.post("/v1/replay/discord", json=payload)
-    if edge == EdgeName.IDLE_STOP:
-        return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
-    if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
-        return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "background", mention=False)})
-    if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
-        return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "steer", thread="thread", reply_to="answer"), "kind": "steer"})  # noqa: E501 # fmt: skip
-    if edge in {
-        EdgeName.STOP_PREPARING,
-        EdgeName.STOP_RUNNING,
-        EdgeName.STOP_RECOVERING,
-        EdgeName.STOP_DELIVERING,
-        EdgeName.DUPLICATE_STOP,
-    }:
-        return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
-    return await client.post(
-        "/v1/replay/discord",
-        json={
-            "t": "MESSAGE_CREATE",
-            "d": _message(message_id, "question", thread=None if edge == EdgeName.ADMIT_QUESTION else "thread"),
-            "kind": "startup" if edge == EdgeName.ADMIT_QUESTION else "followup",
-        },
-    )
-
-
 class _ReplayHarness(GraphHarness):
-    def __init__(self, client: httpx.AsyncClient) -> None:
-        self.client = client
+    def __init__(self) -> None:
         self.response: httpx.Response | None = None
 
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
@@ -129,7 +83,8 @@ class _ReplayHarness(GraphHarness):
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name in ACTION_EDGES:
-            self.response = await _action(self.client, edge.name, context.message_id)
+            result = await context.wiseman.send(EdgeName(edge.name), context.message_id, thread_id=context.state.chat.thread_id)
+            self.response = httpx.Response(result.status_code, json=result.body)
 
 
 class _TemporalBoundary:
@@ -237,8 +192,9 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     app, executed = create_app(clients=clients), set()
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
-        harness = _ReplayHarness(client)
-        context = GraphContext(harness, clients)
+        wiseman = HttpWisemanClient(client)
+        harness = _ReplayHarness()
+        context = GraphContext(harness, clients, wiseman)
         for index in range(0, len(elements) - 2, 2):
             source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])
             executed.add((edge, source, target))

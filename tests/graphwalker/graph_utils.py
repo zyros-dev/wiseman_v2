@@ -12,6 +12,7 @@ from tests.graphwalker.model import FailureDetails, GraphState, RuntimeObservati
 
 if TYPE_CHECKING:
     from app.clients.client_interfaces import ClientContainer
+    from tests.graphwalker.wiseman_client import WisemanClient
 
 
 class GraphElement(Protocol):
@@ -35,6 +36,7 @@ class GraphHarness(Protocol):
 class GraphContext:
     harness: GraphHarness
     clients: ClientContainer
+    wiseman: WisemanClient
     state: GraphState = field(default_factory=GraphState)
     previous_state: GraphState | None = None
     last_edge: str | None = None

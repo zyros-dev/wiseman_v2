@@ -7,10 +7,12 @@ vertices, edge names, edge topology, edge records, timeouts, and graph state.
 action function for every graph edge, and `graph_utils.py` owns only harness
 contracts and transition glue. Every action and condition receives one
 `GraphContext`, whose `GraphState` contains separate `chat` and `wiseman`
-sub-state and whose `ClientContainer` exposes the real Temporal and Phoenix
-boundaries. The HTTP harness executes those
-actions through `/v1/replay/discord`; it does not call `Engine` or mutate
-Temporal state directly.
+sub-state and which keeps the transport `ClientContainer` separate from the
+graph-only `WisemanClient`. `WisemanClient` is the sole owner of public
+Wiseman actions: it sends Discord-shaped questions, background messages,
+steering replies, and stops through `/v1/replay/discord`. Temporal and Phoenix
+remain separate clients for observation and evidence; the graph client does
+not mutate either directly.
 
 `GraphContext` keeps the mutable current `GraphState` and a deep-copied
 `previous_state`. The latter is captured before every edge action. Edges only
