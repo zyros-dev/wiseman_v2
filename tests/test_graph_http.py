@@ -18,7 +18,9 @@ from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
-from tests.graph_model import EDGE_FUNCTIONS, EDGES, EDGES_BY_NAME, STATE_FUNCTIONS, Edge, EdgeName, GraphHarness, ModelState, Vertex
+from tests.graphwalker.edges import EDGE_FUNCTIONS, EDGES, EDGES_BY_NAME, EdgeName
+from tests.graphwalker.graph_utils import GraphElement, GraphHarness, ModelState
+from tests.graphwalker.vertices import STATE_FUNCTIONS, Vertex
 
 ACTION_EDGES = {
     EdgeName.BACKGROUND_CHATTER,
@@ -41,7 +43,8 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
     return {"id": message_id, "author": {"id": "human", "username": "human"}, "content": content, "channel_id": "home", "thread_id": thread, "timestamp": f"2026-09-05T00:00:{message_id[-1:]}Z", "mentions": [{"id": "bot"}] if mention else [], "message_reference": {"message_id": reply_to} if reply_to else {}}  # noqa: E501 # fmt: skip
 
 
-async def _action(client: httpx.AsyncClient, edge: EdgeName, message_id: str) -> httpx.Response:
+async def _action(client: httpx.AsyncClient, edge: EdgeName | str, message_id: str) -> httpx.Response:
+    edge = EdgeName(edge)
     if edge == EdgeName.DUPLICATE_QUESTION:
         payload = {"t": "MESSAGE_CREATE", "d": _message(message_id, "question")}
         await client.post("/v1/replay/discord", json=payload)
@@ -80,7 +83,7 @@ class _ReplayHarness(GraphHarness):
         assert state.vertex is vertex
         assert deadline_seconds > 0
 
-    async def execute_edge(self, edge: Edge, state: ModelState, *, deadline_seconds: int) -> None:
+    async def execute_edge(self, edge: GraphElement, state: ModelState, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name in ACTION_EDGES:
             self.response = await _action(self.client, edge.name, self.message_id)

@@ -1,8 +1,9 @@
 # Wiseman V2 Graph Model
 
-GraphWalker owns traversal. The Python model in `tests/graph_model.py` supplies
-the native GraphWalker document, the observable model data, vertex waiters, and
-one action function for every graph edge. The HTTP harness executes those
+GraphWalker owns traversal. The Python model in `tests/graphwalker/model.py`
+supplies the native GraphWalker document. `vertices.py` supplies observable
+state conditions, `edges.py` supplies one action function for every graph
+edge, and `graph_utils.py` owns shared model data and harness contracts. The HTTP harness executes those
 actions through `/v1/replay/discord`; it does not call `Engine` or mutate
 Temporal state directly.
 

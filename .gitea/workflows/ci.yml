@@ -41,7 +41,7 @@ jobs:
             writeFileSync("/tmp/graphwalker-cli-4.3.3.jar", Buffer.from(await response.arrayBuffer()));
           '
           echo '8300b4ad7faf2ad2c0acde9ec0a6ffbbafe59ce51d05b5e00e971272c9364317  /tmp/graphwalker-cli-4.3.3.jar' | sha256sum -c -
-          uv run python -c 'import json; from pathlib import Path; from tests.graph_model import model; Path("/tmp/wiseman.json").write_text(json.dumps(model()))'
+          uv run python -c 'import json; from pathlib import Path; from tests.graphwalker.model import model; Path("/tmp/wiseman.json").write_text(json.dumps(model()))'
           java -jar /tmp/graphwalker-cli-4.3.3.jar offline -g /tmp/wiseman.json -d 42 > /tmp/wiseman-path-coverage.jsonl
           test -s /tmp/wiseman-path-coverage.jsonl
           GRAPHWALKER_PATH=/tmp/wiseman-path-coverage.jsonl GRAPHWALKER_COVERAGE=1 uv run pytest -q tests/test_graph_http.py
