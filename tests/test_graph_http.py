@@ -18,29 +18,72 @@ from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
-from tests.graph_model import EDGES, ModelState, Vertex
+from tests.graph_model import EDGE_FUNCTIONS, EDGES, EDGES_BY_NAME, STATE_FUNCTIONS, Edge, EdgeName, GraphHarness, ModelState, Vertex
 
-ACTION_EDGES = {"background-chatter", "duplicate-question", "idle-stop", "steer-active-turn", "repeat-steer", "stop-active-turn", "stop-active-recovery", "stop-active-delivery", "duplicate-stop", "admit-question", "queue-question"}  # noqa: E501 # fmt: skip
+ACTION_EDGES = {
+    EdgeName.BACKGROUND_CHATTER,
+    EdgeName.RUNNING_BACKGROUND_CHATTER,
+    EdgeName.DUPLICATE_QUESTION,
+    EdgeName.IDLE_STOP,
+    EdgeName.STEER_ACTIVE_TURN,
+    EdgeName.REPEAT_STEER,
+    EdgeName.STOP_PREPARING,
+    EdgeName.STOP_RUNNING,
+    EdgeName.STOP_RECOVERING,
+    EdgeName.STOP_DELIVERING,
+    EdgeName.DUPLICATE_STOP,
+    EdgeName.ADMIT_QUESTION,
+    EdgeName.QUEUE_QUESTION,
+}
 
 
 def _message(message_id: str, content: str, *, thread: str | None = None, reply_to: str | None = None, mention: bool = True) -> dict[str, object]:
     return {"id": message_id, "author": {"id": "human", "username": "human"}, "content": content, "channel_id": "home", "thread_id": thread, "timestamp": f"2026-09-05T00:00:{message_id[-1:]}Z", "mentions": [{"id": "bot"}] if mention else [], "message_reference": {"message_id": reply_to} if reply_to else {}}  # noqa: E501 # fmt: skip
 
 
-async def _action(client: httpx.AsyncClient, edge: str, message_id: str) -> httpx.Response:
-    if edge == "duplicate-question":
+async def _action(client: httpx.AsyncClient, edge: EdgeName, message_id: str) -> httpx.Response:
+    if edge == EdgeName.DUPLICATE_QUESTION:
         payload = {"t": "MESSAGE_CREATE", "d": _message(message_id, "question")}
         await client.post("/v1/replay/discord", json=payload)
         return await client.post("/v1/replay/discord", json=payload)
-    if edge == "idle-stop":
+    if edge == EdgeName.IDLE_STOP:
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
-    if edge == "background-chatter":
+    if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "background", mention=False)})
-    if edge in {"steer-active-turn", "repeat-steer"}:
+    if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "steer", thread="thread", reply_to="answer"), "kind": "steer"})  # noqa: E501 # fmt: skip
-    if edge in {"stop-active-turn", "stop-active-recovery", "stop-active-delivery", "duplicate-stop"}:
+    if edge in {
+        EdgeName.STOP_PREPARING,
+        EdgeName.STOP_RUNNING,
+        EdgeName.STOP_RECOVERING,
+        EdgeName.STOP_DELIVERING,
+        EdgeName.DUPLICATE_STOP,
+    }:
         return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "/stop", thread="thread"), "kind": "stop"})
-    return await client.post("/v1/replay/discord", json={"t": "MESSAGE_CREATE", "d": _message(message_id, "question", thread=None if edge == "admit-question" else "thread"), "kind": "startup" if edge == "admit-question" else "followup"})  # noqa: E501 # fmt: skip
+    return await client.post(
+        "/v1/replay/discord",
+        json={
+            "t": "MESSAGE_CREATE",
+            "d": _message(message_id, "question", thread=None if edge == EdgeName.ADMIT_QUESTION else "thread"),
+            "kind": "startup" if edge == EdgeName.ADMIT_QUESTION else "followup",
+        },
+    )
+
+
+class _ReplayHarness(GraphHarness):
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+        self.message_id = "graph"
+        self.response: httpx.Response | None = None
+
+    async def wait_for_state(self, vertex: Vertex, state: ModelState, *, deadline_seconds: int) -> None:
+        assert state.vertex is vertex
+        assert deadline_seconds > 0
+
+    async def execute_edge(self, edge: Edge, state: ModelState, *, deadline_seconds: int) -> None:
+        assert deadline_seconds > 0
+        if edge.name in ACTION_EDGES:
+            self.response = await _action(self.client, edge.name, self.message_id)
 
 
 class _TemporalBoundary:
@@ -136,18 +179,34 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     app, state, executed = create_app(clients=mock_container()), ModelState(), set()
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
+        harness = _ReplayHarness(client)
         for index in range(0, len(elements) - 2, 2):
-            source, edge, target = Vertex(elements[index]), elements[index + 1], Vertex(elements[index + 2])
+            source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])
             executed.add((edge, source, target))
+            harness.message_id = f"graph-{index}"
+            await STATE_FUNCTIONS[source](harness, state)
+            await EDGE_FUNCTIONS[edge](harness, state)
             if edge in ACTION_EDGES:
-                response = await _action(client, edge, f"graph-{index}")
+                response = harness.response
+                assert response is not None
                 assert response.status_code == 200
-                if edge == "duplicate-question":
+                if edge == EdgeName.DUPLICATE_QUESTION:
                     assert response.json()["status"] == "duplicate"
-                elif edge in {"background-chatter", "idle-stop"}:
+                elif edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER, EdgeName.IDLE_STOP}:
                     assert response.json()["status"] == "ignored"
-                elif edge in {"admit-question", "queue-question"}:
+                elif edge in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:
                     assert response.json()["status"] == "queued"
             state.advance(edge, source, target, f"graph-{index}")
     if os.getenv("GRAPHWALKER_COVERAGE"):
         assert {(edge, source, target) for edge, source, target in EDGES} <= executed
+
+
+def _vertex(value: str) -> Vertex:
+    return Vertex(value.removeprefix("v-"))
+
+
+def _edge_name(value: str) -> EdgeName:
+    name = value.removeprefix("e-")
+    if name in EDGES_BY_NAME:
+        return EDGES_BY_NAME[name].name
+    return EdgeName(name)
