@@ -32,7 +32,7 @@ from tests.graphwalker.model import (
     Vertex,
 )
 from tests.graphwalker.vertices import STATE_FUNCTIONS
-from tests.graphwalker.wiseman_client import ACTION_EDGES, HttpWisemanClient
+from tests.graphwalker.wiseman_client import ACTION_EDGES, WisemanClient
 
 if TYPE_CHECKING:
     from app.models import Event
@@ -192,7 +192,7 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     app, executed = create_app(clients=clients), set()
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
-        wiseman = HttpWisemanClient(client)
+        wiseman = WisemanClient(client)
         harness = _ReplayHarness()
         context = GraphContext(harness, clients, wiseman)
         for index in range(0, len(elements) - 2, 2):

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from tests.graphwalker.model import EdgeName
 
@@ -38,11 +38,7 @@ class WisemanResponse:
     body: JsonObject
 
 
-class WisemanClient(Protocol):
-    async def send(self, edge: EdgeName, message_id: str, *, thread_id: str) -> WisemanResponse: ...
-
-
-class HttpWisemanClient:
+class WisemanClient:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self.client = client
 
