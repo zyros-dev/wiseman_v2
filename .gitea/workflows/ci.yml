@@ -6,7 +6,7 @@ on:
 
 jobs:
   quality:
-    runs-on: lappy2
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -65,7 +65,7 @@ jobs:
       - name: Dependency audit
         run: uv run pip-audit
   containers:
-    runs-on: lappy2
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
