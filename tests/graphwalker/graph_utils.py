@@ -49,6 +49,8 @@ class ModelState:
     def _remember_question(self, message_id: str) -> None:
         if message_id and message_id not in self.seen_questions:
             self.pending_questions.append(message_id)
+            if self.active_question is None:
+                self.active_question = message_id
             self.seen_questions.add(message_id)
 
     def _remember_background(self, message_id: str) -> None:
