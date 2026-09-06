@@ -31,6 +31,9 @@ class GraphRunner(MockHarnessRunner):
         self._stop_attempts: dict[str, int] = {}
         self._attempt_errors: dict[int, tuple[str, int, RunnerError]] = {}
         self._failed_threads: set[str] = set()
+        self._held_messages: set[str] = set()
+        self._released_messages: set[str] = set()
+        self._message_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
         self.start_error: RunnerError | None = None
         self.history: list[str] = []
 
@@ -72,20 +75,24 @@ class GraphRunner(MockHarnessRunner):
         self._active_message_ids.clear()
         self._attempt_gates.clear()
         self._failed_threads.clear()
+        self._held_messages.clear()
+        self._released_messages.clear()
+        self._message_gates.clear()
         self.clear_error()
         self.clear_stops()
 
-    def hold_next_attempt(self) -> None:
-        self.run_gate = asyncio.Event()
-        self.completion_gate = asyncio.Event()
-        self.progress_sent.clear()
-        self.run_started.clear()
-        self._record("hold-next")
+    def hold_message(self, message_id: str) -> None:
+        if message_id:
+            self._held_messages.add(message_id)
+            self._message_gates.setdefault(message_id, (asyncio.Event(), asyncio.Event()))
+            self._record(f"hold-message {message_id}")
 
-    def release_next_attempt(self) -> None:
-        self._record("release-next")
-        if self.run_gate is not None:
-            self.run_gate.set()
+    def release_message(self, message_id: str) -> None:
+        self._held_messages.discard(message_id)
+        self._released_messages.add(message_id)
+        gates = self._message_gates.setdefault(message_id, (asyncio.Event(), asyncio.Event()))
+        gates[0].set()
+        self._record(f"release-message {message_id}")
 
     def release_attempt(self, message_id: str) -> bool:
         self._record(f"release-attempt message={message_id}")
@@ -137,6 +144,15 @@ class GraphRunner(MockHarnessRunner):
     def _failure_replayed(self, thread: str) -> bool:
         return thread in self._failed_threads
 
+    def _gates_for(self, message_id: str) -> tuple[asyncio.Event | None, asyncio.Event | None]:
+        message_gates = self._message_gates.get(message_id)
+        if message_id not in self._held_messages and message_id not in self._released_messages and message_gates is None:
+            return self.run_gate, self.completion_gate
+        run_gate, completion_gate = message_gates or (asyncio.Event(), asyncio.Event())
+        self._message_gates[message_id] = (run_gate, completion_gate)
+        self._released_messages.discard(message_id)
+        return run_gate, completion_gate
+
     async def start(self, thread: str, user: str, workspace: str = "") -> str:
         self.state.call("runner", "start", thread, user, workspace)
         if self.start_error is not None:
@@ -161,8 +177,7 @@ class GraphRunner(MockHarnessRunner):
         message_id = MESSAGE_ID.get()
         self._active_message_ids[thread] = message_id
         try:
-            run_gate = self.run_gate
-            completion_gate = self.completion_gate
+            run_gate, completion_gate = self._gates_for(message_id)
             self._attempt_gates[attempt] = (run_gate, completion_gate)
             if run_gate is not None:
                 await run_gate.wait()

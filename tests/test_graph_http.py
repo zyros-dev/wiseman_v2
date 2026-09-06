@@ -188,9 +188,10 @@ class _ReplayHarness(GraphHarness):
         elif edge.name is EdgeName.DISPATCH_QUEUED:
             self.runner.clear_error()
             self.runner.clear_stops()
-            self.runner.release_next_attempt()
+            if context.state.wiseman.pending_questions:
+                self.runner.release_message(context.state.wiseman.pending_questions[0])
         elif edge.name is EdgeName.QUEUE_QUESTION:
-            self.runner.hold_next_attempt()
+            self.runner.hold_message(context.last_message_id)
         elif edge.name in {
             EdgeName.PREPARATION_FAILED,
             EdgeName.PERMANENT_FAILURE,
