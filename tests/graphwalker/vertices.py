@@ -13,40 +13,47 @@ if TYPE_CHECKING:
 from tests.graphwalker.model import STATE_TIMEOUTS, Vertex
 
 
+async def _wait_for_vertex(harness: GraphHarness, state: ModelState, vertex: Vertex) -> None:
+    if state.vertex is not vertex:
+        message = f"{vertex} condition requires model state {vertex}, got {state.vertex}"
+        raise AssertionError(message)
+    await harness.wait_for_state(vertex, state, deadline_seconds=STATE_TIMEOUTS[vertex])
+
+
 async def idle(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.IDLE, state, deadline_seconds=STATE_TIMEOUTS[Vertex.IDLE])
+    await _wait_for_vertex(harness, state, Vertex.IDLE)
 
 
 async def preparing(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.PREPARING, state, deadline_seconds=STATE_TIMEOUTS[Vertex.PREPARING])
+    await _wait_for_vertex(harness, state, Vertex.PREPARING)
 
 
 async def running(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.RUNNING, state, deadline_seconds=STATE_TIMEOUTS[Vertex.RUNNING])
+    await _wait_for_vertex(harness, state, Vertex.RUNNING)
 
 
 async def recovering(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.RECOVERING, state, deadline_seconds=STATE_TIMEOUTS[Vertex.RECOVERING])
+    await _wait_for_vertex(harness, state, Vertex.RECOVERING)
 
 
 async def cancelling(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.CANCELLING, state, deadline_seconds=STATE_TIMEOUTS[Vertex.CANCELLING])
+    await _wait_for_vertex(harness, state, Vertex.CANCELLING)
 
 
 async def delivering(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.DELIVERING, state, deadline_seconds=STATE_TIMEOUTS[Vertex.DELIVERING])
+    await _wait_for_vertex(harness, state, Vertex.DELIVERING)
 
 
 async def outcome_unknown(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.OUTCOME_UNKNOWN, state, deadline_seconds=STATE_TIMEOUTS[Vertex.OUTCOME_UNKNOWN])
+    await _wait_for_vertex(harness, state, Vertex.OUTCOME_UNKNOWN)
 
 
 async def error(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.ERROR, state, deadline_seconds=STATE_TIMEOUTS[Vertex.ERROR])
+    await _wait_for_vertex(harness, state, Vertex.ERROR)
 
 
 async def retired(harness: GraphHarness, state: ModelState) -> None:
-    await harness.wait_for_state(Vertex.RETIRED, state, deadline_seconds=STATE_TIMEOUTS[Vertex.RETIRED])
+    await _wait_for_vertex(harness, state, Vertex.RETIRED)
 
 
 STATE_FUNCTIONS: Mapping[Vertex, StateFunction] = {
