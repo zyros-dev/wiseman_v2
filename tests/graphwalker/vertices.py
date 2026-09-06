@@ -631,50 +631,25 @@ async def _wait_for_vertex(context: GraphContext, vertex: Vertex, assertion: Obs
     assertion(context, observation)
 
 
-async def idle(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.IDLE, _assert_idle_observation)
-
-
-async def preparing(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.PREPARING, _assert_preparing_observation)
-
-
-async def running(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.RUNNING, _assert_running_observation)
-
-
-async def recovering(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.RECOVERING, _assert_recovering_observation)
-
-
-async def cancelling(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.CANCELLING, _assert_cancelling_observation)
-
-
-async def delivering(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.DELIVERING, _assert_delivering_observation)
-
-
-async def outcome_unknown(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.OUTCOME_UNKNOWN, _assert_outcome_unknown_observation)
-
-
-async def error(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.ERROR, _assert_error_observation)
-
-
-async def retired(context: GraphContext) -> None:
-    await _wait_for_vertex(context, Vertex.RETIRED, _assert_retired_observation)
-
-
-STATE_FUNCTIONS: Mapping[Vertex, StateFunction] = {
-    Vertex.IDLE: idle,
-    Vertex.PREPARING: preparing,
-    Vertex.RUNNING: running,
-    Vertex.RECOVERING: recovering,
-    Vertex.CANCELLING: cancelling,
-    Vertex.DELIVERING: delivering,
-    Vertex.OUTCOME_UNKNOWN: outcome_unknown,
-    Vertex.ERROR: error,
-    Vertex.RETIRED: retired,
+OBSERVATION_ASSERTIONS: Mapping[Vertex, ObservationAssertion] = {
+    Vertex.IDLE: _assert_idle_observation,
+    Vertex.PREPARING: _assert_preparing_observation,
+    Vertex.RUNNING: _assert_running_observation,
+    Vertex.RECOVERING: _assert_recovering_observation,
+    Vertex.CANCELLING: _assert_cancelling_observation,
+    Vertex.DELIVERING: _assert_delivering_observation,
+    Vertex.OUTCOME_UNKNOWN: _assert_outcome_unknown_observation,
+    Vertex.ERROR: _assert_error_observation,
+    Vertex.RETIRED: _assert_retired_observation,
 }
+
+
+def _vertex_function(vertex: Vertex) -> StateFunction:
+    async def state(context: GraphContext) -> None:
+        await _wait_for_vertex(context, vertex, OBSERVATION_ASSERTIONS[vertex])
+
+    state.__name__ = vertex.value.replace("-", "_")
+    return state
+
+
+STATE_FUNCTIONS: Mapping[Vertex, StateFunction] = {vertex: _vertex_function(vertex) for vertex in Vertex}

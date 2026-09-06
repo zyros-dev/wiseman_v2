@@ -63,8 +63,9 @@ class Phoenix:
     async def record(self, trace: str, node: str, **data: object) -> None:
         item = {"trace": trace, "node": node, **{k: v for k, v in data.items() if v is not None}}
         self.records.append(item)
-        if node == "admission" and isinstance(data.get("audit_id"), str):
-            audit_id = data["audit_id"]
+        audit_id_value = data.get("audit_id")
+        if node == "admission" and isinstance(audit_id_value, str):
+            audit_id = audit_id_value
             artifact = {
                 "schema": "wiseman.admission.audit.v1",
                 "audit_id": audit_id,

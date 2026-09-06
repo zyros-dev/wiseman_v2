@@ -7,10 +7,9 @@ import os
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import httpx
-from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -22,7 +21,7 @@ from app.engine import Engine, EngineConfig
 from app.http_api import create_app
 from app.nodes import TurnActivities
 from app.runner import RunnerError
-from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
+from app.temporal_runtime import TemporalRuntime, ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
 from tests.graphwalker.edges import EDGE_FUNCTIONS
 from tests.graphwalker.graph_utils import GraphContext, GraphElement, GraphHarness
 from tests.graphwalker.model import (
@@ -39,10 +38,6 @@ from tests.graphwalker.runtime_observer import RuntimeObserver
 from tests.graphwalker.vertices import STATE_FUNCTIONS
 from tests.graphwalker.wiseman_client import WisemanClient
 
-if TYPE_CHECKING:
-    from app.models import Event
-    from app.types import JsonObject
-
 
 def _ordered_history(context: GraphContext, observation: RuntimeObservation) -> bool:
     expected = [message.id for message in context.state.chat.messages]
@@ -52,11 +47,6 @@ def _ordered_history(context: GraphContext, observation: RuntimeObservation) -> 
         if cursor < len(expected) and message_id == expected[cursor]:
             cursor += 1
     return cursor == len(expected)
-
-
-def _session_ids(session: JsonObject, name: str) -> tuple[str, ...]:
-    value = session.get(name)
-    return tuple(str(item) for item in value if item) if isinstance(value, list) else ()
 
 
 def _edge_observed(context: GraphContext, vertex: Vertex, observation: RuntimeObservation) -> bool:
@@ -162,6 +152,23 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
         sequence = 0
     timestamp = f"2026-09-05T00:{sequence // 60:02d}:{sequence % 60:02d}Z"
     return {"id": message_id, "author": {"id": "human", "username": "human"}, "content": content, "channel_id": "home", "thread_id": thread, "timestamp": timestamp, "mentions": [{"id": "bot"}] if mention else [], "message_reference": {"message_id": reply_to} if reply_to else {}}  # noqa: E501 # fmt: skip
+
+
+async def _child_result(client, message_id: str) -> dict[str, object]:
+    for _ in range(100):
+        try:
+            result = await client.get_workflow_handle(f"wiseman-turn-{message_id}").result()
+            for _ in range(100):
+                state = await client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session)
+                if message_id in state.get("processed", []):
+                    break
+                await asyncio.sleep(0.05)
+            return result  # noqa: TRY300
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            await asyncio.sleep(0.05)
+    raise AssertionError("turn did not start")
 
 
 class _ReplayHarness(GraphHarness):
@@ -442,107 +449,11 @@ class _ReplayHarness(GraphHarness):
             raise AssertionError(message) from exc
 
 
-class _TemporalBoundary:
-    def __init__(self, client) -> None:
-        self.client = client
-
-    async def start(self) -> None: ...
-
-    async def close(self) -> None: ...
-
-    async def submit(self, event: JsonObject) -> dict[str, object] | None:
-        trigger = cast("dict[str, object]", event["trigger"])
-        workflow_id = f"wiseman-{trigger.get('thread_id') or trigger['channel_id']}"
-        try:
-            await self.client.start_workflow(ThreadWorkflow.run, {"event": event, "state": {}}, id=workflow_id, task_queue="graph")
-        except WorkflowAlreadyStartedError:
-            handle = self.client.get_workflow_handle(workflow_id)
-            message_id = str(trigger.get("id", ""))
-            session = cast("JsonObject", await handle.query(ThreadWorkflow.session))
-            known = {
-                str(session.get("active_message", "")),
-                *_session_ids(session, "processed"),
-                *_session_ids(session, "message_ids"),
-                *_session_ids(session, "pending_message_ids"),
-            }
-            if message_id in known:
-                return {"status": "duplicate", "message_id": message_id}
-            await handle.signal(ThreadWorkflow.submit, event)
-        return None
-
-    async def stop(self, event: Event) -> bool:
-        try:
-            state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
-        except RPCError as exc:
-            if exc.status == RPCStatusCode.NOT_FOUND:
-                return False
-            raise
-        message_id = str(state.get("active_message", ""))
-        return bool(
-            message_id
-            and await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("stop", event.model_dump(mode="json"), id=event.trigger.id)
-        )
-
-    async def steer(self, event: Event) -> bool:
-        state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
-        message_id = str(state.get("active_message", ""))
-        return bool(
-            message_id
-            and await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("steer", event.model_dump(mode="json"), id=event.trigger.id)
-        )
-
-    async def touch(self, event: Event) -> None:
-        if event.trigger.thread_id:
-            try:
-                await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id}").signal(ThreadWorkflow.touch, event.model_dump(mode="json"))
-            except RPCError as exc:
-                if exc.status != RPCStatusCode.NOT_FOUND:
-                    raise
-
-    async def snapshot(self, thread_id: str) -> JsonObject:
-        handle = self.client.get_workflow_handle(f"wiseman-{thread_id}")
-        try:
-            session = cast("JsonObject", await handle.query(ThreadWorkflow.session))
-        except RPCError as exc:
-            if exc.status != RPCStatusCode.NOT_FOUND:
-                raise
-            result = cast("JsonObject", await handle.result())
-            state = result.get("state")
-            if not isinstance(state, dict):
-                raise
-            return {**state, "active_message": "", "active_timestamp": "", "closed": True}
-        if message_id := session.get("active_message"):
-            try:
-                session["active_turn_snapshot"] = cast(
-                    "JsonObject", await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").query(TurnWorkflow.snapshot)
-                )
-            except RPCError as exc:
-                if exc.status != RPCStatusCode.NOT_FOUND:
-                    raise
-        return session
-
-
-async def _child_result(client, message_id: str) -> dict[str, object]:
-    for _ in range(100):
-        try:
-            result = await client.get_workflow_handle(f"wiseman-turn-{message_id}").result()
-            for _ in range(100):
-                state = await client.get_workflow_handle("wiseman-thread").query(ThreadWorkflow.session)
-                if message_id in state.get("processed", []):
-                    break
-                await asyncio.sleep(0.05)
-            return result  # noqa: TRY300
-        except RPCError as exc:
-            if exc.status != RPCStatusCode.NOT_FOUND:
-                raise
-            await asyncio.sleep(0.05)
-    raise AssertionError("turn did not start")
-
-
 async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        clients = mock_container(temporal=_TemporalBoundary(env.client))
+        temporal = TemporalRuntime(env.client, "graph")
+        clients = mock_container(temporal=temporal)
         runner = GraphRunner(cast("MockHarnessRunner", clients.runner).state)
         clients.runner = runner
         activities = TurnActivities(Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord)), env.client)
@@ -590,7 +501,7 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     if not path: return  # noqa: E701 # fmt: skip
     executed: set[tuple[EdgeName, Vertex, Vertex]] = set()
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        clients = mock_container(temporal=_TemporalBoundary(env.client))
+        clients = mock_container(temporal=TemporalRuntime(env.client, "graph"))
         runner = GraphRunner(cast("MockHarnessRunner", clients.runner).state)
         clients.runner = runner
         activities = TurnActivities(Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord)), env.client)

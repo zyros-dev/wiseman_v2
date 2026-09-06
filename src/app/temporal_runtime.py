@@ -164,10 +164,7 @@ class TurnWorkflow:
         if incoming.trigger.id in self.work.state.processed:
             return True
         if await self._control("steer", event):
-            _record_state_message(self.work.state, incoming)
-            if incoming.trigger.id not in self.work.state.steering_ids:
-                self.work.state.steering_ids.append(incoming.trigger.id)
-            self.work.state.processed.add(incoming.trigger.id)
+            self._accept_control(incoming, self.work.state.steering_ids)
             return True
         return False
 
@@ -181,20 +178,25 @@ class TurnWorkflow:
         if incoming.anchor_id and incoming.anchor_id != self.work.event.trigger.id:
             return False
         if not self.inferencing:
-            self.stop_requested = True
-            self.stop_commands.add(incoming.trigger.id)
-            _record_state_message(self.work.state, incoming)
-            if incoming.trigger.id not in self.work.state.stop_command_ids:
-                self.work.state.stop_command_ids.append(incoming.trigger.id)
+            self._accept_stop(incoming)
             return True
         if await self._control("stop", event):
-            self.stop_requested = True
-            self.stop_commands.add(incoming.trigger.id)
-            _record_state_message(self.work.state, incoming)
-            if incoming.trigger.id not in self.work.state.stop_command_ids:
-                self.work.state.stop_command_ids.append(incoming.trigger.id)
+            self._accept_stop(incoming)
             return True
         return False
+
+    def _accept_control(self, incoming: Event, ids: list[str]) -> None:
+        assert self.work is not None
+        _record_state_message(self.work.state, incoming)
+        if incoming.trigger.id not in ids:
+            ids.append(incoming.trigger.id)
+        self.work.state.processed.add(incoming.trigger.id)
+
+    def _accept_stop(self, incoming: Event) -> None:
+        self.stop_requested = True
+        self.stop_commands.add(incoming.trigger.id)
+        assert self.work is not None
+        self._accept_control(incoming, self.work.state.stop_command_ids)
 
     async def _control(self, name: str, event: dict) -> bool:
         assert self.work is not None
@@ -239,12 +241,7 @@ class TurnWorkflow:
                 retry_policy=DELIVERY_RETRY_POLICY if durable else TRANSPORT_RETRY_POLICY,
             )
         )
-        result.state.processed.update(self.work.state.processed)
-        for field_name in ("message_ids", "background_context_ids", "consumed_context_ids", "steering_ids", "stop_command_ids"):
-            values = list(getattr(self.work.state, field_name))
-            merged = list(getattr(result.state, field_name))
-            setattr(result.state, field_name, _merge_ids(merged, values))
-        result.state.message_timestamps.update(self.work.state.message_timestamps)
+        _merge_work_state(result.state, self.work.state)
         self.work = result
 
     @workflow.run
@@ -533,16 +530,18 @@ class ThreadWorkflow:
 
 
 class TemporalRuntime:
-    def __init__(self, address: str, queue: str) -> None:
-        self.address, self.queue = address, queue
-        self.client: object | None = None
+    def __init__(self, address: str | Client, queue: str) -> None:
+        self.address = address if isinstance(address, str) else ""
+        self.queue = queue
+        self.client: Client | None = None if isinstance(address, str) else address
         self.worker_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         from temporalio.client import Client
         from temporalio.contrib.opentelemetry import TracingInterceptor
 
-        self.client = await Client.connect(self.address, interceptors=[TracingInterceptor(always_create_workflow_spans=True)])
+        if self.client is None:
+            self.client = await Client.connect(self.address, interceptors=[TracingInterceptor(always_create_workflow_spans=True)])
         self.worker_task = asyncio.create_task(self._serve())
 
     async def _serve(self) -> None:
@@ -687,6 +686,19 @@ def _merge_ids(existing: list[str], updates: list[str]) -> list[str]:
         if value not in merged:
             merged.append(value)
     return merged
+
+
+def _merge_work_state(result: State, previous: State) -> None:
+    result.processed.update(previous.processed)
+    for result_values, previous_values in (
+        (result.message_ids, previous.message_ids),
+        (result.background_context_ids, previous.background_context_ids),
+        (result.consumed_context_ids, previous.consumed_context_ids),
+        (result.steering_ids, previous.steering_ids),
+        (result.stop_command_ids, previous.stop_command_ids),
+    ):
+        result_values[:] = _merge_ids(result_values, previous_values)
+    result.message_timestamps.update(previous.message_timestamps)
 
 
 def _merge_thread_state(previous: JsonObject, result: JsonObject) -> JsonObject:
