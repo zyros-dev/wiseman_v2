@@ -176,6 +176,36 @@ class WisemanState:
     turns: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedChatState:
+    message_ids: tuple[str, ...] = ()
+    background_context_ids: tuple[str, ...] = ()
+    consumed_context_ids: tuple[str, ...] = ()
+    steering_ids: tuple[str, ...] = ()
+    stop_command_ids: tuple[str, ...] = ()
+    answer_message_ids: tuple[str, ...] = ()
+    progress_message_ids: tuple[str, ...] = ()
+    archived: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedWisemanState:
+    phase: Vertex
+    active_question: str | None = None
+    pending_question_ids: tuple[str, ...] = ()
+    session_id: str | None = None
+    turn: int = 0
+    result_known: bool = False
+    error: bool = False
+    stop_target_question_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeObservation:
+    chat: ObservedChatState
+    wiseman: ObservedWisemanState
+
+
 @dataclass(slots=True)
 class GraphState:
     vertex: Vertex = Vertex.IDLE

@@ -20,7 +20,15 @@ from app.nodes import TurnActivities
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
 from tests.graphwalker.edges import EDGE_FUNCTIONS
 from tests.graphwalker.graph_utils import GraphContext, GraphElement, GraphHarness
-from tests.graphwalker.model import EDGES, EDGES_BY_NAME, EdgeName, Vertex
+from tests.graphwalker.model import (
+    EDGES,
+    EDGES_BY_NAME,
+    EdgeName,
+    ObservedChatState,
+    ObservedWisemanState,
+    RuntimeObservation,
+    Vertex,
+)
 from tests.graphwalker.vertices import STATE_FUNCTIONS
 
 ACTION_EDGES = {
@@ -79,9 +87,34 @@ class _ReplayHarness(GraphHarness):
         self.client = client
         self.response: httpx.Response | None = None
 
-    async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> None:
+    async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
         assert context.state.vertex is vertex
         assert deadline_seconds > 0
+        state = context.state
+        active_question = state.wiseman.active_question
+        terminal = vertex in {Vertex.DELIVERING, Vertex.ERROR}
+        return RuntimeObservation(
+            chat=ObservedChatState(
+                message_ids=tuple(message.id for message in state.chat.messages),
+                background_context_ids=tuple(state.chat.background_context),
+                consumed_context_ids=tuple(state.chat.consumed_context),
+                steering_ids=tuple(state.chat.steering_messages),
+                stop_command_ids=tuple(state.chat.stop_commands),
+                answer_message_ids=(f"answer-{active_question}",) if vertex is Vertex.DELIVERING and active_question else (),
+                progress_message_ids=(f"progress-{active_question}",) if vertex in {Vertex.PREPARING, Vertex.RUNNING} and active_question else (),
+                archived=vertex is Vertex.RETIRED,
+            ),
+            wiseman=ObservedWisemanState(
+                phase=vertex,
+                active_question=active_question,
+                pending_question_ids=tuple(state.wiseman.pending_questions),
+                session_id=state.wiseman.session_id,
+                turn=state.wiseman.turns,
+                result_known=terminal,
+                error=vertex is Vertex.ERROR,
+                stop_target_question_id=active_question if vertex is Vertex.CANCELLING else None,
+            ),
+        )
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0

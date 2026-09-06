@@ -63,3 +63,12 @@ flowchart TD
 - Verification failures are appended to `GraphState.failures` with their step,
   category, location, expected value, observed value, and message ID before
   the current walk stops. Independent seeded walks still run after cleanup.
+
+Each vertex condition asks the harness for a `RuntimeObservation` and checks
+the observed Wiseman phase, active and queued questions, session and turn
+continuity, chat message order, background/consumed context, steering and
+stop IDs, terminal result cardinality, progress-preview cardinality, and
+retirement archival. The current replay harness supplies a deterministic
+observation from the model so this contract is exercised through the HTTP
+boundary; a live Temporal/Discord harness can replace that observation
+provider without changing the graph conditions.

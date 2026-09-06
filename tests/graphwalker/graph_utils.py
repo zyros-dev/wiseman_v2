@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import NoReturn, Protocol
 
-from tests.graphwalker.model import FailureDetails, GraphState, Vertex
+from tests.graphwalker.model import FailureDetails, GraphState, RuntimeObservation, Vertex
 
 
 class GraphElement(Protocol):
@@ -22,7 +22,7 @@ class GraphElement(Protocol):
 
 
 class GraphHarness(Protocol):
-    async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> None: ...
+    async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation: ...
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None: ...
 
