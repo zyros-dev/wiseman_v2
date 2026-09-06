@@ -71,4 +71,7 @@ stop IDs, terminal result cardinality, progress-preview cardinality, and
 retirement archival. The current replay harness supplies a deterministic
 observation from the model so this contract is exercised through the HTTP
 boundary; a live Temporal/Discord harness can replace that observation
-provider without changing the graph conditions.
+provider without changing the graph conditions. Running additionally requires
+Discord's typing signal to be observable. Active states must retain the
+current turn number; running must have one repeatedly updated progress message,
+and delivery must replace that buildup with one edited answer message.

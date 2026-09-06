@@ -104,34 +104,14 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
             "runtime observation lost or reordered chat messages",
         )
     comparisons: tuple[ObservationComparison, ...] = (
-        (
-            "chat.background_context",
-            tuple(state.chat.background_context),
-            observation.chat.background_context_ids,
-            "runtime observation changed unconsumed background context",
-        ),
-        (
-            "chat.consumed_context",
-            tuple(state.chat.consumed_context),
-            observation.chat.consumed_context_ids,
-            "runtime observation changed the consumed-context cursor",
-        ),
-        (
-            "wiseman.pending_questions",
-            tuple(state.wiseman.pending_questions),
-            observation.wiseman.pending_question_ids,
-            "runtime observation lost or reordered queued questions",
-        ),
-        ("wiseman.active_question", state.wiseman.active_question, observation.wiseman.active_question, "runtime observation changed the active question"),
-        ("wiseman.session_id", state.wiseman.session_id, observation.wiseman.session_id, "runtime observation changed the Codex session"),
-        ("wiseman.turn", state.wiseman.turns, observation.wiseman.turn, "runtime observation changed the settled-turn count"),
-        ("chat.steering", tuple(state.chat.steering_messages), observation.chat.steering_ids, "runtime observation lost or duplicated steering messages"),
-        (
-            "chat.stop_commands",
-            tuple(sorted(state.chat.stop_commands)),
-            tuple(sorted(observation.chat.stop_command_ids)),
-            "runtime observation lost or duplicated stop commands",
-        ),
+        ("chat.background_context", tuple(state.chat.background_context), observation.chat.background_context_ids, "unconsumed context changed"),
+        ("chat.consumed_context", tuple(state.chat.consumed_context), observation.chat.consumed_context_ids, "consumed cursor changed"),
+        ("wiseman.pending_questions", tuple(state.wiseman.pending_questions), observation.wiseman.pending_question_ids, "queued questions lost or reordered"),
+        ("wiseman.active_question", state.wiseman.active_question, observation.wiseman.active_question, "active question changed"),
+        ("wiseman.session_id", state.wiseman.session_id, observation.wiseman.session_id, "Codex session changed"),
+        ("wiseman.turn", state.wiseman.turns, observation.wiseman.turn, "settled turn count changed"),
+        ("chat.steering", tuple(state.chat.steering_messages), observation.chat.steering_ids, "steering lost or duplicated"),
+        ("chat.stop_commands", tuple(sorted(state.chat.stop_commands)), tuple(sorted(observation.chat.stop_command_ids)), "stops lost or duplicated"),
     )
     for location, expected, observed, message in comparisons:
         _assert_equal(context, location, expected, observed, message)
@@ -149,9 +129,14 @@ def _assert_no_terminal_result(context: GraphContext, observation: RuntimeObserv
 
 def _assert_active_phase(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
     _assert_phase(context, observation, vertex)
-    if observation.wiseman.active_question is None:
-        _reject_observation(context, f"{vertex}.active_question", "question id", "none", f"{vertex} runtime has no active question")
+    _assert_active_turn_number(context, observation, str(vertex))
     _assert_no_terminal_result(context, observation, str(vertex))
+
+
+def _assert_active_turn_number(context: GraphContext, observation: RuntimeObservation, location: str) -> None:
+    if observation.wiseman.active_question is None:
+        _reject_observation(context, f"{location}.active_question", "question id", "none", f"{location} runtime has no active question")
+    _assert_equal(context, f"{location}.active_turn", context.state.wiseman.turns + 1, observation.wiseman.active_turn, "active turn number changed")
 
 
 def _assert_progress_bound(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
@@ -178,7 +163,13 @@ def _assert_preparing_observation(context: GraphContext, observation: RuntimeObs
 
 def _assert_running_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_active_phase(context, observation, Vertex.RUNNING)
-    _assert_progress_bound(context, observation, Vertex.RUNNING)
+    _assert_equal(context, "running.progress", 1, len(observation.chat.progress_message_ids), "running must have one progress message")
+    if observation.chat.progress_edit_count < 1:
+        _reject_observation(
+            context, "running.progress_edits", "at least one update", str(observation.chat.progress_edit_count), "running progress was never updated"
+        )
+    if not observation.chat.typing:
+        _reject_observation(context, "running.typing", "typing signal", "absent", "running has no Discord typing signal")
 
 
 def _assert_recovering_observation(context: GraphContext, observation: RuntimeObservation) -> None:
@@ -189,6 +180,7 @@ def _assert_recovering_observation(context: GraphContext, observation: RuntimeOb
 
 def _assert_cancelling_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_phase(context, observation, Vertex.CANCELLING)
+    _assert_active_turn_number(context, observation, "cancelling")
     active_question = context.state.wiseman.active_question
     if active_question is None or not observation.chat.stop_command_ids:
         _reject_observation(context, "cancelling.target", "active question and stop command", "missing value", "cancellation has no active target")
@@ -204,18 +196,22 @@ def _assert_cancelling_observation(context: GraphContext, observation: RuntimeOb
 
 def _assert_delivering_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_phase(context, observation, Vertex.DELIVERING)
-    if not observation.wiseman.result_known or len(observation.chat.answer_message_ids) != 1:
+    _assert_active_turn_number(context, observation, "delivering")
+    _assert_equal(context, "delivering.progress", 0, len(observation.chat.progress_message_ids), "delivery retained progress buildup")
+    if not observation.wiseman.result_known or len(observation.chat.answer_message_ids) != 1 or observation.chat.answer_edit_count < 1:
         _reject_observation(context, "delivering.answer", "one known answer", str(observation), "delivery lacks exactly one answer result")
 
 
 def _assert_outcome_unknown_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_phase(context, observation, Vertex.OUTCOME_UNKNOWN)
+    _assert_active_turn_number(context, observation, "outcome_unknown")
     if observation.wiseman.result_known or observation.chat.answer_message_ids:
         _reject_observation(context, "outcome_unknown.result", "unknown result without answer", str(observation), "unknown execution produced an answer")
 
 
 def _assert_error_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_phase(context, observation, Vertex.ERROR)
+    _assert_active_turn_number(context, observation, "error")
     if not observation.wiseman.error:
         _reject_observation(context, "error.result", "error result", str(observation.wiseman.error), "error state has no recorded error")
 

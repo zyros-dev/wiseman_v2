@@ -102,6 +102,9 @@ class _ReplayHarness(GraphHarness):
                 stop_command_ids=tuple(state.chat.stop_commands),
                 answer_message_ids=(f"answer-{active_question}",) if vertex is Vertex.DELIVERING and active_question else (),
                 progress_message_ids=(f"progress-{active_question}",) if vertex in {Vertex.PREPARING, Vertex.RUNNING} and active_question else (),
+                progress_edit_count=1 if vertex in {Vertex.PREPARING, Vertex.RUNNING} and active_question else 0,
+                answer_edit_count=1 if vertex is Vertex.DELIVERING and active_question else 0,
+                typing=vertex is Vertex.RUNNING,
                 archived=vertex is Vertex.RETIRED,
             ),
             wiseman=ObservedWisemanState(
@@ -110,6 +113,7 @@ class _ReplayHarness(GraphHarness):
                 pending_question_ids=tuple(state.wiseman.pending_questions),
                 session_id=state.wiseman.session_id,
                 turn=state.wiseman.turns,
+                active_turn=state.wiseman.turns + 1 if active_question else None,
                 result_known=terminal,
                 error=vertex is Vertex.ERROR,
                 stop_target_question_id=active_question if vertex is Vertex.CANCELLING else None,

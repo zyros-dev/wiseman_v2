@@ -185,6 +185,9 @@ class ObservedChatState:
     stop_command_ids: tuple[str, ...] = ()
     answer_message_ids: tuple[str, ...] = ()
     progress_message_ids: tuple[str, ...] = ()
+    progress_edit_count: int = 0
+    answer_edit_count: int = 0
+    typing: bool = False
     archived: bool = False
 
 
@@ -195,6 +198,7 @@ class ObservedWisemanState:
     pending_question_ids: tuple[str, ...] = ()
     session_id: str | None = None
     turn: int = 0
+    active_turn: int | None = None
     result_known: bool = False
     error: bool = False
     stop_target_question_id: str | None = None
