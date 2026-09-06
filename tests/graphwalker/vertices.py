@@ -85,6 +85,11 @@ def _assert_subsequence(expected: tuple[str, ...], observed: tuple[str, ...]) ->
     return position == len(expected)
 
 
+def _assert_equal(context: GraphContext, location: str, expected: object, observed: object, message: str) -> None:
+    if expected != observed:
+        _reject_observation(context, location, str(expected), str(observed), message)
+
+
 def _assert_observation_context(context: GraphContext, observation: RuntimeObservation) -> None:
     state = context.state
     expected_messages = tuple(message.id for message in state.chat.messages)
@@ -96,135 +101,108 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
             str(observation.chat.message_ids),
             "runtime observation lost or reordered chat messages",
         )
-    expected_background = tuple(state.chat.background_context)
-    if observation.chat.background_context_ids != expected_background:
-        _reject_observation(
-            context,
+    comparisons: tuple[tuple[str, object, object, str], ...] = (
+        (
             "chat.background_context",
-            str(expected_background),
-            str(observation.chat.background_context_ids),
+            tuple(state.chat.background_context),
+            observation.chat.background_context_ids,
             "runtime observation changed unconsumed background context",
-        )
-    expected_consumed = tuple(state.chat.consumed_context)
-    if observation.chat.consumed_context_ids != expected_consumed:
-        _reject_observation(
-            context,
+        ),
+        (
             "chat.consumed_context",
-            str(expected_consumed),
-            str(observation.chat.consumed_context_ids),
+            tuple(state.chat.consumed_context),
+            observation.chat.consumed_context_ids,
             "runtime observation changed the consumed-context cursor",
-        )
-    expected_pending = tuple(state.wiseman.pending_questions)
-    if observation.wiseman.pending_question_ids != expected_pending:
-        _reject_observation(
-            context,
+        ),
+        (
             "wiseman.pending_questions",
-            str(expected_pending),
-            str(observation.wiseman.pending_question_ids),
+            tuple(state.wiseman.pending_questions),
+            observation.wiseman.pending_question_ids,
             "runtime observation lost or reordered queued questions",
-        )
-    if observation.wiseman.active_question != state.wiseman.active_question:
-        _reject_observation(
-            context,
+        ),
+        (
             "wiseman.active_question",
-            str(state.wiseman.active_question),
-            str(observation.wiseman.active_question),
+            state.wiseman.active_question,
+            observation.wiseman.active_question,
             "runtime observation changed the active question",
-        )
-    if observation.wiseman.session_id != state.wiseman.session_id:
-        _reject_observation(
-            context,
+        ),
+        (
             "wiseman.session_id",
-            str(state.wiseman.session_id),
-            str(observation.wiseman.session_id),
+            state.wiseman.session_id,
+            observation.wiseman.session_id,
             "runtime observation changed the Codex session",
-        )
-    if observation.wiseman.turn != state.wiseman.turns:
-        _reject_observation(
-            context,
+        ),
+        (
             "wiseman.turn",
-            str(state.wiseman.turns),
-            str(observation.wiseman.turn),
+            state.wiseman.turns,
+            observation.wiseman.turn,
             "runtime observation changed the settled-turn count",
-        )
-    expected_steering = tuple(state.chat.steering_messages)
-    if observation.chat.steering_ids != expected_steering:
-        _reject_observation(
-            context,
+        ),
+        (
             "chat.steering",
-            str(expected_steering),
-            str(observation.chat.steering_ids),
+            tuple(state.chat.steering_messages),
+            observation.chat.steering_ids,
             "runtime observation lost or duplicated steering messages",
-        )
-    expected_stops = tuple(sorted(state.chat.stop_commands))
-    if tuple(sorted(observation.chat.stop_command_ids)) != expected_stops:
-        _reject_observation(
-            context,
+        ),
+        (
             "chat.stop_commands",
-            str(expected_stops),
-            str(tuple(sorted(observation.chat.stop_command_ids))),
+            tuple(sorted(state.chat.stop_commands)),
+            tuple(sorted(observation.chat.stop_command_ids)),
             "runtime observation lost or duplicated stop commands",
-        )
+        ),
+    )
+    for location, expected, observed, message in comparisons:
+        _assert_equal(context, location, expected, observed, message)
 
 
 def _assert_phase(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
-    if observation.wiseman.phase is not vertex:
+    _assert_equal(context, f"phase:{vertex}", vertex, observation.wiseman.phase, f"runtime Wiseman phase is not {vertex}")
+    _assert_observation_context(context, observation)
+
+
+def _assert_no_terminal_result(context: GraphContext, observation: RuntimeObservation, location: str) -> None:
+    if observation.wiseman.result_known or observation.wiseman.error:
+        _reject_observation(context, location, "no terminal result", "terminal result", f"{location} runtime exposes a terminal result")
+
+
+def _assert_active_phase(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    _assert_phase(context, observation, vertex)
+    if observation.wiseman.active_question is None:
+        _reject_observation(context, f"{vertex}.active_question", "question id", "none", f"{vertex} runtime has no active question")
+    _assert_no_terminal_result(context, observation, str(vertex))
+
+
+def _assert_progress_bound(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    if len(observation.chat.progress_message_ids) > 1:
         _reject_observation(
             context,
-            f"phase:{vertex}",
-            str(vertex),
-            str(observation.wiseman.phase),
-            f"runtime Wiseman phase is not {vertex}",
+            f"{vertex}.progress",
+            "at most one progress message",
+            str(observation.chat.progress_message_ids),
+            f"{vertex} created duplicate progress messages",
         )
-    _assert_observation_context(context, observation)
 
 
 def _assert_idle_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_phase(context, observation, Vertex.IDLE)
-    if observation.wiseman.active_question is not None:
-        _reject_observation(context, "idle.active_question", "none", str(observation.wiseman.active_question), "idle runtime retains active work")
-    if observation.wiseman.result_known or observation.wiseman.error:
-        _reject_observation(context, "idle.result", "no terminal result", "terminal result", "idle runtime exposes a terminal result")
+    _assert_equal(context, "idle.active_question", None, observation.wiseman.active_question, "idle runtime retains active work")
+    _assert_no_terminal_result(context, observation, "idle")
 
 
 def _assert_preparing_observation(context: GraphContext, observation: RuntimeObservation) -> None:
-    _assert_phase(context, observation, Vertex.PREPARING)
-    if observation.wiseman.active_question is None:
-        _reject_observation(context, "preparing.active_question", "question id", "none", "preparing runtime has no admitted question")
-    if len(observation.chat.progress_message_ids) > 1:
-        _reject_observation(
-            context,
-            "preparing.progress",
-            "at most one progress message",
-            str(observation.chat.progress_message_ids),
-            "preparing created duplicate progress messages",
-        )
-    if observation.wiseman.result_known or observation.wiseman.error:
-        _reject_observation(context, "preparing.result", "no terminal result", "terminal result", "preparing runtime already exposes a result")
+    _assert_active_phase(context, observation, Vertex.PREPARING)
+    _assert_progress_bound(context, observation, Vertex.PREPARING)
 
 
 def _assert_running_observation(context: GraphContext, observation: RuntimeObservation) -> None:
-    _assert_phase(context, observation, Vertex.RUNNING)
-    if observation.wiseman.active_question is None:
-        _reject_observation(context, "running.active_question", "question id", "none", "running runtime has no active question")
-    if len(observation.chat.progress_message_ids) > 1:
-        _reject_observation(
-            context,
-            "running.progress",
-            "at most one progress message",
-            str(observation.chat.progress_message_ids),
-            "running created duplicate progress messages",
-        )
-    if observation.wiseman.result_known or observation.wiseman.error:
-        _reject_observation(context, "running.result", "no terminal result", "terminal result", "running runtime exposes a terminal result")
+    _assert_active_phase(context, observation, Vertex.RUNNING)
+    _assert_progress_bound(context, observation, Vertex.RUNNING)
 
 
 def _assert_recovering_observation(context: GraphContext, observation: RuntimeObservation) -> None:
-    _assert_phase(context, observation, Vertex.RECOVERING)
+    _assert_active_phase(context, observation, Vertex.RECOVERING)
     if observation.wiseman.active_question is None or observation.wiseman.session_id is None:
         _reject_observation(context, "recovering.session", "active question and session", "missing value", "recovery lost the active Codex session")
-    if observation.wiseman.result_known or observation.wiseman.error:
-        _reject_observation(context, "recovering.result", "no terminal result", "terminal result", "recovering runtime exposes a terminal result")
 
 
 def _assert_cancelling_observation(context: GraphContext, observation: RuntimeObservation) -> None:
