@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, TypedDict
 
@@ -90,6 +90,153 @@ class EdgeName(StrEnum):
     OUTCOME_ESTABLISHED = "outcome-established"
     IDLE_RETIREMENT = "idle-retirement"
     FIXTURE_RESET = "fixture-reset"
+
+
+class ChatMessageKind(StrEnum):
+    QUESTION = "question"
+    BACKGROUND = "background"
+    STEERING = "steering"
+    STOP = "stop"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    id: str
+    kind: ChatMessageKind
+    content: str
+    mentions_bot: bool
+    reply_to: str | None = None
+
+
+@dataclass(slots=True)
+class ChatState:
+    thread_id: str = "thread"
+    messages: list[ChatMessage] = field(default_factory=list)
+    message_ids: set[str] = field(default_factory=set)
+    background_context: list[str] = field(default_factory=list)
+    consumed_context: list[str] = field(default_factory=list)
+    steering_messages: list[str] = field(default_factory=list)
+    stop_commands: set[str] = field(default_factory=set)
+    archived: bool = False
+
+    def record(self, message_id: str, kind: ChatMessageKind) -> None:
+        if not message_id or message_id in self.message_ids:
+            return
+        content = {
+            ChatMessageKind.QUESTION: "question",
+            ChatMessageKind.BACKGROUND: "background",
+            ChatMessageKind.STEERING: "steer",
+            ChatMessageKind.STOP: "/stop",
+        }[kind]
+        mentions_bot = kind in {ChatMessageKind.QUESTION, ChatMessageKind.STEERING}
+        reply_to = "answer" if kind is ChatMessageKind.STEERING else None
+        self.messages.append(ChatMessage(message_id, kind, content, mentions_bot, reply_to))
+        self.message_ids.add(message_id)
+
+
+@dataclass(slots=True)
+class WisemanState:
+    pending_questions: list[str] = field(default_factory=list)
+    active_question: str | None = None
+    seen_questions: set[str] = field(default_factory=set)
+    settled_questions: set[str] = field(default_factory=set)
+    session_id: str | None = None
+    turns: int = 0
+
+
+@dataclass(slots=True)
+class GraphState:
+    vertex: Vertex = Vertex.IDLE
+    chat: ChatState = field(default_factory=ChatState)
+    wiseman: WisemanState = field(default_factory=WisemanState)
+
+    @property
+    def pending(self) -> int:
+        return len(self.wiseman.pending_questions)
+
+    def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
+        if self.vertex != source:
+            message = f"{edge} requires {source}, got {self.vertex}"
+            raise AssertionError(message)
+        self.vertex = target
+        self._record_chat_message(edge, message_id)
+        if edge in {"admit-question", "queue-question"}:
+            self._remember_question(message_id)
+        elif edge in {"background-chatter", "running-background-chatter"}:
+            self._remember_background(message_id)
+        elif edge in {"context-ready", "resume-session"}:
+            self._consume_background()
+        elif edge in {"steer-active-turn", "repeat-steer"}:
+            self._remember_steering(message_id)
+        elif edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
+            self._remember_stop(message_id)
+        elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
+            self._settle_active()
+        self._assert_invariants()
+
+    def _remember_question(self, message_id: str) -> None:
+        if message_id and message_id not in self.wiseman.seen_questions:
+            self.wiseman.pending_questions.append(message_id)
+            if self.wiseman.active_question is None:
+                self.wiseman.active_question = message_id
+            self.wiseman.seen_questions.add(message_id)
+
+    def _remember_background(self, message_id: str) -> None:
+        if message_id:
+            self.chat.background_context.append(message_id)
+
+    def _consume_background(self) -> None:
+        if self.wiseman.active_question is None and self.wiseman.pending_questions:
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
+        self.chat.consumed_context.extend(self.chat.background_context)
+        self.chat.background_context.clear()
+
+    def _remember_steering(self, message_id: str) -> None:
+        if message_id:
+            self.chat.steering_messages.append(message_id)
+
+    def _remember_stop(self, message_id: str) -> None:
+        if message_id:
+            self.chat.stop_commands.add(message_id)
+
+    def _settle_active(self) -> None:
+        active_question = self.wiseman.active_question
+        if active_question is None:
+            return
+        self.wiseman.settled_questions.add(active_question)
+        if self.wiseman.pending_questions and self.wiseman.pending_questions[0] == active_question:
+            self.wiseman.pending_questions.pop(0)
+        self.wiseman.active_question = None
+        self.wiseman.turns += 1
+
+    def _assert_invariants(self) -> None:
+        if len(self.wiseman.pending_questions) != len(set(self.wiseman.pending_questions)):
+            raise AssertionError("pending questions must be ordered and unique")
+        if len(self.chat.messages) != len(self.chat.message_ids):
+            raise AssertionError("chat message history must be deduplicated")
+        if self.vertex is Vertex.RETIRED and (self.wiseman.active_question or self.wiseman.pending_questions):
+            raise AssertionError("retired conversations cannot retain active work")
+        if self.wiseman.active_question and self.wiseman.active_question not in self.wiseman.pending_questions:
+            raise AssertionError("active question must remain pending until terminal delivery")
+
+    def _record_chat_message(self, edge: str, message_id: str) -> None:
+        kind = {
+            "admit-question": ChatMessageKind.QUESTION,
+            "queue-question": ChatMessageKind.QUESTION,
+            "duplicate-question": ChatMessageKind.QUESTION,
+            "background-chatter": ChatMessageKind.BACKGROUND,
+            "running-background-chatter": ChatMessageKind.BACKGROUND,
+            "steer-active-turn": ChatMessageKind.STEERING,
+            "repeat-steer": ChatMessageKind.STEERING,
+            "idle-stop": ChatMessageKind.STOP,
+            "stop-preparing": ChatMessageKind.STOP,
+            "stop-running": ChatMessageKind.STOP,
+            "stop-recovering": ChatMessageKind.STOP,
+            "stop-delivering": ChatMessageKind.STOP,
+            "duplicate-stop": ChatMessageKind.STOP,
+        }.get(edge)
+        if kind is not None:
+            self.chat.record(message_id, kind)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,10 +2,12 @@
 
 GraphWalker owns traversal. The Python model in `tests/graphwalker/model.py`
 supplies the native GraphWalker document and owns all graph definitions:
-vertices, edge names, edge topology, edge records, and timeouts. `vertices.py`
-supplies observable state conditions, `edges.py` supplies one action function
-for every graph edge, and `graph_utils.py` owns runtime model state and harness
-contracts. The HTTP harness executes those
+vertices, edge names, edge topology, edge records, timeouts, and graph state.
+`vertices.py` supplies observable state conditions, `edges.py` supplies one
+action function for every graph edge, and `graph_utils.py` owns only harness
+contracts and transition glue. Every action and condition receives one
+`GraphContext`, whose `GraphState` contains separate `chat` and `wiseman`
+sub-state. The HTTP harness executes those
 actions through `/v1/replay/discord`; it does not call `Engine` or mutate
 Temporal state directly.
 
@@ -43,6 +45,11 @@ flowchart TD
 ## Model data and invariants
 
 - `pending_questions` is ordered and deduplicated by Discord message ID.
+- `chat.messages` preserves the ordered incoming message history, including
+  questions, background chatter, steering replies, and stop commands.
+- `wiseman` owns the active question, queue, Codex session, and turn count;
+  `chat` owns message and context history instead of duplicating it in the
+  lifecycle state.
 - `background_context` records ordinary thread discussion without advancing
   the consumed-context cursor. `context-ready` consumes it for the next
   admitted question, which covers Q1, background discussion, Q2, and Q3.

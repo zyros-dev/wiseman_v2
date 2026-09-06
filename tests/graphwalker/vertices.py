@@ -6,31 +6,30 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from tests.graphwalker.graph_utils import ModelState
-from tests.graphwalker.model import STATE_TIMEOUTS, Vertex
+from tests.graphwalker.model import STATE_TIMEOUTS, GraphState, Vertex
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from tests.graphwalker.graph_utils import GraphHarness, StateFunction
+    from tests.graphwalker.graph_utils import GraphContext, StateFunction
 
 
-StateAssertion = Callable[[ModelState], None]
+StateAssertion = Callable[[GraphState], None]
 
 
-def _assert_idle(state: ModelState) -> None:
-    if state.active_question is not None:
-        message = f"idle state retained active question {state.active_question}"
+def _assert_idle(state: GraphState) -> None:
+    if state.wiseman.active_question is not None:
+        message = f"idle state retained active question {state.wiseman.active_question}"
         raise AssertionError(message)
 
 
-def _assert_active_turn(state: ModelState) -> None:
-    if state.active_question is None:
+def _assert_active_turn(state: GraphState) -> None:
+    if state.wiseman.active_question is None:
         raise AssertionError("active lifecycle state has no active question")
 
 
-def _assert_retired(state: ModelState) -> None:
-    if state.active_question is not None or state.pending_questions:
+def _assert_retired(state: GraphState) -> None:
+    if state.wiseman.active_question is not None or state.wiseman.pending_questions:
         raise AssertionError("retired state retained active or queued work")
 
 
@@ -47,48 +46,49 @@ STATE_ASSERTIONS: Mapping[Vertex, StateAssertion] = {
 }
 
 
-async def _wait_for_vertex(harness: GraphHarness, state: ModelState, vertex: Vertex) -> None:
+async def _wait_for_vertex(context: GraphContext, vertex: Vertex) -> None:
+    state = context.state
     if state.vertex is not vertex:
         message = f"{vertex} condition requires model state {vertex}, got {state.vertex}"
         raise AssertionError(message)
     STATE_ASSERTIONS[vertex](state)
-    await harness.wait_for_state(vertex, state, deadline_seconds=STATE_TIMEOUTS[vertex])
+    await context.harness.wait_for_state(vertex, context, deadline_seconds=STATE_TIMEOUTS[vertex])
 
 
-async def idle(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.IDLE)
+async def idle(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.IDLE)
 
 
-async def preparing(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.PREPARING)
+async def preparing(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.PREPARING)
 
 
-async def running(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.RUNNING)
+async def running(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.RUNNING)
 
 
-async def recovering(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.RECOVERING)
+async def recovering(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.RECOVERING)
 
 
-async def cancelling(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.CANCELLING)
+async def cancelling(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.CANCELLING)
 
 
-async def delivering(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.DELIVERING)
+async def delivering(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.DELIVERING)
 
 
-async def outcome_unknown(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.OUTCOME_UNKNOWN)
+async def outcome_unknown(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.OUTCOME_UNKNOWN)
 
 
-async def error(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.ERROR)
+async def error(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.ERROR)
 
 
-async def retired(harness: GraphHarness, state: ModelState) -> None:
-    await _wait_for_vertex(harness, state, Vertex.RETIRED)
+async def retired(context: GraphContext) -> None:
+    await _wait_for_vertex(context, Vertex.RETIRED)
 
 
 STATE_FUNCTIONS: Mapping[Vertex, StateFunction] = {

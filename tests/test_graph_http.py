@@ -19,7 +19,7 @@ from app.http_api import create_app
 from app.nodes import TurnActivities
 from app.temporal_runtime import ThreadWorkflow, TurnWorkflow, fail_turn, provision_workspace, retire_session, start_codex
 from tests.graphwalker.edges import EDGE_FUNCTIONS
-from tests.graphwalker.graph_utils import GraphElement, GraphHarness, ModelState
+from tests.graphwalker.graph_utils import GraphContext, GraphElement, GraphHarness
 from tests.graphwalker.model import EDGES, EDGES_BY_NAME, EdgeName, Vertex
 from tests.graphwalker.vertices import STATE_FUNCTIONS
 
@@ -77,17 +77,16 @@ async def _action(client: httpx.AsyncClient, edge: EdgeName | str, message_id: s
 class _ReplayHarness(GraphHarness):
     def __init__(self, client: httpx.AsyncClient) -> None:
         self.client = client
-        self.message_id = "graph"
         self.response: httpx.Response | None = None
 
-    async def wait_for_state(self, vertex: Vertex, state: ModelState, *, deadline_seconds: int) -> None:
-        assert state.vertex is vertex
+    async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> None:
+        assert context.state.vertex is vertex
         assert deadline_seconds > 0
 
-    async def execute_edge(self, edge: GraphElement, state: ModelState, *, deadline_seconds: int) -> None:
+    async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name in ACTION_EDGES:
-            self.response = await _action(self.client, edge.name, self.message_id)
+            self.response = await _action(self.client, edge.name, context.message_id)
 
 
 class _TemporalBoundary:
@@ -180,16 +179,17 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
     path = os.getenv("GRAPHWALKER_PATH")
     if not path: return  # noqa: E701 # fmt: skip
-    app, state, executed = create_app(clients=mock_container()), ModelState(), set()
+    app, executed = create_app(clients=mock_container()), set()
     elements = [str(json.loads(line)["currentElementName"]) for line in (await asyncio.to_thread(Path(path).read_text)).splitlines() if line.strip()]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
         harness = _ReplayHarness(client)
+        context = GraphContext(harness)
         for index in range(0, len(elements) - 2, 2):
             source, edge, target = _vertex(elements[index]), _edge_name(elements[index + 1]), _vertex(elements[index + 2])
             executed.add((edge, source, target))
-            harness.message_id = f"graph-{index}"
-            await STATE_FUNCTIONS[source](harness, state)
-            await EDGE_FUNCTIONS[edge](harness, state)
+            context.message_id = f"graph-{index}"
+            await STATE_FUNCTIONS[source](context)
+            await EDGE_FUNCTIONS[edge](context)
             if edge in ACTION_EDGES:
                 response = harness.response
                 assert response is not None
@@ -200,7 +200,6 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
                     assert response.json()["status"] == "ignored"
                 elif edge in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:
                     assert response.json()["status"] == "queued"
-            state.advance(edge, source, target, f"graph-{index}")
     if os.getenv("GRAPHWALKER_COVERAGE"):
         assert {(edge, source, target) for edge, source, target in EDGES} <= executed
 

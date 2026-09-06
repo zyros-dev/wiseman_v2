@@ -5,156 +5,156 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from tests.graphwalker.graph_utils import EdgeFunction, GraphHarness, ModelState, apply_edge
+from tests.graphwalker.graph_utils import EdgeFunction, GraphContext, apply_edge
 from tests.graphwalker.model import EDGE_TIMEOUTS, EDGES_BY_NAME, EdgeName
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-async def _edge(harness: GraphHarness, state: ModelState, edge: EdgeName, message_id: str = "") -> None:
+async def _edge(context: GraphContext, edge: EdgeName, message_id: str = "") -> None:
     definition = EDGES_BY_NAME[edge]
-    await apply_edge(harness, state, definition, EDGE_TIMEOUTS[edge], message_id)
+    await apply_edge(context, definition, EDGE_TIMEOUTS[edge], message_id or context.message_id)
 
 
-async def admit_question(harness: GraphHarness, state: ModelState, message_id: str = "q") -> None:
-    await _edge(harness, state, EdgeName.ADMIT_QUESTION, message_id)
+async def admit_question(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.ADMIT_QUESTION, message_id)
 
 
-async def background_chatter(harness: GraphHarness, state: ModelState, message_id: str = "background") -> None:
-    await _edge(harness, state, EdgeName.BACKGROUND_CHATTER, message_id)
+async def background_chatter(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.BACKGROUND_CHATTER, message_id)
 
 
-async def duplicate_question(harness: GraphHarness, state: ModelState, message_id: str = "q") -> None:
-    await _edge(harness, state, EdgeName.DUPLICATE_QUESTION, message_id)
+async def duplicate_question(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.DUPLICATE_QUESTION, message_id)
 
 
-async def idle_stop(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.IDLE_STOP, message_id)
+async def idle_stop(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.IDLE_STOP, message_id)
 
 
-async def context_ready(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.CONTEXT_READY)
+async def context_ready(context: GraphContext) -> None:
+    await _edge(context, EdgeName.CONTEXT_READY)
 
 
-async def preparation_failed(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.PREPARATION_FAILED)
+async def preparation_failed(context: GraphContext) -> None:
+    await _edge(context, EdgeName.PREPARATION_FAILED)
 
 
-async def stop_preparing(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.STOP_PREPARING, message_id)
+async def stop_preparing(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.STOP_PREPARING, message_id)
 
 
-async def running_background_chatter(harness: GraphHarness, state: ModelState, message_id: str = "background") -> None:
-    await _edge(harness, state, EdgeName.RUNNING_BACKGROUND_CHATTER, message_id)
+async def running_background_chatter(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.RUNNING_BACKGROUND_CHATTER, message_id)
 
 
-async def steer_active_turn(harness: GraphHarness, state: ModelState, message_id: str = "steer") -> None:
-    await _edge(harness, state, EdgeName.STEER_ACTIVE_TURN, message_id)
+async def steer_active_turn(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.STEER_ACTIVE_TURN, message_id)
 
 
-async def repeat_steer(harness: GraphHarness, state: ModelState, message_id: str = "steer-2") -> None:
-    await _edge(harness, state, EdgeName.REPEAT_STEER, message_id)
+async def repeat_steer(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.REPEAT_STEER, message_id)
 
 
-async def queue_question(harness: GraphHarness, state: ModelState, message_id: str = "q-next") -> None:
-    await _edge(harness, state, EdgeName.QUEUE_QUESTION, message_id)
+async def queue_question(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.QUEUE_QUESTION, message_id)
 
 
-async def progress_preview(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.PROGRESS_PREVIEW)
+async def progress_preview(context: GraphContext) -> None:
+    await _edge(context, EdgeName.PROGRESS_PREVIEW)
 
 
-async def worker_restart_running(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.WORKER_RESTART_RUNNING)
+async def worker_restart_running(context: GraphContext) -> None:
+    await _edge(context, EdgeName.WORKER_RESTART_RUNNING)
 
 
-async def inference_complete(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.INFERENCE_COMPLETE)
+async def inference_complete(context: GraphContext) -> None:
+    await _edge(context, EdgeName.INFERENCE_COMPLETE)
 
 
-async def transient_failure(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.TRANSIENT_FAILURE)
+async def transient_failure(context: GraphContext) -> None:
+    await _edge(context, EdgeName.TRANSIENT_FAILURE)
 
 
-async def permanent_failure(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.PERMANENT_FAILURE)
+async def permanent_failure(context: GraphContext) -> None:
+    await _edge(context, EdgeName.PERMANENT_FAILURE)
 
 
-async def execution_uncertain(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.EXECUTION_UNCERTAIN)
+async def execution_uncertain(context: GraphContext) -> None:
+    await _edge(context, EdgeName.EXECUTION_UNCERTAIN)
 
 
-async def resume_session(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.RESUME_SESSION)
+async def resume_session(context: GraphContext) -> None:
+    await _edge(context, EdgeName.RESUME_SESSION)
 
 
-async def retry_exhausted(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.RETRY_EXHAUSTED)
+async def retry_exhausted(context: GraphContext) -> None:
+    await _edge(context, EdgeName.RETRY_EXHAUSTED)
 
 
-async def stop_running(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.STOP_RUNNING, message_id)
+async def stop_running(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.STOP_RUNNING, message_id)
 
 
-async def stop_recovering(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.STOP_RECOVERING, message_id)
+async def stop_recovering(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.STOP_RECOVERING, message_id)
 
 
-async def stop_delivering(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.STOP_DELIVERING, message_id)
+async def stop_delivering(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.STOP_DELIVERING, message_id)
 
 
-async def duplicate_stop(harness: GraphHarness, state: ModelState, message_id: str = "stop") -> None:
-    await _edge(harness, state, EdgeName.DUPLICATE_STOP, message_id)
+async def duplicate_stop(context: GraphContext, message_id: str = "") -> None:
+    await _edge(context, EdgeName.DUPLICATE_STOP, message_id)
 
 
-async def worker_restart_cancelling(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.WORKER_RESTART_CANCELLING)
+async def worker_restart_cancelling(context: GraphContext) -> None:
+    await _edge(context, EdgeName.WORKER_RESTART_CANCELLING)
 
 
-async def completion_race(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.COMPLETION_RACE)
+async def completion_race(context: GraphContext) -> None:
+    await _edge(context, EdgeName.COMPLETION_RACE)
 
 
-async def stop_confirmed(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.STOP_CONFIRMED)
+async def stop_confirmed(context: GraphContext) -> None:
+    await _edge(context, EdgeName.STOP_CONFIRMED)
 
 
-async def cancellation_unknown(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.CANCELLATION_UNKNOWN)
+async def cancellation_unknown(context: GraphContext) -> None:
+    await _edge(context, EdgeName.CANCELLATION_UNKNOWN)
 
 
-async def delivery_retry(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.DELIVERY_RETRY)
+async def delivery_retry(context: GraphContext) -> None:
+    await _edge(context, EdgeName.DELIVERY_RETRY)
 
 
-async def worker_restart_delivering(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.WORKER_RESTART_DELIVERING)
+async def worker_restart_delivering(context: GraphContext) -> None:
+    await _edge(context, EdgeName.WORKER_RESTART_DELIVERING)
 
 
-async def answer_finalized(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.ANSWER_FINALIZED)
+async def answer_finalized(context: GraphContext) -> None:
+    await _edge(context, EdgeName.ANSWER_FINALIZED)
 
 
-async def worker_restart_error(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.WORKER_RESTART_ERROR)
+async def worker_restart_error(context: GraphContext) -> None:
+    await _edge(context, EdgeName.WORKER_RESTART_ERROR)
 
 
-async def error_finalized(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.ERROR_FINALIZED)
+async def error_finalized(context: GraphContext) -> None:
+    await _edge(context, EdgeName.ERROR_FINALIZED)
 
 
-async def outcome_established(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.OUTCOME_ESTABLISHED)
+async def outcome_established(context: GraphContext) -> None:
+    await _edge(context, EdgeName.OUTCOME_ESTABLISHED)
 
 
-async def idle_retirement(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.IDLE_RETIREMENT)
+async def idle_retirement(context: GraphContext) -> None:
+    await _edge(context, EdgeName.IDLE_RETIREMENT)
 
 
-async def fixture_reset(harness: GraphHarness, state: ModelState) -> None:
-    await _edge(harness, state, EdgeName.FIXTURE_RESET)
+async def fixture_reset(context: GraphContext) -> None:
+    await _edge(context, EdgeName.FIXTURE_RESET)
 
 
 EDGE_FUNCTIONS: Mapping[EdgeName, EdgeFunction] = {
