@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, NoReturn, TypedDict
+from typing import TYPE_CHECKING, NoReturn, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,6 +25,8 @@ class GraphEdge(TypedDict):
     sourceVertexId: str
     targetVertexId: str
     properties: dict[str, GraphValue]
+    actions: NotRequired[list[str]]
+    guard: NotRequired[str]
 
 
 class GraphDocumentModel(TypedDict):
@@ -35,6 +37,7 @@ class GraphDocumentModel(TypedDict):
     properties: dict[str, GraphValue]
     vertices: list[GraphVertex]
     edges: list[GraphEdge]
+    actions: NotRequired[list[str]]
 
 
 class GraphDocument(TypedDict):
@@ -56,6 +59,7 @@ class Vertex(StrEnum):
 
 class EdgeName(StrEnum):
     ADMIT_QUESTION = "admit-question"
+    DISPATCH_QUEUED = "dispatch-queued"
     BACKGROUND_CHATTER = "background-chatter"
     DUPLICATE_QUESTION = "duplicate-question"
     IDLE_STOP = "idle-stop"
@@ -244,6 +248,8 @@ class GraphState:
             if edge == "admit-question" and source is Vertex.IDLE:
                 self._consume_background()
             self._remember_question(message_id)
+        elif edge == "dispatch-queued":
+            self._consume_background()
         elif edge in {"background-chatter", "running-background-chatter"}:
             self._remember_background(message_id)
         elif edge == "context-ready":
@@ -254,9 +260,6 @@ class GraphState:
             self._remember_stop(message_id)
         elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
             self._settle_active()
-            if self.wiseman.pending_questions:
-                self._consume_background()
-                self.wiseman.active_question = None
         self.step += 1
 
     def reject(self, details: FailureDetails) -> NoReturn:
@@ -348,6 +351,7 @@ class Edge:
 
 EDGES: tuple[tuple[EdgeName, Vertex, Vertex], ...] = (
     (EdgeName.ADMIT_QUESTION, Vertex.IDLE, Vertex.PREPARING),
+    (EdgeName.DISPATCH_QUEUED, Vertex.IDLE, Vertex.RUNNING),
     (EdgeName.BACKGROUND_CHATTER, Vertex.IDLE, Vertex.IDLE),
     (EdgeName.DUPLICATE_QUESTION, Vertex.IDLE, Vertex.IDLE),
     (EdgeName.IDLE_STOP, Vertex.IDLE, Vertex.IDLE),
@@ -400,6 +404,28 @@ STATE_TIMEOUTS: Mapping[Vertex, int] = {
 EDGE_TIMEOUTS: Mapping[EdgeName, int] = {edge.name: 60 for edge in GRAPH_EDGES}
 
 
+TERMINAL_EDGES = frozenset({EdgeName.STOP_CONFIRMED, EdgeName.ANSWER_FINALIZED, EdgeName.ERROR_FINALIZED})
+IDLE_EMPTY_EDGES = frozenset(
+    {
+        EdgeName.ADMIT_QUESTION,
+        EdgeName.BACKGROUND_CHATTER,
+        EdgeName.DUPLICATE_QUESTION,
+        EdgeName.IDLE_STOP,
+        EdgeName.IDLE_RETIREMENT,
+    }
+)
+
+
+def _edge_actions(edge: Edge) -> list[str]:
+    if edge.name in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:
+        return ["global.pendingQuestions = (global.pendingQuestions || 0) + 1;"]
+    if edge.name in TERMINAL_EDGES:
+        return ["global.pendingQuestions = Math.max(0, (global.pendingQuestions || 0) - 1);"]
+    if edge.name is EdgeName.FIXTURE_RESET:
+        return ["global.pendingQuestions = 0;"]
+    return []
+
+
 def model() -> GraphDocument:
     """Build the complete GraphWalker JSON-shaped document."""
 
@@ -430,6 +456,14 @@ def model() -> GraphDocument:
                 "target_state": edge.target,
                 "deadline_seconds": EDGE_TIMEOUTS[edge.name],
             },
+            **({"actions": actions} if (actions := _edge_actions(edge)) else {}),
+            **(
+                {"guard": "global.pendingQuestions == 0"}
+                if edge.name in IDLE_EMPTY_EDGES
+                else {"guard": "global.pendingQuestions > 0"}
+                if edge.name is EdgeName.DISPATCH_QUEUED
+                else {}
+            ),
         }
         for edge in GRAPH_EDGES
     ]
@@ -448,6 +482,7 @@ def model() -> GraphDocument:
                     "harness": "authenticated-discord-http-replay",
                     "state_data": "ids,owners,pending,histories,cursors,cancellation_targets,failure_log",
                 },
+                "actions": ["global.pendingQuestions = 0;"],
                 "vertices": vertices,
                 "edges": edges,
             }

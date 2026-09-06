@@ -79,6 +79,10 @@ async def admit_question(context: GraphContext, message_id: str = "") -> None:
     await _edge(context, EdgeName.ADMIT_QUESTION, message_id)
 
 
+async def dispatch_queued(context: GraphContext) -> None:
+    await _edge(context, EdgeName.DISPATCH_QUEUED)
+
+
 async def background_chatter(context: GraphContext, message_id: str = "") -> None:
     await _edge(context, EdgeName.BACKGROUND_CHATTER, message_id)
 
@@ -217,6 +221,7 @@ async def fixture_reset(context: GraphContext) -> None:
 
 EDGE_FUNCTIONS: Mapping[EdgeName, EdgeFunction] = {
     EdgeName.ADMIT_QUESTION: admit_question,
+    EdgeName.DISPATCH_QUEUED: dispatch_queued,
     EdgeName.BACKGROUND_CHATTER: background_chatter,
     EdgeName.DUPLICATE_QUESTION: duplicate_question,
     EdgeName.IDLE_STOP: idle_stop,

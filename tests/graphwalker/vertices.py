@@ -149,6 +149,17 @@ def _assert_question_transition(context: GraphContext, previous: GraphState) -> 
     )
 
 
+def _assert_dispatch_transition(context: GraphContext, previous: GraphState) -> None:
+    expected = previous.wiseman.pending_questions[0] if previous.wiseman.pending_questions else None
+    _assert_state_equal(
+        context,
+        "transition.active_question",
+        expected,
+        context.state.wiseman.active_question,
+        "dispatch-queued did not activate the oldest pending question",
+    )
+
+
 def _assert_background_transition(context: GraphContext, previous: GraphState) -> None:
     if previous.vertex is not Vertex.IDLE:
         _assert_state_equal(
@@ -227,6 +238,7 @@ def _assert_terminal_transition(context: GraphContext, previous: GraphState) -> 
 
 TRANSITION_ASSERTIONS: Mapping[str, Callable[[GraphContext, GraphState], None]] = {
     "admit-question": _assert_question_transition,
+    "dispatch-queued": _assert_dispatch_transition,
     "queue-question": _assert_question_transition,
     "background-chatter": _assert_background_transition,
     "running-background-chatter": _assert_background_transition,
@@ -344,6 +356,19 @@ def _assert_context_delta(context: GraphContext, previous: RuntimeObservation, o
     _assert_equal(context, "delta.consumed_context", expected, observation.chat.consumed_context_ids, "context edge did not advance the consumed cursor")
 
 
+def _assert_progress_delta(context: GraphContext, previous: RuntimeObservation, observation: RuntimeObservation) -> None:
+    if observation.chat.progress_edit_count <= previous.chat.progress_edit_count:
+        _reject_observation(
+            context,
+            "delta.progress_edits",
+            f"> {previous.chat.progress_edit_count}",
+            str(observation.chat.progress_edit_count),
+            "progress-preview did not edit the existing progress message",
+        )
+    if not observation.chat.typing:
+        _reject_observation(context, "delta.typing", "typing signal", "absent", "progress-preview stopped Discord typing")
+
+
 def _assert_resume_delta(context: GraphContext, previous: RuntimeObservation, observation: RuntimeObservation) -> None:
     _assert_equal(
         context,
@@ -373,6 +398,7 @@ DELTA_ASSERTIONS: Mapping[str, Callable[[GraphContext, RuntimeObservation, Runti
     "stop-recovering": _assert_stop_delta,
     "stop-delivering": _assert_stop_delta,
     "context-ready": _assert_context_delta,
+    "progress-preview": _assert_progress_delta,
     "resume-session": _assert_resume_delta,
 }
 
@@ -509,10 +535,6 @@ def _assert_preparing_observation(context: GraphContext, observation: RuntimeObs
 def _assert_running_observation(context: GraphContext, observation: RuntimeObservation) -> None:
     _assert_active_phase(context, observation, Vertex.RUNNING)
     _assert_equal(context, "running.progress", 1, len(observation.chat.progress_message_ids), "running must have one progress message")
-    if observation.chat.progress_edit_count < 1:
-        _reject_observation(
-            context, "running.progress_edits", "at least one update", str(observation.chat.progress_edit_count), "running progress was never updated"
-        )
     if not observation.chat.typing:
         _reject_observation(context, "running.typing", "typing signal", "absent", "running has no Discord typing signal")
 

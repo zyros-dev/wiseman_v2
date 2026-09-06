@@ -282,15 +282,21 @@ class TurnWorkflow:
                 self.work.error = "Turn stopped by user"
             else:
                 self.work.error = _error_message(exc)
+        return await self._finish_turn()
+
+    async def _finish_turn(self) -> dict:
+        assert self.work is not None
         self.inferencing = False
         await workflow.wait_condition(workflow.all_handlers_finished)
         await workflow.wait_condition(lambda: not self.cancellation_hold and not self.cancellation_unknown)
+        await self._reconcile_completion_race()
         await self._node("deliver", durable=True)
         await self._node("react", durable=True)
         try:
             await self._node("observe")
         except Exception:
             workflow.logger.exception("Terminal telemetry exhausted retries")
+        await self._reconcile_established_outcome()
         await workflow.wait_condition(lambda: not self.terminal_hold)
         self.work.state.processed.add(self.work.event.trigger.id)
         self.work.state.turn += 1
@@ -300,6 +306,32 @@ class TurnWorkflow:
         self.outcome_unknown = False
         self.resumed = False
         return {"state": self.work.state.model_dump(mode="json"), "output": self.work.output, "error": self.work.error}
+
+    async def _reconcile_completion_race(self) -> None:
+        assert self.work is not None
+        if not self.completion_won or self.work.output.strip() or self.work.error:
+            return
+        self.completion_won = False
+        self.work.stopped = False
+        self.work.error = ""
+        await self._infer()
+        self.inferencing = False
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        if not self.work.output.strip() and not self.work.stopped and not self.work.error:
+            self.work.error = "Codex returned no answer"
+
+    async def _reconcile_established_outcome(self) -> None:
+        assert self.work is not None
+        await workflow.wait_condition(lambda: not self.terminal_hold or self.outcome_established)
+        if not self.outcome_established or not self.work.error or self.work.state.delivery.reaction_phase != "success":
+            return
+        self.work.terminal_emoji = ""
+        await self._node("deliver", durable=True)
+        await self._node("react", durable=True)
+        try:
+            await self._node("observe")
+        except Exception:
+            workflow.logger.exception("Reconciled outcome telemetry exhausted retries")
 
     async def _infer(self) -> None:
         assert self.work is not None

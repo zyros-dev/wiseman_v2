@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -101,6 +102,41 @@ def _edge_observed(context: GraphContext, vertex: Vertex, observation: RuntimeOb
     return edge_result
 
 
+def _queued_idle_handoff(context: GraphContext, observation: RuntimeObservation) -> RuntimeObservation | None:
+    if context.last_edge not in {"answer-finalized", "error-finalized", "stop-confirmed"}:
+        return None
+    pending = context.state.wiseman.pending_questions
+    active = context.state.wiseman.active_question
+    next_question = pending[1] if active and len(pending) > 1 and pending[:1] == [active] else pending[0] if pending else None
+    if (
+        not next_question
+        or observation.wiseman.active_question not in pending
+        or observation.wiseman.active_question == active
+        or observation.wiseman.phase is Vertex.IDLE
+    ):
+        return None
+    return replace(
+        observation,
+        chat=replace(observation.chat, answer_message_ids=(), progress_message_ids=(), typing=False),
+        wiseman=replace(
+            observation.wiseman,
+            phase=Vertex.IDLE,
+            active_question=None,
+            active_turn=None,
+            result_known=False,
+            error=False,
+            stop_target_question_id=None,
+            inferencing=False,
+            stop_requested=False,
+            recovering=False,
+            outcome_unknown=False,
+            cancellation_unknown=False,
+            delivery_phase="idle",
+            reaction_phase="none",
+        ),
+    )
+
+
 def _message(message_id: str, content: str, *, thread: str | None = None, reply_to: str | None = None, mention: bool = True) -> dict[str, object]:
     try:
         sequence = int(message_id.rsplit("-", 1)[-1])
@@ -125,6 +161,7 @@ class _ReplayHarness(GraphHarness):
                         if exc.status != RPCStatusCode.NOT_FOUND or vertex not in {Vertex.IDLE, Vertex.RETIRED}:
                             raise
                         return RuntimeObservation(ObservedChatState(), ObservedWisemanState(vertex))
+                    observation = _queued_idle_handoff(context, observation) or observation
                     if observation.wiseman.phase is vertex and self._edge_observed(context, vertex, observation):
                         return observation
                     await asyncio.sleep(0.02)
@@ -149,6 +186,10 @@ class _ReplayHarness(GraphHarness):
             self.runner.completion_gate = asyncio.Event()
             self.runner.progress_sent.clear()
             self.runner.run_started.clear()
+        elif edge.name is EdgeName.DISPATCH_QUEUED:
+            self.runner.clear_error()
+            self.runner.clear_stops()
+            self._release_runner()
         elif edge.name in {
             EdgeName.PREPARATION_FAILED,
             EdgeName.PERMANENT_FAILURE,
@@ -178,14 +219,14 @@ class _ReplayHarness(GraphHarness):
         if setting := errors.get(edge.name):
             self.runner.inject_error(setting[1], active_message_id)
 
-    async def _signal_active(self, context: GraphContext, signal: str) -> None:
+    async def _signal_active(self, context: GraphContext, signal: str, *args: object) -> None:
         if active := context.state.wiseman.active_question:
-            await self.client.get_workflow_handle(f"wiseman-turn-{active}").signal(signal)
+            await self.client.get_workflow_handle(f"wiseman-turn-{active}").signal(signal, *args)
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
         if edge.name == EdgeName.PROGRESS_PREVIEW:
-            await self._execute_progress(deadline_seconds)
+            await self._execute_progress(context, deadline_seconds)
         elif edge.name == EdgeName.INFERENCE_COMPLETE:
             await self._execute_inference_complete(context)
         elif edge.name is EdgeName.TRANSIENT_FAILURE:
@@ -246,9 +287,11 @@ class _ReplayHarness(GraphHarness):
                 id=f"wiseman-{context.state.chat.thread_id}",
                 task_queue="graph",
             )
-        await self._wait_for_phase(edge.target, deadline_seconds, context.state.chat.thread_id)
+        await self._wait_for_phase(edge.target, deadline_seconds, context.state.chat.thread_id, context)
 
-    async def _execute_progress(self, deadline_seconds: int) -> None:
+    async def _execute_progress(self, context: GraphContext, deadline_seconds: int) -> None:
+        if context.state.wiseman.active_question:
+            await self._signal_active(context, "progress", f"✍️ Graph preview {context.state.step}")
         if self.runner.run_gate is not None:
             self.runner.run_gate.set()
         await asyncio.wait_for(self.runner.progress_sent.wait(), deadline_seconds)
@@ -297,7 +340,7 @@ class _ReplayHarness(GraphHarness):
             if gate is not None:
                 gate.set()
 
-    async def _wait_for_phase(self, vertex: Vertex, deadline_seconds: int, thread_id: str) -> None:
+    async def _wait_for_phase(self, vertex: Vertex, deadline_seconds: int, thread_id: str, context: GraphContext) -> None:
         try:
             async with asyncio.timeout(deadline_seconds):
                 while True:
@@ -307,6 +350,7 @@ class _ReplayHarness(GraphHarness):
                         if vertex in {Vertex.IDLE, Vertex.RETIRED} and exc.status == RPCStatusCode.NOT_FOUND:
                             return
                         raise
+                    observation = _queued_idle_handoff(context, observation) or observation
                     if observation.wiseman.phase is vertex:
                         return
                     await asyncio.sleep(0.02)
