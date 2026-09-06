@@ -75,6 +75,25 @@ class GraphRunner(MockHarnessRunner):
         self.clear_error()
         self.clear_stops()
 
+    def hold_next_attempt(self) -> None:
+        self.run_gate = asyncio.Event()
+        self.completion_gate = asyncio.Event()
+        self.progress_sent.clear()
+        self.run_started.clear()
+
+    def release_next_attempt(self) -> None:
+        for gate in (self.run_gate, self.completion_gate):
+            if gate is not None:
+                gate.set()
+
+    def release_attempt(self, message_id: str) -> None:
+        for thread, attempt in self._active_attempts.items():
+            if self._active_message_ids.get(thread) != message_id:
+                continue
+            for gate in self._attempt_gates.get(attempt, ()):
+                if gate is not None:
+                    gate.set()
+
     async def wait_until_idle(self, thread: str) -> None:
         async with asyncio.timeout(5):
             while thread in self.active_threads:

@@ -112,7 +112,6 @@ def _queued_idle_handoff(context: GraphContext, observation: RuntimeObservation)
         not next_question
         or observation.wiseman.active_question not in pending
         or observation.wiseman.active_question == active
-        or observation.wiseman.phase is Vertex.IDLE
     ):
         return None
     return replace(
@@ -189,7 +188,9 @@ class _ReplayHarness(GraphHarness):
         elif edge.name is EdgeName.DISPATCH_QUEUED:
             self.runner.clear_error()
             self.runner.clear_stops()
-            self._release_runner()
+            self.runner.release_next_attempt()
+        elif edge.name is EdgeName.QUEUE_QUESTION:
+            self.runner.hold_next_attempt()
         elif edge.name in {
             EdgeName.PREPARATION_FAILED,
             EdgeName.PERMANENT_FAILURE,
@@ -302,7 +303,7 @@ class _ReplayHarness(GraphHarness):
         self.runner.hold_stop = False
         self.runner.clear_error()
         await self._signal_active(context, "release_cancellation")
-        self._release_runner()
+        self.runner.release_attempt(context.state.wiseman.active_question or "")
 
     async def _release_active_cancellation(self, context: GraphContext) -> None:
         await self._signal_active(context, "release_cancellation")
@@ -321,7 +322,7 @@ class _ReplayHarness(GraphHarness):
 
     async def _execute_inference_complete(self, context: GraphContext) -> None:
         await self._signal_active(context, "hold_terminal")
-        self._release_runner()
+        self.runner.release_attempt(context.state.wiseman.active_question or "")
 
     async def _execute_terminal(self, edge: GraphElement, context: GraphContext) -> None:
         if active := context.state.wiseman.active_question:
@@ -333,7 +334,7 @@ class _ReplayHarness(GraphHarness):
                 await handle.signal("release_terminal")
             if edge.name is EdgeName.STOP_CONFIRMED:
                 self.runner.hold_stop = False
-                self._release_runner()
+                self.runner.release_attempt(active)
 
     def _release_runner(self) -> None:
         for gate in (self.runner.run_gate, self.runner.completion_gate):
