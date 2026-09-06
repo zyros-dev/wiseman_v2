@@ -10,7 +10,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from app.models import Event, TurnWork
+from app.models import DeliveryState, Event, TurnWork
 
 TRANSPORT_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30), 2)
 DELIVERY_RETRY_POLICY = RetryPolicy(timedelta(seconds=5), 2, timedelta(seconds=30))
@@ -139,6 +139,15 @@ class TurnWorkflow:
         self.pending_progress = [item for item in self.pending_progress if _progress_key(item) != key][-31:]
         self.pending_progress.append(message)
 
+    @workflow.query
+    def snapshot(self) -> dict:
+        return {
+            "work": self.work.model_dump(mode="json") if self.work is not None else {},
+            "inferencing": self.inferencing,
+            "stop_requested": self.stop_requested,
+            "pending_progress": list(self.pending_progress),
+        }
+
     async def _node(self, name: str, *, durable: bool = False) -> None:
         assert self.work is not None
         self.work.state.progress = _merge_progress(self.work.state.progress, self.pending_progress)
@@ -157,6 +166,7 @@ class TurnWorkflow:
     @workflow.run
     async def run(self, payload: dict) -> dict:
         self.work = TurnWork.model_validate(payload)
+        self.work.state.delivery = DeliveryState()
         self.work.state.progress = ["🛠️ Workspace provisioning..."] if not self.work.state.codex_thread else []
         try:
             await self._node("render", durable=True)

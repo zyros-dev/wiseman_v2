@@ -36,6 +36,7 @@ class MockState:
     profile: dict[str, str | bytes] = field(default_factory=dict)
     uploads: dict[str, Upload] = field(default_factory=dict)
     nonces: dict[str, str] = field(default_factory=dict)
+    typing_channels: set[str] = field(default_factory=set)
 
     def call(self, client: str, operation: str, *values: str) -> None:
         self.calls.append((client, operation, tuple(values)))
@@ -58,6 +59,14 @@ class MockDiscord(DiscordClient):
         if nonce:
             self.state.nonces[nonce] = message_id
         return message_id
+
+    async def start_typing(self, channel_id: str) -> None:
+        self.state.call("discord", "start_typing", channel_id)
+        self.state.typing_channels.add(channel_id)
+
+    async def stop_typing(self, channel_id: str) -> None:
+        self.state.call("discord", "stop_typing", channel_id)
+        self.state.typing_channels.discard(channel_id)
 
     async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None:
         message_id = ref.message_id

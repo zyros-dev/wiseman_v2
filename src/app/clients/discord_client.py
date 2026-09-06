@@ -1,9 +1,11 @@
 # Copyright (c) 2026 Nick van der Merwe
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import secrets
+from contextlib import suppress
 from typing import TYPE_CHECKING, cast
 
 import discord
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
 class RealDiscord:
     def __init__(self, gateway: Gateway | None = None) -> None:
         self.gateway = cast("Gateway", gateway)
+        self.typing_tasks: dict[str, asyncio.Task[None]] = {}
 
     def attach(self, gateway: Gateway) -> None:
         self.gateway = gateway
@@ -37,6 +40,27 @@ class RealDiscord:
             nonce=nonce or secrets.token_hex(8),
         )
         return str(message.id)
+
+    async def start_typing(self, channel_id: str) -> None:
+        task = self.typing_tasks.get(channel_id)
+        if task is not None and not task.done():
+            return
+
+        async def keep_typing() -> None:
+            channel = await self.channel(channel_id)
+            while True:
+                async with channel.typing():
+                    await asyncio.sleep(8)
+
+        self.typing_tasks[channel_id] = asyncio.create_task(keep_typing())
+
+    async def stop_typing(self, channel_id: str) -> None:
+        task = self.typing_tasks.pop(channel_id, None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None:
         message = (await self.channel(ref.channel_id)).get_partial_message(int(ref.message_id))
