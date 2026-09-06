@@ -1,9 +1,11 @@
 # Copyright (c) 2026 Nick van der Merwe
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -30,6 +32,10 @@ from tests.graphwalker.model import (
     Vertex,
 )
 from tests.graphwalker.vertices import STATE_FUNCTIONS
+
+if TYPE_CHECKING:
+    from app.models import Event
+    from app.types import JsonObject
 
 ACTION_EDGES = {
     EdgeName.BACKGROUND_CHATTER,
@@ -130,7 +136,11 @@ class _TemporalBoundary:
     def __init__(self, client) -> None:
         self.client = client
 
-    async def submit(self, event: dict[str, object]) -> None:
+    async def start(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def submit(self, event: JsonObject) -> dict[str, object] | None:
         trigger = cast("dict[str, object]", event["trigger"])
         workflow_id = f"wiseman-{trigger.get('thread_id') or trigger['channel_id']}"
         try:
@@ -138,7 +148,7 @@ class _TemporalBoundary:
         except WorkflowAlreadyStartedError:
             await self.client.get_workflow_handle(workflow_id).signal(ThreadWorkflow.submit, event)
 
-    async def stop(self, event) -> bool:
+    async def stop(self, event: Event) -> bool:
         state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
         message_id = str(state.get("active_message", ""))
         return bool(
@@ -146,7 +156,15 @@ class _TemporalBoundary:
             and await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("stop", event.model_dump(mode="json"), id=event.trigger.id)
         )
 
-    async def touch(self, event) -> None:
+    async def steer(self, event: Event) -> bool:
+        state = await self.client.get_workflow_handle(f"wiseman-{event.trigger.thread_id or event.trigger.channel_id}").query(ThreadWorkflow.session)
+        message_id = str(state.get("active_message", ""))
+        return bool(
+            message_id
+            and await self.client.get_workflow_handle(f"wiseman-turn-{message_id}").execute_update("steer", event.model_dump(mode="json"), id=event.trigger.id)
+        )
+
+    async def touch(self, event: Event) -> None:
         return None
 
 
@@ -169,10 +187,9 @@ async def _child_result(client, message_id: str) -> dict[str, object]:
 
 async def test_graph_boundary_runs_production_temporal(monkeypatch) -> None:
     monkeypatch.setenv("WISEMAN_DISCORD_BOT_ID", "bot")
-    clients = mock_container()
-    runner = cast("MockRunner", clients.runner)
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        setattr(clients, "temporal", _TemporalBoundary(env.client))
+        clients = mock_container(temporal=_TemporalBoundary(env.client))
+        runner = cast("MockRunner", clients.runner)
         activities = TurnActivities(Engine(EngineConfig(clients.phoenix, clients.runner, clients.prompts, discord=clients.discord)), env.client)
         async with Worker(
             env.client,

@@ -8,13 +8,14 @@ from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import TypeAdapter
 
+from app.clients.client_interfaces import OpenRouter
 from app.types import JsonObject
 
 if TYPE_CHECKING:
     from app.clients.client_interfaces import ClientSettings, PromptClient
 
 
-class OpenRouter:
+class RealOpenRouter(OpenRouter):
     def __init__(self, settings: ClientSettings, prompts: PromptClient, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.settings, self.prompts = settings, prompts
         self.http = httpx.AsyncClient(
@@ -67,3 +68,19 @@ class OpenRouter:
 
     async def close(self) -> None:
         await self.http.aclose()
+
+
+class MockOpenRouter(OpenRouter):
+    async def responses(self, payload: JsonObject) -> httpx.Response:
+        _ = payload
+        return httpx.Response(
+            200,
+            content=b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def describe(self, url: str, question: str) -> dict[str, object]:
+        _ = url
+        return {"text": "mock image description", "model": "mock-vision", "question": question or None}
+
+    async def close(self) -> None: ...

@@ -114,7 +114,7 @@ class RunnerClient(Protocol):
     async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool: ...
 
 
-class ProviderClient(Protocol):
+class OpenRouter(Protocol):
     async def responses(self, payload: JsonObject) -> Response: ...
 
     async def describe(self, url: str, question: str) -> dict[str, object]: ...
@@ -130,7 +130,7 @@ class ClientContainer:
     phoenix: PhoenixClient
     prompts: PromptClient
     runner: RunnerClient
-    provider: ProviderClient
+    provider: OpenRouter
     settings: ClientSettings = field(default_factory=ClientSettings)
 
     _installed: ClassVar[ClientContainer | None] = None
