@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 StateAssertion = Callable[["GraphContext"], None]
 ObservationAssertion = Callable[["GraphContext", RuntimeObservation], None]
+ObservationValue = tuple[str, ...] | str | int | Vertex | None
+ObservationComparison = tuple[str, ObservationValue, ObservationValue, str]
 
 
 def _assert_idle(context: GraphContext) -> None:
@@ -85,7 +87,7 @@ def _assert_subsequence(expected: tuple[str, ...], observed: tuple[str, ...]) ->
     return position == len(expected)
 
 
-def _assert_equal(context: GraphContext, location: str, expected: object, observed: object, message: str) -> None:
+def _assert_equal(context: GraphContext, location: str, expected: ObservationValue, observed: ObservationValue, message: str) -> None:
     if expected != observed:
         _reject_observation(context, location, str(expected), str(observed), message)
 
@@ -101,7 +103,7 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
             str(observation.chat.message_ids),
             "runtime observation lost or reordered chat messages",
         )
-    comparisons: tuple[tuple[str, object, object, str], ...] = (
+    comparisons: tuple[ObservationComparison, ...] = (
         (
             "chat.background_context",
             tuple(state.chat.background_context),
@@ -120,30 +122,10 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
             observation.wiseman.pending_question_ids,
             "runtime observation lost or reordered queued questions",
         ),
-        (
-            "wiseman.active_question",
-            state.wiseman.active_question,
-            observation.wiseman.active_question,
-            "runtime observation changed the active question",
-        ),
-        (
-            "wiseman.session_id",
-            state.wiseman.session_id,
-            observation.wiseman.session_id,
-            "runtime observation changed the Codex session",
-        ),
-        (
-            "wiseman.turn",
-            state.wiseman.turns,
-            observation.wiseman.turn,
-            "runtime observation changed the settled-turn count",
-        ),
-        (
-            "chat.steering",
-            tuple(state.chat.steering_messages),
-            observation.chat.steering_ids,
-            "runtime observation lost or duplicated steering messages",
-        ),
+        ("wiseman.active_question", state.wiseman.active_question, observation.wiseman.active_question, "runtime observation changed the active question"),
+        ("wiseman.session_id", state.wiseman.session_id, observation.wiseman.session_id, "runtime observation changed the Codex session"),
+        ("wiseman.turn", state.wiseman.turns, observation.wiseman.turn, "runtime observation changed the settled-turn count"),
+        ("chat.steering", tuple(state.chat.steering_messages), observation.chat.steering_ids, "runtime observation lost or duplicated steering messages"),
         (
             "chat.stop_commands",
             tuple(sorted(state.chat.stop_commands)),
