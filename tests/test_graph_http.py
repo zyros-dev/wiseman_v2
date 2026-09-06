@@ -31,23 +31,7 @@ from tests.graphwalker.model import (
 )
 from tests.graphwalker.runtime_observer import RuntimeObserver
 from tests.graphwalker.vertices import STATE_FUNCTIONS
-from tests.graphwalker.wiseman_client import WisemanClient, WisemanResponse
-
-ACTION_EDGES = {
-    EdgeName.BACKGROUND_CHATTER,
-    EdgeName.RUNNING_BACKGROUND_CHATTER,
-    EdgeName.DUPLICATE_QUESTION,
-    EdgeName.IDLE_STOP,
-    EdgeName.STEER_ACTIVE_TURN,
-    EdgeName.REPEAT_STEER,
-    EdgeName.STOP_PREPARING,
-    EdgeName.STOP_RUNNING,
-    EdgeName.STOP_RECOVERING,
-    EdgeName.STOP_DELIVERING,
-    EdgeName.DUPLICATE_STOP,
-    EdgeName.ADMIT_QUESTION,
-    EdgeName.QUEUE_QUESTION,
-}
+from tests.graphwalker.wiseman_client import WisemanClient
 
 if TYPE_CHECKING:
     from app.models import Event
@@ -61,7 +45,6 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
 class _ReplayHarness(GraphHarness):
     def __init__(self, observer: RuntimeObserver) -> None:
         self.observer = observer
-        self.response: httpx.Response | None = None
 
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
         assert context.state.vertex is vertex
@@ -70,23 +53,6 @@ class _ReplayHarness(GraphHarness):
 
     async def execute_edge(self, edge: GraphElement, context: GraphContext, *, deadline_seconds: int) -> None:
         assert deadline_seconds > 0
-        if edge.name in ACTION_EDGES:
-            result = await _execute_wiseman_edge(context.wiseman, EdgeName(edge.name), context.message_id, context.state.chat.thread_id)
-            self.response = httpx.Response(result.status_code, json=result.body)
-
-
-async def _execute_wiseman_edge(client: WisemanClient, edge: EdgeName, message_id: str, thread_id: str) -> WisemanResponse:
-    if edge is EdgeName.ADMIT_QUESTION:
-        return await client.ask(message_id, thread_id=None)
-    if edge is EdgeName.QUEUE_QUESTION:
-        return await client.ask(message_id, thread_id=thread_id)
-    if edge is EdgeName.DUPLICATE_QUESTION:
-        return await client.ask(message_id, thread_id=None, duplicate=True)
-    if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
-        return await client.background(message_id, thread_id=thread_id)
-    if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
-        return await client.steer(message_id, thread_id=thread_id)
-    return await client.stop(message_id, thread_id=thread_id)
 
 
 class _TemporalBoundary:
@@ -211,16 +177,30 @@ async def test_graphwalker_edges_use_admission_boundary(monkeypatch) -> None:
             context.message_id = f"graph-{index}"
             await STATE_FUNCTIONS[source](context)
             await EDGE_FUNCTIONS[edge](context)
-            if edge in ACTION_EDGES:
-                response = harness.response
+            if edge in {
+                EdgeName.ADMIT_QUESTION,
+                EdgeName.QUEUE_QUESTION,
+                EdgeName.DUPLICATE_QUESTION,
+                EdgeName.BACKGROUND_CHATTER,
+                EdgeName.RUNNING_BACKGROUND_CHATTER,
+                EdgeName.IDLE_STOP,
+                EdgeName.STEER_ACTIVE_TURN,
+                EdgeName.REPEAT_STEER,
+                EdgeName.STOP_PREPARING,
+                EdgeName.STOP_RUNNING,
+                EdgeName.STOP_RECOVERING,
+                EdgeName.STOP_DELIVERING,
+                EdgeName.DUPLICATE_STOP,
+            }:
+                response = context.last_response
                 assert response is not None
                 assert response.status_code == 200
                 if edge == EdgeName.DUPLICATE_QUESTION:
-                    assert response.json()["status"] == "duplicate"
+                    assert response.body["status"] == "duplicate"
                 elif edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER, EdgeName.IDLE_STOP}:
-                    assert response.json()["status"] == "ignored"
+                    assert response.body["status"] == "ignored"
                 elif edge in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:
-                    assert response.json()["status"] == "queued"
+                    assert response.body["status"] == "queued"
     if os.getenv("GRAPHWALKER_COVERAGE"):
         assert {(edge, source, target) for edge, source, target in EDGES} <= executed
 

@@ -12,7 +12,7 @@ from tests.graphwalker.model import FailureDetails, GraphState, RuntimeObservati
 
 if TYPE_CHECKING:
     from app.clients.client_interfaces import ClientContainer
-    from tests.graphwalker.wiseman_client import WisemanClient
+    from tests.graphwalker.wiseman_client import WisemanClient, WisemanResponse
 
 
 class GraphElement(Protocol):
@@ -43,6 +43,7 @@ class GraphContext:
     last_target: Vertex | None = None
     last_message_id: str = ""
     message_id: str = ""
+    last_response: WisemanResponse | None = None
 
     def reject(self, details: FailureDetails) -> NoReturn:
         self.state.reject(details)
@@ -52,10 +53,18 @@ StateFunction = Callable[[GraphContext], Awaitable[None]]
 EdgeFunction = Callable[..., Awaitable[None]]
 
 
-async def apply_edge(context: GraphContext, edge: GraphElement, deadline_seconds: int, message_id: str = "") -> None:
+async def apply_edge(
+    context: GraphContext,
+    edge: GraphElement,
+    deadline_seconds: int,
+    message_id: str = "",
+    *,
+    execute_boundary: bool = True,
+) -> None:
     context.previous_state = deepcopy(context.state)
     context.last_edge = edge.name
     context.last_target = edge.target
     context.last_message_id = message_id or context.message_id
-    await context.harness.execute_edge(edge, context, deadline_seconds=deadline_seconds)
+    if execute_boundary:
+        await context.harness.execute_edge(edge, context, deadline_seconds=deadline_seconds)
     context.state.advance(edge.name, edge.source, edge.target, context.last_message_id)

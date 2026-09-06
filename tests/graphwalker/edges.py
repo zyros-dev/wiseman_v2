@@ -11,10 +11,55 @@ from tests.graphwalker.model import EDGE_TIMEOUTS, EDGES_BY_NAME, EdgeName
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from tests.graphwalker.wiseman_client import WisemanResponse
+
+
+ACTION_EDGES = frozenset(
+    {
+        EdgeName.ADMIT_QUESTION,
+        EdgeName.BACKGROUND_CHATTER,
+        EdgeName.DUPLICATE_QUESTION,
+        EdgeName.IDLE_STOP,
+        EdgeName.RUNNING_BACKGROUND_CHATTER,
+        EdgeName.STEER_ACTIVE_TURN,
+        EdgeName.REPEAT_STEER,
+        EdgeName.QUEUE_QUESTION,
+        EdgeName.STOP_PREPARING,
+        EdgeName.STOP_RUNNING,
+        EdgeName.STOP_RECOVERING,
+        EdgeName.STOP_DELIVERING,
+        EdgeName.DUPLICATE_STOP,
+    }
+)
+
+
+async def _wiseman_action(context: GraphContext, edge: EdgeName, message_id: str) -> WisemanResponse:
+    thread_id = context.state.chat.thread_id
+    if edge is EdgeName.ADMIT_QUESTION:
+        return await context.wiseman.ask(message_id, thread_id=None)
+    if edge is EdgeName.QUEUE_QUESTION:
+        return await context.wiseman.ask(message_id, thread_id=thread_id)
+    if edge is EdgeName.DUPLICATE_QUESTION:
+        return await context.wiseman.ask(message_id, thread_id=None, duplicate=True)
+    if edge in {EdgeName.BACKGROUND_CHATTER, EdgeName.RUNNING_BACKGROUND_CHATTER}:
+        return await context.wiseman.background(message_id, thread_id=thread_id)
+    if edge in {EdgeName.STEER_ACTIVE_TURN, EdgeName.REPEAT_STEER}:
+        return await context.wiseman.steer(message_id, thread_id=thread_id)
+    return await context.wiseman.stop(message_id, thread_id=thread_id)
+
 
 async def _edge(context: GraphContext, edge: EdgeName, message_id: str = "") -> None:
     definition = EDGES_BY_NAME[edge]
-    await apply_edge(context, definition, EDGE_TIMEOUTS[edge], message_id or context.message_id)
+    resolved_message_id = message_id or context.message_id
+    if edge in ACTION_EDGES:
+        context.last_response = await _wiseman_action(context, edge, resolved_message_id)
+    await apply_edge(
+        context,
+        definition,
+        EDGE_TIMEOUTS[edge],
+        resolved_message_id,
+        execute_boundary=edge not in ACTION_EDGES,
+    )
 
 
 async def admit_question(context: GraphContext, message_id: str = "") -> None:
