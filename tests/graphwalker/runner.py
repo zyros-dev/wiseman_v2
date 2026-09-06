@@ -137,7 +137,7 @@ class GraphRunner(MockHarnessRunner):
             _, epoch, error = entry
         else:
             epoch, error = self._pending_errors.pop(message_id, (0, None))
-        if entry is None and not error:
+        if error is None:
             self._record(f"take-empty attempt={attempt} message={message_id}")
             return None
         if epoch <= self._consumed_error_epoch:

@@ -274,15 +274,20 @@ class GraphState:
                 self.wiseman.active_question = None
                 self.handoff_pending = False
             self.wiseman.turns += 1
-        if self.vertex in {
-            Vertex.PREPARING,
-            Vertex.RUNNING,
-            Vertex.RECOVERING,
-            Vertex.CANCELLING,
-            Vertex.DELIVERING,
-            Vertex.OUTCOME_UNKNOWN,
-            Vertex.ERROR,
-        } and self.wiseman.active_question is None and self.wiseman.pending_questions:
+        if (
+            self.vertex
+            in {
+                Vertex.PREPARING,
+                Vertex.RUNNING,
+                Vertex.RECOVERING,
+                Vertex.CANCELLING,
+                Vertex.DELIVERING,
+                Vertex.OUTCOME_UNKNOWN,
+                Vertex.ERROR,
+            }
+            and self.wiseman.active_question is None
+            and self.wiseman.pending_questions
+        ):
             self.wiseman.active_question = self.wiseman.pending_questions[0]
 
     def reconcile_session(self, session_id: str | None) -> None:

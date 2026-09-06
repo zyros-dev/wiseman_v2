@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from temporalio.client import Client
 
     from app.engine import Engine
-    from app.types import JsonObject
+    from app.types import JsonObject, JsonValue
 
 
 class _ActivityRuntime:
@@ -692,10 +692,10 @@ def _merge_ids(existing: list[str], updates: list[str]) -> list[str]:
 def _merge_thread_state(previous: JsonObject, result: JsonObject) -> JsonObject:
     merged = dict(result)
     for field_name in ("message_ids", "background_context_ids", "consumed_context_ids", "steering_ids", "stop_command_ids", "processed"):
-        merged[field_name] = _merge_ids(_string_sequence(merged.get(field_name)), _string_sequence(previous.get(field_name)))
-    timestamps = dict(previous.get("message_timestamps", {})) if isinstance(previous.get("message_timestamps"), dict) else {}
-    timestamps.update(merged.get("message_timestamps", {}))
-    merged["message_timestamps"] = timestamps
+        merged[field_name] = cast("JsonValue", _merge_ids(_string_sequence(merged.get(field_name)), _string_sequence(previous.get(field_name))))
+    timestamps = _object_map(previous.get("message_timestamps"))
+    timestamps.update(_object_map(merged.get("message_timestamps")))
+    merged["message_timestamps"] = cast("JsonValue", timestamps)
     return merged
 
 
