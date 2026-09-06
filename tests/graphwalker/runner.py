@@ -84,9 +84,8 @@ class GraphRunner(MockHarnessRunner):
 
     def release_next_attempt(self) -> None:
         self._record("release-next")
-        for gate in (self.run_gate, self.completion_gate):
-            if gate is not None:
-                gate.set()
+        if self.run_gate is not None:
+            self.run_gate.set()
 
     def release_attempt(self, message_id: str) -> None:
         self._record(f"release-attempt message={message_id}")
