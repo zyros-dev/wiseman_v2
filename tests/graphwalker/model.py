@@ -233,6 +233,7 @@ class GraphState:
     wiseman: WisemanState = field(default_factory=WisemanState)
     failures: list[VerificationFailure] = field(default_factory=list)
     step: int = 0
+    handoff_pending: bool = False
 
     @property
     def pending(self) -> int:
@@ -240,16 +241,13 @@ class GraphState:
 
     def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
         if edge == "fixture-reset":
-            self.chat = ChatState(thread_id=self.chat.thread_id)
-            self.wiseman = WisemanState()
+            self._reset_fixture()
         self.vertex = target
         self._record_chat_message(edge, message_id)
         if edge in {"admit-question", "queue-question"}:
-            if edge == "admit-question" and source is Vertex.IDLE:
-                self._consume_background()
-            self._remember_question(message_id)
+            self._advance_question(edge, source, message_id)
         elif edge == "dispatch-queued":
-            self._consume_background()
+            self._advance_dispatch()
         elif edge in {"background-chatter", "running-background-chatter"}:
             self._remember_background(message_id)
         elif edge == "context-ready":
@@ -259,7 +257,7 @@ class GraphState:
         elif edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
             self._remember_stop(message_id)
         elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
-            self._settle_active()
+            self._advance_terminal()
         self.step += 1
 
     def reject(self, details: FailureDetails) -> NoReturn:
@@ -286,6 +284,28 @@ class GraphState:
             if self.wiseman.active_question is None:
                 self.wiseman.active_question = message_id
             self.wiseman.seen_questions.add(message_id)
+
+    def _reset_fixture(self) -> None:
+        self.chat = ChatState(thread_id=self.chat.thread_id)
+        self.wiseman = WisemanState()
+        self.handoff_pending = False
+
+    def _advance_question(self, edge: str, source: Vertex, message_id: str) -> None:
+        if edge == "admit-question" and source is Vertex.IDLE:
+            self._consume_background()
+        self._remember_question(message_id)
+
+    def _advance_dispatch(self) -> None:
+        if self.handoff_pending:
+            self._settle_active()
+            self.handoff_pending = False
+        self._consume_background()
+
+    def _advance_terminal(self) -> None:
+        if self._has_queued_handoff():
+            self.handoff_pending = True
+        else:
+            self._settle_active()
 
     def _remember_background(self, message_id: str) -> None:
         if message_id:
@@ -314,6 +334,10 @@ class GraphState:
             self.wiseman.pending_questions.pop(0)
         self.wiseman.active_question = None
         self.wiseman.turns += 1
+
+    def _has_queued_handoff(self) -> bool:
+        active = self.wiseman.active_question
+        return bool(active and self.wiseman.pending_questions[:1] == [active] and len(self.wiseman.pending_questions) > 1)
 
     def _record_chat_message(self, edge: str, message_id: str) -> None:
         if edge == "duplicate-question" and message_id not in self.wiseman.seen_questions:

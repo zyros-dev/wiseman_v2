@@ -30,7 +30,7 @@ ObservationComparison = tuple[str, ObservationValue, ObservationValue, str]
 
 def _assert_idle(context: GraphContext) -> None:
     state = context.state
-    if state.wiseman.active_question is not None:
+    if state.wiseman.active_question is not None and not state.handoff_pending:
         context.state.reject(
             FailureDetails(
                 FailureKind.INVARIANT,
@@ -52,7 +52,7 @@ def _assert_active_turn(context: GraphContext) -> None:
 
 def _assert_retired(context: GraphContext) -> None:
     state = context.state
-    if state.wiseman.active_question is not None or state.wiseman.pending_questions:
+    if state.wiseman.active_question is not None or state.wiseman.pending_questions or state.handoff_pending:
         context.state.reject(
             FailureDetails(
                 FailureKind.INVARIANT,
@@ -113,7 +113,7 @@ def _assert_model_invariants(context: GraphContext) -> None:
         _reject_invariant(
             context, "chat-state", "deduplicated message history", str([message.id for message in state.chat.messages]), "chat history must be deduplicated"
         )
-    if state.vertex is Vertex.RETIRED and (state.wiseman.active_question or state.wiseman.pending_questions):
+    if state.vertex is Vertex.RETIRED and (state.wiseman.active_question or state.wiseman.pending_questions or state.handoff_pending):
         _reject_invariant(
             context,
             "retired",
@@ -150,7 +150,13 @@ def _assert_question_transition(context: GraphContext, previous: GraphState) -> 
 
 
 def _assert_dispatch_transition(context: GraphContext, previous: GraphState) -> None:
-    expected = previous.wiseman.pending_questions[0] if previous.wiseman.pending_questions else None
+    expected = (
+        previous.wiseman.pending_questions[1]
+        if previous.handoff_pending and len(previous.wiseman.pending_questions) > 1
+        else previous.wiseman.pending_questions[0]
+        if previous.wiseman.pending_questions
+        else None
+    )
     _assert_state_equal(
         context,
         "transition.active_question",

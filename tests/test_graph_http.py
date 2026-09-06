@@ -108,11 +108,28 @@ def _queued_idle_handoff(context: GraphContext, observation: RuntimeObservation)
     pending = context.state.wiseman.pending_questions
     active = context.state.wiseman.active_question
     next_question = pending[1] if active and len(pending) > 1 and pending[:1] == [active] else pending[0] if pending else None
-    if (
-        not next_question
-        or observation.wiseman.active_question not in pending
-        or observation.wiseman.active_question == active
-    ):
+    if (context.state.handoff_pending or getattr(context.harness, "held_terminal_message_id", None)) and observation.wiseman.active_question == active:
+        return replace(
+            observation,
+            chat=replace(observation.chat, answer_message_ids=(), progress_message_ids=(), typing=False),
+            wiseman=replace(
+                observation.wiseman,
+                phase=Vertex.IDLE,
+                active_question=None,
+                active_turn=None,
+                result_known=False,
+                error=False,
+                stop_target_question_id=None,
+                inferencing=False,
+                stop_requested=False,
+                recovering=False,
+                outcome_unknown=False,
+                cancellation_unknown=False,
+                delivery_phase="idle",
+                reaction_phase="none",
+            ),
+        )
+    if not next_question or observation.wiseman.active_question not in pending or observation.wiseman.active_question == active:
         return None
     return replace(
         observation,
@@ -148,6 +165,7 @@ def _message(message_id: str, content: str, *, thread: str | None = None, reply_
 class _ReplayHarness(GraphHarness):
     def __init__(self, observer: RuntimeObserver, runner: GraphRunner, engine: Engine, client, environment: WorkflowEnvironment) -> None:
         self.observer, self.runner, self.engine, self.client, self.environment = observer, runner, engine, client, environment
+        self.held_terminal_message_id: str | None = None
 
     async def wait_for_state(self, vertex: Vertex, context: GraphContext, *, deadline_seconds: int) -> RuntimeObservation:
         assert context.state.vertex is vertex
@@ -188,8 +206,13 @@ class _ReplayHarness(GraphHarness):
         elif edge.name is EdgeName.DISPATCH_QUEUED:
             self.runner.clear_error()
             self.runner.clear_stops()
-            if context.state.wiseman.pending_questions:
-                self.runner.release_message(context.state.wiseman.pending_questions[0])
+            if self.held_terminal_message_id:
+                await self.client.get_workflow_handle(f"wiseman-turn-{self.held_terminal_message_id}").signal("release_terminal")
+                self.held_terminal_message_id = None
+            pending = context.state.wiseman.pending_questions
+            queued = pending[1] if context.state.handoff_pending and len(pending) > 1 else pending[0] if pending else ""
+            if queued:
+                self.runner.release_message(queued)
         elif edge.name is EdgeName.QUEUE_QUESTION:
             self.runner.hold_message(context.last_message_id)
         elif edge.name in {
@@ -328,11 +351,13 @@ class _ReplayHarness(GraphHarness):
     async def _execute_terminal(self, edge: GraphElement, context: GraphContext) -> None:
         if active := context.state.wiseman.active_question:
             handle = self.client.get_workflow_handle(f"wiseman-turn-{active}")
+            hold_for_queue = len(context.state.wiseman.pending_questions) > 1 and context.state.wiseman.pending_questions[:1] == [active]
             if edge.name is EdgeName.STOP_CONFIRMED:
                 await handle.signal("release_cancellation")
+            if not hold_for_queue:
                 await handle.signal("release_terminal")
             else:
-                await handle.signal("release_terminal")
+                self.held_terminal_message_id = active
             if edge.name is EdgeName.STOP_CONFIRMED:
                 self.runner.hold_stop = False
                 self.runner.release_attempt(active)
