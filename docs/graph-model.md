@@ -60,3 +60,6 @@ flowchart TD
 - `outcome-unknown` has no retry edge: the harness must establish the runner
   receipt before the model can report an error and continue.
 - Retiring requires an idle conversation with no active or queued work.
+- Verification failures are appended to `GraphState.failures` with their step,
+  category, location, expected value, observed value, and message ID before
+  the current walk stops. Independent seeded walks still run after cleanup.

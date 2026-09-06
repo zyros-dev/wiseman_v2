@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import NoReturn, Protocol
 
-from tests.graphwalker.model import GraphState, Vertex
+from tests.graphwalker.model import FailureDetails, GraphState, Vertex
 
 
 class GraphElement(Protocol):
@@ -32,6 +32,9 @@ class GraphContext:
     harness: GraphHarness
     state: GraphState = field(default_factory=GraphState)
     message_id: str = ""
+
+    def reject(self, details: FailureDetails) -> NoReturn:
+        self.state.reject(details)
 
 
 StateFunction = Callable[[GraphContext], Awaitable[None]]

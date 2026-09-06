@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -92,6 +92,38 @@ class EdgeName(StrEnum):
     FIXTURE_RESET = "fixture-reset"
 
 
+class FailureKind(StrEnum):
+    OBSERVATION = "observation"
+    INVARIANT = "invariant"
+
+
+@dataclass(frozen=True, slots=True)
+class FailureDetails:
+    kind: FailureKind
+    location: str
+    expected: str
+    observed: str
+    message: str
+    message_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationFailure:
+    step: int
+    kind: FailureKind
+    location: str
+    expected: str
+    observed: str
+    message: str
+    message_id: str = ""
+
+
+class GraphVerificationError(AssertionError):
+    def __init__(self, failure: VerificationFailure) -> None:
+        super().__init__(failure.message)
+        self.failure = failure
+
+
 class ChatMessageKind(StrEnum):
     QUESTION = "question"
     BACKGROUND = "background"
@@ -149,6 +181,8 @@ class GraphState:
     vertex: Vertex = Vertex.IDLE
     chat: ChatState = field(default_factory=ChatState)
     wiseman: WisemanState = field(default_factory=WisemanState)
+    failures: list[VerificationFailure] = field(default_factory=list)
+    step: int = 0
 
     @property
     def pending(self) -> int:
@@ -156,8 +190,7 @@ class GraphState:
 
     def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
         if self.vertex != source:
-            message = f"{edge} requires {source}, got {self.vertex}"
-            raise AssertionError(message)
+            self.reject(FailureDetails(FailureKind.INVARIANT, edge, str(source), str(self.vertex), f"{edge} requires {source}, got {self.vertex}", message_id))
         self.vertex = target
         self._record_chat_message(edge, message_id)
         if edge in {"admit-question", "queue-question"}:
@@ -173,6 +206,12 @@ class GraphState:
         elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
             self._settle_active()
         self._assert_invariants()
+        self.step += 1
+
+    def reject(self, details: FailureDetails) -> NoReturn:
+        failure = VerificationFailure(self.step, details.kind, details.location, details.expected, details.observed, details.message, details.message_id)
+        self.failures.append(failure)
+        raise GraphVerificationError(failure)
 
     def _remember_question(self, message_id: str) -> None:
         if message_id and message_id not in self.wiseman.seen_questions:
@@ -211,13 +250,45 @@ class GraphState:
 
     def _assert_invariants(self) -> None:
         if len(self.wiseman.pending_questions) != len(set(self.wiseman.pending_questions)):
-            raise AssertionError("pending questions must be ordered and unique")
+            self.reject(
+                FailureDetails(
+                    FailureKind.INVARIANT,
+                    "graph-state",
+                    "unique ordered pending questions",
+                    str(self.wiseman.pending_questions),
+                    "pending questions must be ordered and unique",
+                )
+            )
         if len(self.chat.messages) != len(self.chat.message_ids):
-            raise AssertionError("chat message history must be deduplicated")
+            self.reject(
+                FailureDetails(
+                    FailureKind.INVARIANT,
+                    "chat-state",
+                    "deduplicated message history",
+                    str([message.id for message in self.chat.messages]),
+                    "chat message history must be deduplicated",
+                )
+            )
         if self.vertex is Vertex.RETIRED and (self.wiseman.active_question or self.wiseman.pending_questions):
-            raise AssertionError("retired conversations cannot retain active work")
+            self.reject(
+                FailureDetails(
+                    FailureKind.INVARIANT,
+                    "retired",
+                    "no active or queued work",
+                    f"active={self.wiseman.active_question}, pending={self.wiseman.pending_questions}",
+                    "retired conversations cannot retain active work",
+                )
+            )
         if self.wiseman.active_question and self.wiseman.active_question not in self.wiseman.pending_questions:
-            raise AssertionError("active question must remain pending until terminal delivery")
+            self.reject(
+                FailureDetails(
+                    FailureKind.INVARIANT,
+                    "wiseman-state",
+                    "active question remains pending",
+                    self.wiseman.active_question,
+                    "active question must remain pending until terminal delivery",
+                )
+            )
 
     def _record_chat_message(self, edge: str, message_id: str) -> None:
         kind = {
@@ -350,7 +421,7 @@ def model() -> GraphDocument:
                     "initial_state": Vertex.IDLE,
                     "owner": "temporal-thread-workflow",
                     "harness": "authenticated-discord-http-replay",
-                    "state_data": "ids,owners,pending,histories,cursors,cancellation_targets",
+                    "state_data": "ids,owners,pending,histories,cursors,cancellation_targets,failure_log",
                 },
                 "vertices": vertices,
                 "edges": edges,

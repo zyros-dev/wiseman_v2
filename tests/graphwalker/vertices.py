@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from tests.graphwalker.model import STATE_TIMEOUTS, GraphState, Vertex
+from tests.graphwalker.model import STATE_TIMEOUTS, FailureDetails, FailureKind, Vertex
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -14,23 +14,43 @@ if TYPE_CHECKING:
     from tests.graphwalker.graph_utils import GraphContext, StateFunction
 
 
-StateAssertion = Callable[[GraphState], None]
+StateAssertion = Callable[["GraphContext"], None]
 
 
-def _assert_idle(state: GraphState) -> None:
+def _assert_idle(context: GraphContext) -> None:
+    state = context.state
     if state.wiseman.active_question is not None:
-        message = f"idle state retained active question {state.wiseman.active_question}"
-        raise AssertionError(message)
+        context.state.reject(
+            FailureDetails(
+                FailureKind.INVARIANT,
+                "idle",
+                "no active question",
+                state.wiseman.active_question,
+                f"idle state retained active question {state.wiseman.active_question}",
+            )
+        )
 
 
-def _assert_active_turn(state: GraphState) -> None:
+def _assert_active_turn(context: GraphContext) -> None:
+    state = context.state
     if state.wiseman.active_question is None:
-        raise AssertionError("active lifecycle state has no active question")
+        context.state.reject(
+            FailureDetails(FailureKind.INVARIANT, str(state.vertex), "active question", "none", "active lifecycle state has no active question")
+        )
 
 
-def _assert_retired(state: GraphState) -> None:
+def _assert_retired(context: GraphContext) -> None:
+    state = context.state
     if state.wiseman.active_question is not None or state.wiseman.pending_questions:
-        raise AssertionError("retired state retained active or queued work")
+        context.state.reject(
+            FailureDetails(
+                FailureKind.INVARIANT,
+                "retired",
+                "no active or queued work",
+                f"active={state.wiseman.active_question}, pending={state.wiseman.pending_questions}",
+                "retired state retained active or queued work",
+            )
+        )
 
 
 STATE_ASSERTIONS: Mapping[Vertex, StateAssertion] = {
@@ -49,9 +69,16 @@ STATE_ASSERTIONS: Mapping[Vertex, StateAssertion] = {
 async def _wait_for_vertex(context: GraphContext, vertex: Vertex) -> None:
     state = context.state
     if state.vertex is not vertex:
-        message = f"{vertex} condition requires model state {vertex}, got {state.vertex}"
-        raise AssertionError(message)
-    STATE_ASSERTIONS[vertex](state)
+        context.state.reject(
+            FailureDetails(
+                FailureKind.INVARIANT,
+                f"vertex:{vertex}",
+                str(vertex),
+                str(state.vertex),
+                f"{vertex} condition requires model state {vertex}, got {state.vertex}",
+            )
+        )
+    STATE_ASSERTIONS[vertex](context)
     await context.harness.wait_for_state(vertex, context, deadline_seconds=STATE_TIMEOUTS[vertex])
 
 
