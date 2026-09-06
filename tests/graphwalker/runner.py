@@ -87,14 +87,27 @@ class GraphRunner(MockHarnessRunner):
         if self.run_gate is not None:
             self.run_gate.set()
 
-    def release_attempt(self, message_id: str) -> None:
+    def release_attempt(self, message_id: str) -> bool:
         self._record(f"release-attempt message={message_id}")
+        released = False
         for thread, attempt in self._active_attempts.items():
             if self._active_message_ids.get(thread) != message_id:
                 continue
             for gate in self._attempt_gates.get(attempt, ()):
                 if gate is not None:
                     gate.set()
+            released = True
+        return released
+
+    def release_attempt_start(self, message_id: str) -> bool:
+        for thread, attempt in self._active_attempts.items():
+            if self._active_message_ids.get(thread) != message_id:
+                continue
+            run_gate, _ = self._attempt_gates.get(attempt, (None, None))
+            if run_gate is not None:
+                run_gate.set()
+            return True
+        return False
 
     async def wait_until_idle(self, thread: str) -> None:
         async with asyncio.timeout(5):

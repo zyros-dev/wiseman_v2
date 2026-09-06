@@ -231,13 +231,13 @@ class _ReplayHarness(GraphHarness):
         elif edge.name == EdgeName.INFERENCE_COMPLETE:
             await self._execute_inference_complete(context)
         elif edge.name is EdgeName.TRANSIENT_FAILURE:
-            self._release_runner()
+            self._release_active_runner(context)
             await self.runner.wait_until_idle(context.state.wiseman.session_id or f"codex-{context.state.chat.thread_id}")
             self.runner.clear_error()
             self.runner.completion_gate = asyncio.Event()
             self.runner.progress_sent.clear()
         elif edge.name is EdgeName.EXECUTION_UNCERTAIN:
-            self._release_runner()
+            self._release_active_runner(context)
         elif edge.name in {
             EdgeName.RESUME_SESSION,
             EdgeName.RETRY_EXHAUSTED,
@@ -266,7 +266,7 @@ class _ReplayHarness(GraphHarness):
         elif edge.name in {EdgeName.ANSWER_FINALIZED, EdgeName.ERROR_FINALIZED, EdgeName.STOP_CONFIRMED}:
             await self._execute_terminal(edge, context)
         elif edge.name in {EdgeName.PREPARATION_FAILED, EdgeName.PERMANENT_FAILURE}:
-            self._release_runner()
+            self._release_active_runner(context)
         elif edge.name == EdgeName.IDLE_RETIREMENT:
             await self.environment.sleep(timedelta(days=3))
         elif edge.name is EdgeName.FIXTURE_RESET:
@@ -293,7 +293,7 @@ class _ReplayHarness(GraphHarness):
     async def _execute_progress(self, context: GraphContext, deadline_seconds: int) -> None:
         if context.state.wiseman.active_question:
             await self._signal_active(context, "progress", f"✍️ Graph preview {context.state.step}")
-        if self.runner.run_gate is not None:
+        if not self.runner.release_attempt_start(context.state.wiseman.active_question or "") and self.runner.run_gate is not None:
             self.runner.run_gate.set()
         await asyncio.wait_for(self.runner.progress_sent.wait(), deadline_seconds)
 
@@ -303,7 +303,7 @@ class _ReplayHarness(GraphHarness):
         self.runner.hold_stop = False
         self.runner.clear_error()
         await self._signal_active(context, "release_cancellation")
-        self.runner.release_attempt(context.state.wiseman.active_question or "")
+        self._release_active_runner(context)
 
     async def _release_active_cancellation(self, context: GraphContext) -> None:
         await self._signal_active(context, "release_cancellation")
@@ -322,7 +322,7 @@ class _ReplayHarness(GraphHarness):
 
     async def _execute_inference_complete(self, context: GraphContext) -> None:
         await self._signal_active(context, "hold_terminal")
-        self.runner.release_attempt(context.state.wiseman.active_question or "")
+        self._release_active_runner(context)
 
     async def _execute_terminal(self, edge: GraphElement, context: GraphContext) -> None:
         if active := context.state.wiseman.active_question:
@@ -340,6 +340,10 @@ class _ReplayHarness(GraphHarness):
         for gate in (self.runner.run_gate, self.runner.completion_gate):
             if gate is not None:
                 gate.set()
+
+    def _release_active_runner(self, context: GraphContext) -> None:
+        if not self.runner.release_attempt(context.state.wiseman.active_question or ""):
+            self._release_runner()
 
     async def _wait_for_phase(self, vertex: Vertex, deadline_seconds: int, thread_id: str, context: GraphContext) -> None:
         try:
