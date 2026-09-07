@@ -389,9 +389,7 @@ class TurnWorkflow:
             finished = True
         else:
             self.recovering = True
-            await workflow.wait_condition(
-                lambda: self.resume_requested or self.retry_exhausted or self.stop_requested or self.outcome_established
-            )
+            await workflow.wait_condition(lambda: self.resume_requested or self.retry_exhausted or self.stop_requested or self.outcome_established)
             if self.outcome_established:
                 self.recovering = False
                 self.work.stopped = False
