@@ -51,7 +51,7 @@ jobs:
             --artifacts /tmp/wiseman-graph-walks \
             --start-seed 2026 \
             --count 16 \
-            --parallelism 16 \
+            --parallelism 8 \
             --steps 100
       - name: Ruff
         run: |
