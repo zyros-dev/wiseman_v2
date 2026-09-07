@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, NoReturn, NotRequired, TypedDict
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from app.types import JsonValue
+
 GraphValue = str | int | bool
 
 
@@ -193,6 +195,34 @@ class ObservedChatState:
     answer_edit_count: int = 0
     typing: bool = False
     archived: bool = False
+    edited_message_ids: tuple[str, ...] = ()
+    typing_operations: tuple[str, ...] = ()
+    reaction_operations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PhoenixEvidence:
+    trace: str = ""
+    audit_id: str | None = None
+    audit_present: bool = False
+    audit_matches_admission: bool = False
+    raw_request: JsonValue = None
+    normalized_request: JsonValue = None
+    context_message_ids: tuple[str, ...] = ()
+    context_author_ids: tuple[str, ...] = ()
+    context_reply_ids: tuple[str, ...] = ()
+    context_attachment_urls: tuple[str, ...] = ()
+    grammar_rendered: str = ""
+    prompt_final_input: str = ""
+    codex_thread_id: str | None = None
+    requested_model: str | None = None
+    served_model: str | None = None
+    usage: JsonValue = None
+    cost: JsonValue = None
+    transport_complete: bool | None = None
+    reaction_operations: tuple[str, ...] = ()
+    nodes: tuple[str, ...] = ()
+    sequence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +254,7 @@ class RuntimeObservation:
     wiseman: ObservedWisemanState
     phoenix_nodes: tuple[str, ...] = ()
     phoenix_sequence: tuple[str, ...] = ()
+    phoenix: PhoenixEvidence = field(default_factory=PhoenixEvidence)
 
 
 @dataclass(slots=True)
@@ -265,15 +296,27 @@ class GraphState:
         self.failures.append(failure)
         raise GraphVerificationError(failure)
 
-    def reconcile_processed(self, processed_ids: tuple[str, ...]) -> None:
+    def reconcile_processed(self, processed_ids: tuple[str, ...], observed_active: str | None = None) -> None:
+        was_handoff_pending = self.handoff_pending
+        if was_handoff_pending and observed_active not in self.wiseman.pending_questions[1:]:
+            return
         processed = set(processed_ids)
-        while self.wiseman.pending_questions and self.wiseman.pending_questions[0] in processed:
-            question = self.wiseman.pending_questions.pop(0)
-            self.wiseman.settled_questions.add(question)
+        while self.wiseman.pending_questions:
+            question = self.wiseman.pending_questions[0]
+            if question == observed_active:
+                if question in processed and question not in self.wiseman.settled_questions:
+                    self.wiseman.settled_questions.add(question)
+                    self.wiseman.turns += 1
+                break
+            if question not in processed:
+                break
+            self.wiseman.pending_questions.pop(0)
+            if question not in self.wiseman.settled_questions:
+                self.wiseman.settled_questions.add(question)
+                self.wiseman.turns += 1
             if self.wiseman.active_question == question:
                 self.wiseman.active_question = None
                 self.handoff_pending = False
-            self.wiseman.turns += 1
         if (
             self.vertex
             in {
@@ -289,6 +332,8 @@ class GraphState:
             and self.wiseman.pending_questions
         ):
             self.wiseman.active_question = self.wiseman.pending_questions[0]
+        if was_handoff_pending and not self.handoff_pending:
+            self._consume_background()
 
     def reconcile_session(self, session_id: str | None) -> None:
         if self.wiseman.session_id is None and session_id is not None:
@@ -315,6 +360,8 @@ class GraphState:
         if self.handoff_pending:
             self._settle_active()
             self.handoff_pending = False
+        if self.wiseman.active_question is None and self.wiseman.pending_questions:
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
         self._consume_background()
 
     def _advance_terminal(self) -> None:

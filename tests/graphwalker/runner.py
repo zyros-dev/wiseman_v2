@@ -22,6 +22,7 @@ class GraphRunner(MockHarnessRunner):
         self.active_threads: set[str] = set()
         self.progress_sent = asyncio.Event()
         self._pending_errors: dict[str, tuple[int, RunnerError]] = {}
+        self._next_error: tuple[int, RunnerError] | None = None
         self._attempts = 0
         self._error_epochs = 0
         self._consumed_error_epoch = 0
@@ -41,15 +42,22 @@ class GraphRunner(MockHarnessRunner):
         self.history.append(event)
         del self.history[:-64]
 
+    def active_message_id(self) -> str:
+        return next(iter(self._active_message_ids.values()), "")
+
     def inject_error(self, error: RunnerError, message_id: str = "") -> None:
         self._error_epochs += 1
         entry = (self._error_epochs, error)
         self._record(f"inject status={error.status} message={message_id}")
+        if not message_id:
+            self._next_error = entry
+            return
         if self._active_attempts:
             target = max(self._active_attempts.values())
             target_thread = next(thread for thread, attempt in self._active_attempts.items() if attempt == target)
             if self._active_message_ids.get(target_thread) == message_id:
                 self._attempt_errors[target] = (message_id, *entry)
+                self._pending_errors[message_id] = entry
                 self._failed_threads.discard(target_thread)
             else:
                 self._pending_errors[message_id] = entry
@@ -60,6 +68,7 @@ class GraphRunner(MockHarnessRunner):
         self._record(f"clear-error pending={len(self._pending_errors)} attempts={len(self._attempt_errors)}")
         self._pending_errors.clear()
         self._attempt_errors.clear()
+        self._next_error = None
         self.start_error = None
 
     def clear_stops(self) -> None:
@@ -103,6 +112,13 @@ class GraphRunner(MockHarnessRunner):
         self._record(f"release-message-attempt {message_id}")
         return True
 
+    def reset_message_attempt(self, message_id: str) -> None:
+        run_gate, completion_gate = asyncio.Event(), asyncio.Event()
+        run_gate.set()
+        self._message_gates[message_id] = (run_gate, completion_gate)
+        self._released_messages.discard(message_id)
+        self._record(f"reset-message-attempt {message_id}")
+
     def release_attempt(self, message_id: str) -> bool:
         self._record(f"release-attempt message={message_id}")
         released = False
@@ -115,6 +131,17 @@ class GraphRunner(MockHarnessRunner):
             released = True
         return released
 
+    def confirm_cancellation(self, message_id: str) -> bool:
+        confirmed = False
+        for thread, attempt in self._active_attempts.items():
+            if self._active_message_ids.get(thread) != message_id:
+                continue
+            self._stop_attempts[thread] = attempt
+            self.stop_requested.add(thread)
+            confirmed = True
+        self._record(f"confirm-cancellation message={message_id} confirmed={confirmed}")
+        return confirmed
+
     def release_attempt_start(self, message_id: str) -> bool:
         for thread, attempt in self._active_attempts.items():
             if self._active_message_ids.get(thread) != message_id:
@@ -124,6 +151,22 @@ class GraphRunner(MockHarnessRunner):
                 run_gate.set()
             return True
         return False
+
+    def release_attempt_starts(self, message_id: str = "") -> bool:
+        released = False
+        for thread, attempt in self._active_attempts.items():
+            if message_id and self._active_message_ids.get(thread) != message_id:
+                continue
+            run_gate, _ = self._attempt_gates.get(attempt, (None, None))
+            if run_gate is not None:
+                run_gate.set()
+                released = True
+        if self.run_gate is not None:
+            self.run_gate.set()
+            released = True
+        if released:
+            self._record(f"release-attempt-starts message={message_id}")
+        return released
 
     async def wait_until_idle(self, thread: str) -> None:
         async with asyncio.timeout(5):
@@ -135,8 +178,12 @@ class GraphRunner(MockHarnessRunner):
         if entry is not None and entry[0] in {"", message_id}:
             self._attempt_errors.pop(attempt)
             _, epoch, error = entry
+            self._pending_errors.pop(message_id, None)
         else:
-            epoch, error = self._pending_errors.pop(message_id, (0, None))
+            entry = self._pending_errors.pop(message_id, None)
+            if entry is None:
+                entry, self._next_error = self._next_error, None
+            epoch, error = entry or (0, None)
         if error is None:
             self._record(f"take-empty attempt={attempt} message={message_id}")
             return None
@@ -166,7 +213,7 @@ class GraphRunner(MockHarnessRunner):
         self.state.call("runner", "start", thread, user, workspace)
         if self.start_error is not None:
             raise self.start_error
-        return thread or f"codex-{workspace or user}"
+        return _session_id(thread, user, workspace)
 
     async def run(
         self,
@@ -207,7 +254,7 @@ class GraphRunner(MockHarnessRunner):
                 await completion_gate.wait()
             if error := self._take_error(attempt, message_id):
                 if self._failure_replayed(thread):
-                    return thread or f"codex-{workspace or user}", f"mock response: {prompt[:80]}", {"model": "mock"}
+                    return _session_id(thread, user, workspace), f"mock response: {prompt[:80]}", _billing()
                 self._mark_failure(thread)
                 self._record(f"raise-error attempt={attempt} status={error.status}")
                 raise error
@@ -215,7 +262,7 @@ class GraphRunner(MockHarnessRunner):
                 self._stop_attempts.pop(thread, None)
                 self.stop_requested.discard(thread)
                 raise RunnerError(STOPPED_STATUS, "turn stopped by user")
-            return thread or f"codex-{workspace or user}", f"mock response: {prompt[:80]}", {"model": "mock"}
+            return _session_id(thread, user, workspace), f"mock response: {prompt[:80]}", _billing()
         finally:
             self.active_threads.discard(thread)
             self._active_attempts.pop(thread, None)
@@ -232,3 +279,15 @@ class GraphRunner(MockHarnessRunner):
                 if gate is not None:
                     gate.set()
         return True
+
+
+def _billing() -> dict[str, object]:
+    return {
+        "model": "mock",
+        "usage": {"input_tokens": 128, "output_tokens": 32, "total_tokens": 160},
+        "cost": {"input": 0.001, "output": 0.002, "total": 0.003, "currency": "USD"},
+    }
+
+
+def _session_id(thread: str, user: str, workspace: str) -> str:
+    return thread if thread and thread != workspace else f"codex-{workspace or user}"

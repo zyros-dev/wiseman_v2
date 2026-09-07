@@ -76,4 +76,7 @@ async def apply_edge(
         context.begin_edge(edge, message_id)
     if execute_boundary:
         await context.harness.execute_edge(edge, context, deadline_seconds=deadline_seconds)
-    context.state.advance(edge.name, edge.source, edge.target, context.last_message_id)
+    recorded_message_id = message_id
+    if not recorded_message_id and edge.name in {"background-chatter", "running-background-chatter"}:
+        recorded_message_id = context.last_message_id
+    context.state.advance(edge.name, edge.source, edge.target, recorded_message_id)

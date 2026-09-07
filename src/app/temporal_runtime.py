@@ -366,6 +366,7 @@ class TurnWorkflow:
     async def _handle_infer_failure(self, status: int | None) -> bool:
         assert self.work is not None
         finished = False
+        status = _outcome_failure_status(established=self.outcome_established, status=status)
         if status == STOPPED_STATUS or self.stop_requested:
             self.recovering = False
             self.work.stopped = True
@@ -388,8 +389,15 @@ class TurnWorkflow:
             finished = True
         else:
             self.recovering = True
-            await workflow.wait_condition(lambda: self.resume_requested or self.retry_exhausted or self.stop_requested)
-            if self.stop_requested:
+            await workflow.wait_condition(
+                lambda: self.resume_requested or self.retry_exhausted or self.stop_requested or self.outcome_established
+            )
+            if self.outcome_established:
+                self.recovering = False
+                self.work.stopped = False
+                self.work.error = "Execution outcome established without a result"
+                finished = True
+            elif self.stop_requested:
                 self.recovering = False
                 self.work.stopped = True
                 self.work.error = "Turn stopped by user"
@@ -753,3 +761,7 @@ def _activity_status(error: ActivityError) -> int | None:
         except (IndexError, ValueError):
             return None
     return None
+
+
+def _outcome_failure_status(*, established: bool, status: int | None) -> int | None:
+    return UNKNOWN_STATUS if established else status

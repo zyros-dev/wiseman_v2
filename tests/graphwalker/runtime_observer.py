@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from tests.graphwalker.model import ObservedChatState, ObservedWisemanState, RuntimeObservation, Vertex
+from tests.graphwalker.model import ObservedChatState, ObservedWisemanState, PhoenixEvidence, RuntimeObservation, Vertex
 
 if TYPE_CHECKING:
     from app.clients.client_interfaces import ClientContainer
-    from app.types import JsonObject
+    from app.types import JsonObject, JsonValue
 
 
 class RuntimeObserver:
@@ -26,6 +26,9 @@ class RuntimeObserver:
         delivery = _object(state.get("delivery"))
         phase = _phase(session, turn_snapshot, work, delivery)
         records = self._records(active_id)
+        trace = f"discord-{active_id}" if active_id else ""
+        phoenix = _phoenix_evidence(records, self.clients.phoenix.audit(trace) if trace else None)
+        discord = _discord_observation(self.clients.discord)
         terminal = phase in {Vertex.DELIVERING, Vertex.ERROR}
         error = bool(work.get("error")) or any(record.get("node") == "failure" for record in records)
         pending = _ids(session.get("pending_message_ids"))
@@ -48,6 +51,9 @@ class RuntimeObserver:
                 answer_edit_count=_integer(delivery.get("answer_edit_count")),
                 typing=bool(delivery.get("typing")),
                 archived=bool(session.get("closed")),
+                edited_message_ids=discord[0],
+                typing_operations=discord[1],
+                reaction_operations=discord[2],
             ),
             wiseman=ObservedWisemanState(
                 phase=phase,
@@ -70,13 +76,93 @@ class RuntimeObserver:
                 delivery_phase=_string(delivery.get("phase")) or "idle",
                 reaction_phase=_string(delivery.get("reaction_phase")) or "none",
             ),
-            phoenix_nodes=tuple(sorted({str(record.get("node")) for record in records if record.get("node")})),
-            phoenix_sequence=tuple(str(record["node"]) for record in records if record.get("node")),
+            phoenix_nodes=phoenix.nodes,
+            phoenix_sequence=phoenix.sequence,
+            phoenix=phoenix,
         )
 
     def _records(self, active_id: str) -> list[dict[str, object]]:
         trace = f"discord-{active_id}" if active_id else ""
         return [record for record in self.clients.phoenix.records if str(record.get("trace", "")) == trace]
+
+
+def _phoenix_evidence(records: list[dict[str, object]], audit: dict[str, object] | None) -> PhoenixEvidence:
+    nodes = tuple(str(record["node"]) for record in records if record.get("node"))
+    admission = _last_record(records, "admission")
+    context = _last_record(records, "context")
+    grammar = _last_record(records, "grammar")
+    prompt = _last_record(records, "prompt")
+    turn = _last_record(records, "turn")
+    codex = _last_record(records, "codex")
+    completed = _last_record(records, "completed")
+    provider = _last_record(records, "provider")
+    reaction_records = tuple(record for record in records if record.get("node") == "reaction")
+    raw_request = _json_value(admission.get("raw_request"))
+    normalized_request = _json_value(admission.get("normalized_request"))
+    audit_raw = _json_value(audit.get("raw_request")) if audit else None
+    audit_normalized = _json_value(audit.get("normalized_request")) if audit else None
+    context_data = _object(context.get("normalized"))
+    context_messages = tuple(_object(item) for item in _sequence(context_data.get("messages")))
+    context_attachment_urls = tuple(
+        str(_object(attachment).get("url"))
+        for message in (*context_messages, _object(context_data.get("trigger")))
+        for attachment in _sequence(message.get("attachments"))
+        if _object(attachment).get("url")
+    )
+    route = _object(turn.get("route"))
+    result = codex or completed
+    billing = result or provider
+    model = _string(billing.get("model"))
+    return PhoenixEvidence(
+        trace=_string(records[0].get("trace")) if records else "",
+        audit_id=_string(admission.get("audit_id")) or None,
+        audit_present=audit is not None,
+        audit_matches_admission=audit_raw == raw_request and audit_normalized == normalized_request,
+        raw_request=raw_request,
+        normalized_request=normalized_request,
+        context_message_ids=tuple(str(item) for item in _sequence(context_data.get("selected_ids")) if item),
+        context_author_ids=tuple(_string(message.get("author_id")) for message in context_messages if _string(message.get("author_id"))),
+        context_reply_ids=tuple(_string(message.get("reply_to")) for message in context_messages if _string(message.get("reply_to"))),
+        context_attachment_urls=context_attachment_urls,
+        grammar_rendered=_string(grammar.get("rendered")),
+        prompt_final_input=_string(prompt.get("final_input")),
+        codex_thread_id=_string(result.get("codex_thread_id")) or None,
+        requested_model=_string(route.get("requested_model")) or _string(provider.get("requested_model")) or None,
+        served_model=model,
+        usage=_json_value(billing.get("usage")),
+        cost=_json_value(billing.get("cost")),
+        transport_complete=_bool_or_none(provider.get("transport_complete")),
+        reaction_operations=tuple(operation for record in reaction_records for operation in _string_sequence(record.get("operations"))),
+        nodes=tuple(sorted(set(nodes))),
+        sequence=nodes,
+    )
+
+
+def _last_record(records: list[dict[str, object]], node: str) -> JsonObject:
+    return next((cast("JsonObject", record) for record in reversed(records) if record.get("node") == node), {})
+
+
+def _discord_observation(discord: object) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    state = getattr(discord, "state", None)
+    calls = getattr(state, "calls", ())
+    edited: list[str] = []
+    typing: list[str] = []
+    reactions: list[str] = []
+    if not isinstance(calls, list):
+        return (), (), ()
+    for call in calls:
+        if not isinstance(call, tuple) or len(call) != 3:
+            continue
+        client, operation, values = call
+        if client != "discord" or not isinstance(values, tuple):
+            continue
+        if operation == "edit" and values:
+            edited.append(str(values[0]))
+        elif operation in {"start_typing", "stop_typing"} and values:
+            typing.append(f"{operation.removesuffix('_typing')}:{values[0]}")
+        elif operation in {"add_reaction", "remove_reaction"} and len(values) >= 2:
+            reactions.append(f"{operation.removesuffix('_reaction')}:{values[0]}:{values[1]}")
+    return tuple(edited), tuple(typing), tuple(reactions)
 
 
 def _phase(session: JsonObject, turn_snapshot: JsonObject, work: JsonObject, delivery: JsonObject) -> Vertex:
@@ -89,14 +175,12 @@ def _phase(session: JsonObject, turn_snapshot: JsonObject, work: JsonObject, del
         phase = Vertex.CANCELLING
     elif turn_snapshot.get("resumed"):
         phase = Vertex.RUNNING
-    elif turn_snapshot.get("recovering"):
-        phase = Vertex.RECOVERING
     elif turn_snapshot.get("outcome_unknown"):
         phase = Vertex.OUTCOME_UNKNOWN
-    elif work.get("error"):
-        phase = Vertex.ERROR
+    elif turn_snapshot.get("recovering"):
+        phase = Vertex.RECOVERING
     elif delivery.get("phase") == "answer":
-        phase = Vertex.DELIVERING
+        phase = Vertex.ERROR if work.get("error") else Vertex.DELIVERING
     elif turn_snapshot.get("inferencing"):
         phase = Vertex.RUNNING
     return phase
@@ -141,3 +225,25 @@ def _optional_string(value: object) -> str | None:
 
 def _integer(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _bool_or_none(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _string_sequence(value: object) -> tuple[str, ...]:
+    return tuple(item for item in _sequence(value) if isinstance(item, str))
+
+
+def _sequence(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, list | tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    return str(value)

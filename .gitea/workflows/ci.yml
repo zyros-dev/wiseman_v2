@@ -45,14 +45,14 @@ jobs:
           java -jar /tmp/graphwalker-cli-4.3.3.jar offline -g /tmp/wiseman.json -d 42 > /tmp/wiseman-path-coverage.jsonl
           test -s /tmp/wiseman-path-coverage.jsonl
           GRAPHWALKER_PATH=/tmp/wiseman-path-coverage.jsonl GRAPHWALKER_COVERAGE=1 uv run pytest -q tests/test_graph_http.py
-          printf '%s\n' 2026 2027 2028 2029 2030 2031 2032 2033 2034 2035 2036 2037 2038 2039 2040 2041 |
-            xargs -n 1 -P 16 sh -c '
-              set -eu
-              seed="$1"
-              java -jar /tmp/graphwalker-cli-4.3.3.jar offline -d "$seed" -m /tmp/wiseman.json "random(length(100))" > "/tmp/wiseman-path-$seed.jsonl"
-              test -s "/tmp/wiseman-path-$seed.jsonl"
-              GRAPHWALKER_PATH="/tmp/wiseman-path-$seed.jsonl" uv run pytest -q tests/test_graph_http.py
-            ' sh
+          uv run python tools/run_graph_walks.py \
+            --jar /tmp/graphwalker-cli-4.3.3.jar \
+            --model /tmp/wiseman.json \
+            --artifacts /tmp/wiseman-graph-walks \
+            --start-seed 2026 \
+            --count 16 \
+            --parallelism 16 \
+            --steps 100
       - name: Ruff
         run: |
           uv run ruff check .

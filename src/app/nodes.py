@@ -81,6 +81,7 @@ class TurnActivities:
             work.trace,
             "failure" if work.error else "completed",
             thread_id=work.event.trigger.thread_id,
+            codex_thread_id=work.state.codex_thread,
             output=work.output,
             error=work.error,
             input=work.prompt,

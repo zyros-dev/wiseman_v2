@@ -69,6 +69,16 @@ def _message(
         "timestamp": f"2026-09-05T00:{sequence // 60:02d}:{sequence % 60:02d}Z",
         "mentions": [{"id": "bot"}] if mention else [],
         "message_reference": {"message_id": reply_to} if reply_to else {},
+        "attachments": [
+            {
+                "id": f"attachment-{message_id}",
+                "filename": f"{message_id}.png",
+                "content_type": "image/png",
+                "url": f"https://cdn.test/{message_id}.png",
+            }
+        ]
+        if content == "question"
+        else [],
     }
 
 

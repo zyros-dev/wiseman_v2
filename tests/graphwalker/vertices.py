@@ -7,6 +7,7 @@ from collections.abc import Callable
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
+from app.presentation import DEFAULT_REACTION_EMOJIS
 from tests.graphwalker.model import (
     STATE_TIMEOUTS,
     FailureDetails,
@@ -167,6 +168,8 @@ def _assert_dispatch_transition(context: GraphContext, previous: GraphState) -> 
 
 
 def _assert_background_transition(context: GraphContext, previous: GraphState) -> None:
+    if previous.vertex is Vertex.IDLE and context.last_response and context.last_response.body.get("status") == "ignored":
+        return
     _assert_state_equal(
         context,
         "transition.background_context",
@@ -300,7 +303,7 @@ def _assert_transition(context: GraphContext) -> None:
 
 def _assert_observation_context(context: GraphContext, observation: RuntimeObservation) -> None:
     state = context.state
-    state.reconcile_processed(observation.wiseman.processed_question_ids)
+    state.reconcile_processed(observation.wiseman.processed_question_ids, observation.wiseman.active_question)
     state.reconcile_session(observation.wiseman.session_id)
     expected_messages = tuple(message.id for message in state.chat.messages)
     if not _assert_subsequence(expected_messages, observation.chat.message_ids):
@@ -331,6 +334,15 @@ def _assert_observation_context(context: GraphContext, observation: RuntimeObser
     )
     for location, expected, observed, message in comparisons:
         _assert_equal(context, location, expected, observed, message)
+    previous = context.previous_observation
+    if previous and previous.wiseman.session_id and observation.wiseman.session_id:
+        _assert_equal(
+            context,
+            "wiseman.session_continuity",
+            previous.wiseman.session_id,
+            observation.wiseman.session_id,
+            "a follow-up or lifecycle transition changed the Codex session",
+        )
     processed = set(observation.wiseman.processed_question_ids)
     missing = state.wiseman.settled_questions - processed
     if missing:
@@ -494,6 +506,124 @@ def _assert_evidence(context: GraphContext, observation: RuntimeObservation, ver
         _reject_observation(context, f"phoenix:{vertex}", str(sorted(required)), str(observation.phoenix_nodes), f"Phoenix evidence missing {missing}")
     if vertex in {Vertex.RUNNING, Vertex.DELIVERING, Vertex.ERROR}:
         _assert_phoenix_order(context, observation, vertex)
+        _assert_phoenix_payload(context, observation, vertex)
+    if vertex in {Vertex.RUNNING, Vertex.DELIVERING, Vertex.ERROR}:
+        _assert_discord_delivery(context, observation, vertex)
+
+
+def _assert_phoenix_payload(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    evidence = observation.phoenix
+    active = observation.wiseman.active_question
+    expected_trace = f"discord-{active}" if active else ""
+    _assert_equal(context, f"phoenix:{vertex}.trace", expected_trace, evidence.trace, "Phoenix trace is not correlated to the active Discord message")
+    _assert_equal(context, f"phoenix:{vertex}.audit_id", expected_trace, evidence.audit_id, "admission audit is not keyed by the Phoenix trace")
+    if not evidence.audit_present or not evidence.audit_matches_admission:
+        _reject_observation(
+            context,
+            f"phoenix:{vertex}.audit",
+            "persisted audit matches admission record",
+            f"present={evidence.audit_present}, matches={evidence.audit_matches_admission}",
+            "Phoenix audit evidence cannot replay the exact admitted request",
+        )
+    normalized = evidence.normalized_request
+    trigger = normalized.get("trigger") if isinstance(normalized, dict) else None
+    trigger = trigger if isinstance(trigger, dict) else {}
+    trigger_id = _string_value(trigger.get("id"))
+    author_id = _string_value(trigger.get("author_id"))
+    _assert_equal(context, f"phoenix:{vertex}.trigger_id", active, trigger_id, "normalized admission changed the trigger id")
+    _assert_equal(context, f"phoenix:{vertex}.author", "human", author_id, "normalized admission changed the author")
+    mentions = trigger.get("mentions")
+    if not isinstance(mentions, list) or "bot" not in mentions:
+        _reject_observation(context, f"phoenix:{vertex}.mentions", "bot mention", str(mentions), "admitted request lost its bot mention")
+    if active not in evidence.context_message_ids:
+        _reject_observation(
+            context,
+            f"phoenix:{vertex}.context",
+            active or "active message",
+            str(evidence.context_message_ids),
+            "context evidence does not contain the admitted message",
+        )
+    if not evidence.context_author_ids or any(author != "human" for author in evidence.context_author_ids):
+        _reject_observation(
+            context,
+            f"phoenix:{vertex}.context_authors",
+            "ordered human authors",
+            str(evidence.context_author_ids),
+            "context evidence changed message authors",
+        )
+    if vertex in {Vertex.RUNNING, Vertex.DELIVERING}:
+        if not evidence.grammar_rendered or not evidence.prompt_final_input:
+            _reject_observation(context, f"phoenix:{vertex}.prompt", "rendered grammar and final input", "missing", "prompt evidence is incomplete")
+        if not evidence.context_attachment_urls or evidence.prompt_final_input.count(evidence.context_attachment_urls[-1]) != 1:
+            _reject_observation(
+                context,
+                f"phoenix:{vertex}.images",
+                "one selected attachment reference",
+                str(evidence.context_attachment_urls),
+                "prompt evidence did not carry exactly one selected image reference",
+            )
+    if vertex is Vertex.DELIVERING:
+        _assert_equal(
+            context, "phoenix.codex_thread", observation.wiseman.session_id, evidence.codex_thread_id, "Phoenix result used a different Codex session"
+        )
+        if evidence.served_model != "mock" or not isinstance(evidence.usage, dict) or not isinstance(evidence.cost, dict):
+            _reject_observation(
+                context,
+                "phoenix.billing",
+                "served model, usage and cost",
+                f"model={evidence.served_model}, usage={evidence.usage}, cost={evidence.cost}",
+                "Phoenix result is missing model billing evidence",
+            )
+        total = evidence.cost.get("total") if isinstance(evidence.cost, dict) else None
+        if not isinstance(total, (int, float)) or total < 0:
+            _reject_observation(context, "phoenix.billing.total", "non-negative numeric cost", str(total), "Phoenix cost estimate is invalid")
+
+
+def _assert_discord_delivery(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
+    if vertex is Vertex.RUNNING:
+        if not observation.chat.typing_operations or observation.chat.typing_operations[-1].startswith("stop:"):
+            _reject_observation(
+                context, "discord.typing", "active typing signal", str(observation.chat.typing_operations), "running turn is not typing in Discord"
+            )
+        return
+    if vertex not in {Vertex.DELIVERING, Vertex.ERROR}:
+        return
+    if observation.chat.typing or not observation.chat.typing_operations or not observation.chat.typing_operations[-1].startswith("stop:"):
+        _reject_observation(
+            context, "discord.typing", "typing stopped after inference", str(observation.chat.typing_operations), "terminal delivery left Discord typing active"
+        )
+    if observation.chat.answer_message_ids and observation.chat.answer_message_ids[0] not in observation.chat.edited_message_ids:
+        _reject_observation(
+            context,
+            "discord.answer_message",
+            str(observation.chat.answer_message_ids),
+            str(observation.chat.edited_message_ids),
+            "final answer was not an edit of the existing delivery message",
+        )
+    operations = observation.phoenix.reaction_operations
+    processing = DEFAULT_REACTION_EMOJIS["processing"]
+    terminal_add = next(
+        (
+            index
+            for index, value in enumerate(operations)
+            if value in {f"add:{DEFAULT_REACTION_EMOJIS['success']}", f"add:{DEFAULT_REACTION_EMOJIS['failure']}"}
+        ),
+        None,
+    )
+    processing_add = next((index for index, value in enumerate(operations) if value == f"add:{processing}"), None)
+    processing_remove = next((index for index, value in enumerate(operations) if value == f"remove:{processing}"), None)
+    if processing_add is None or terminal_add is None or processing_remove is None or not processing_add < terminal_add < processing_remove:
+        _reject_observation(
+            context,
+            "discord.reactions",
+            "processing add < terminal add < processing remove",
+            str(operations),
+            "terminal reactions were reconciled in the wrong order",
+        )
+
+
+def _string_value(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _assert_phoenix_order(context: GraphContext, observation: RuntimeObservation, vertex: Vertex) -> None:
