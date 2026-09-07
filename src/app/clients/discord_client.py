@@ -13,6 +13,8 @@ import discord
 from app.models import DeliveryReceipt, Message
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from app.gateway import Gateway
     from app.models import MessageRef, Upload
     from app.types import JsonObject
@@ -84,16 +86,28 @@ class RealDiscord:
         message = await channel.send(caption or None, file=discord.File(io.BytesIO(upload.data), filename=upload.name))
         return DeliveryReceipt(str(message.id), message.jump_url)
 
-    async def set_profile(self, username: str | None, avatar: bytes | None) -> str:
+    async def set_profile(self, nickname: str | None, avatar: bytes | None) -> str:
         if self.gateway.user is None:
             raise RuntimeError("Discord bot identity is unavailable")
-        if username is not None and avatar is not None:
-            updated = await self.gateway.user.edit(username=username, avatar=avatar)
-        elif username is not None:
-            updated = await self.gateway.user.edit(username=username)
-        else:
-            updated = await self.gateway.user.edit(avatar=avatar)
-        return updated.name
+        if avatar is not None:
+            await self.gateway.user.edit(avatar=avatar)
+        if nickname is None:
+            return self.gateway.user.name
+
+        updated = False
+        managed_guilds = (guild for guild in self.gateway.guilds if not self.gateway.allowlist or guild.id in self.gateway.allowlist)
+        for guild in managed_guilds:
+            member = guild.get_member(self.gateway.user.id) or getattr(guild, "me", None)
+            fetch_member = cast("Callable[[int], Awaitable[discord.Member]] | None", getattr(guild, "fetch_member", None))
+            if member is None and callable(fetch_member):
+                with suppress(discord.DiscordException):
+                    member = await fetch_member(self.gateway.user.id)
+            if member is not None:
+                await member.edit(nick=nickname)
+                updated = True
+        if not updated:
+            raise RuntimeError("Discord bot member is unavailable in a managed guild")
+        return nickname
 
 
 def normalize_message(item: discord.Message, channel_id: str, thread_id: str | None) -> Message:
