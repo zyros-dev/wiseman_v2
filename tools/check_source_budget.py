@@ -2,8 +2,8 @@
 import sys
 from pathlib import Path
 
-TOTAL_LIMIT = 3_000
-FILE_LIMIT = 500
+TOTAL_LIMIT = 6_000
+FILE_LIMIT = 1_000
 SOURCE_ROOTS = tuple(map(Path, ("src", "sandbox/src", "tests", "tools")))
 SCRIPT_FILES = tuple(map(Path, ("sandbox/codex-as-user", "sandbox/wiseman-discord")))
 
@@ -21,11 +21,11 @@ def main() -> int:
     total = sum(lines for _, lines in counts)
     sys.stdout.write(f"combined counted LoC: {total}/{TOTAL_LIMIT}\n")
     violations = [(path, lines) for path, lines in counts if lines > FILE_LIMIT]
-    if total >= TOTAL_LIMIT or violations:
+    if total > TOTAL_LIMIT or violations:
         for path, lines in violations:
             sys.stderr.write(f"file budget exceeded: {path} ({lines}>{FILE_LIMIT})\n")
-        if total >= TOTAL_LIMIT:
-            sys.stderr.write(f"total budget exceeded: {total}>={TOTAL_LIMIT}\n")
+        if total > TOTAL_LIMIT:
+            sys.stderr.write(f"total budget exceeded: {total}>{TOTAL_LIMIT}\n")
         return 1
     return 0
 

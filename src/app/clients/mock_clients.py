@@ -5,26 +5,25 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import httpx
-
 from app.clients.client_interfaces import (
     ClientContainer,
     ClientMode,
     ClientSettings,
     DiscordClient,
-    PhoenixClient,
+    HarnessRunner,
     PromptClient,
-    RunnerClient,
     TemporalClient,
 )
-from app.clients.provider import OpenRouter
+from app.clients.provider import MockOpenRouter
 from app.models import DeliveryReceipt
+from app.phoenix import Phoenix
 from app.runner import STOPPED_STATUS, RunnerError
+from app.temporal_runtime import TemporalRuntime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from app.models import Event, MessageRef, Upload
+    from app.models import MessageRef, Upload
     from app.types import JsonObject
 
 
@@ -34,12 +33,10 @@ class MockState:
     messages: dict[str, str] = field(default_factory=dict)
     embeds: dict[str, JsonObject] = field(default_factory=dict)
     reactions: dict[str, list[str]] = field(default_factory=dict)
-    records: list[dict[str, object]] = field(default_factory=list)
-    audits: dict[str, dict[str, object]] = field(default_factory=dict)
     profile: dict[str, str | bytes] = field(default_factory=dict)
     uploads: dict[str, Upload] = field(default_factory=dict)
     nonces: dict[str, str] = field(default_factory=dict)
-    admitted: list[JsonObject] = field(default_factory=list)
+    typing_channels: set[str] = field(default_factory=set)
 
     def call(self, client: str, operation: str, *values: str) -> None:
         self.calls.append((client, operation, tuple(values)))
@@ -62,6 +59,14 @@ class MockDiscord(DiscordClient):
         if nonce:
             self.state.nonces[nonce] = message_id
         return message_id
+
+    async def start_typing(self, channel_id: str) -> None:
+        self.state.call("discord", "start_typing", channel_id)
+        self.state.typing_channels.add(channel_id)
+
+    async def stop_typing(self, channel_id: str) -> None:
+        self.state.call("discord", "stop_typing", channel_id)
+        self.state.typing_channels.discard(channel_id)
 
     async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None:
         message_id = ref.message_id
@@ -100,51 +105,6 @@ class MockDiscord(DiscordClient):
         return str(self.state.profile.get("username", "Wiseman"))
 
 
-class MockTemporal(TemporalClient):
-    def __init__(self, state: MockState) -> None:
-        self.state = state
-        self.seen: set[str] = set()
-
-    async def submit(self, event: JsonObject) -> dict[str, object] | None:
-        trigger = event.get("trigger", {})
-        message_id = str(trigger.get("id", "")) if isinstance(trigger, dict) else ""
-        self.state.call("temporal", "submit", message_id)
-        if message_id in self.seen:
-            return {"status": "duplicate", "message_id": message_id}
-        self.seen.add(message_id)
-        self.state.admitted.append(event)
-        return {"status": "queued", "message_id": message_id}
-
-    async def touch(self, event: Event) -> None:
-        self.state.call("temporal", "touch", event.trigger.id)
-
-    async def start(self) -> None: ...
-
-    async def close(self) -> None: ...
-
-    async def steer(self, event: Event) -> bool:
-        self.state.call("temporal", "steer", event.trigger.id)
-        return False
-
-    async def stop(self, event: Event) -> bool:
-        self.state.call("temporal", "stop", event.trigger.id)
-        return False
-
-
-class MockPhoenix(PhoenixClient):
-    def __init__(self, state: MockState) -> None:
-        self.state, self.records = state, state.records
-
-    async def record(self, trace: str, node: str, **data: object) -> None:
-        self.state.call("phoenix", "record", trace, node)
-        self.state.records.append({"trace": trace, "node": node, **data})
-        if node == "admission":
-            self.state.audits[trace] = {"trace": trace, "node": node, **data}
-
-    def audit(self, audit_id: str) -> dict[str, object] | None:
-        return self.state.call("phoenix", "audit", audit_id) or self.state.audits.get(audit_id)
-
-
 class MockPrompts(PromptClient):
     async def source(self, kind: str) -> str:
         if (self_kind := {"startup": "startup-context", "followup": "followup-context"}.get(kind, kind)) in {"startup-context", "followup-context"}:
@@ -152,7 +112,7 @@ class MockPrompts(PromptClient):
         return f"mock prompt: {self_kind}"
 
 
-class MockRunner(RunnerClient):
+class MockHarnessRunner(HarnessRunner):
     def __init__(self, state: MockState | None = None) -> None:
         self.state = state or MockState()
         self.run_gate: asyncio.Event | None = None
@@ -201,26 +161,17 @@ class MockRunner(RunnerClient):
         return True
 
 
-def mock_container(settings: ClientSettings | None = None) -> ClientContainer:
+def mock_container(settings: ClientSettings | None = None, *, temporal: TemporalClient | None = None) -> ClientContainer:
     state = MockState()
-
-    def provider(request: httpx.Request) -> httpx.Response:
-        state.call("provider", request.url.path)
-        if request.url.path.endswith("/responses"):
-            return httpx.Response(
-                200,
-                content=b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n',
-                headers={"content-type": "text/event-stream"},
-            )
-        return httpx.Response(200, json={"model": "mock-vision", "choices": [{"message": {"content": "mock image description"}}]})
+    settings = settings or ClientSettings()
 
     return ClientContainer(
         mode=ClientMode.MOCK,
         discord=MockDiscord(state),
-        temporal=MockTemporal(state),
-        phoenix=MockPhoenix(state),
+        temporal=temporal or TemporalRuntime(settings.temporal_address, settings.temporal_queue),
+        phoenix=Phoenix(settings.phoenix_endpoint, settings.phoenix_key, settings.phoenix_project),
         prompts=MockPrompts(),
-        runner=MockRunner(state),
-        provider=OpenRouter(ClientSettings(provider_key="mock"), MockPrompts(), httpx.MockTransport(provider)),
-        settings=settings or ClientSettings(),
+        runner=MockHarnessRunner(state),
+        provider=MockOpenRouter(),
+        settings=settings,
     )

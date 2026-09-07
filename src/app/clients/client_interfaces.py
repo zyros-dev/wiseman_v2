@@ -56,6 +56,10 @@ class ClientSettings:
 class DiscordClient(Protocol):
     async def send(self, channel_id: str, content: str = "", *, embed: JsonObject | None = None, nonce: str = "") -> str: ...
 
+    async def start_typing(self, channel_id: str) -> None: ...
+
+    async def stop_typing(self, channel_id: str) -> None: ...
+
     async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None: ...
 
     async def add_reaction(self, ref: MessageRef, emoji: str) -> None: ...
@@ -80,6 +84,8 @@ class TemporalClient(Protocol):
 
     async def stop(self, event: Event) -> bool: ...
 
+    async def snapshot(self, thread_id: str) -> JsonObject: ...
+
 
 class PhoenixClient(Protocol):
     records: list[dict[str, object]]
@@ -93,7 +99,7 @@ class PromptClient(Protocol):
     async def source(self, kind: str) -> str: ...
 
 
-class RunnerClient(Protocol):
+class HarnessRunner(Protocol):
     async def acquire(self, user: str, workspace: str) -> None: ...
 
     async def release(self, user: str, workspace: str) -> None: ...
@@ -114,7 +120,7 @@ class RunnerClient(Protocol):
     async def stop(self, thread: str, user: str, workspace: str, target_message_id: str, command_id: str) -> bool: ...
 
 
-class ProviderClient(Protocol):
+class OpenRouter(Protocol):
     async def responses(self, payload: JsonObject) -> Response: ...
 
     async def describe(self, url: str, question: str) -> dict[str, object]: ...
@@ -129,8 +135,8 @@ class ClientContainer:
     temporal: TemporalClient
     phoenix: PhoenixClient
     prompts: PromptClient
-    runner: RunnerClient
-    provider: ProviderClient
+    runner: HarnessRunner
+    provider: OpenRouter
     settings: ClientSettings = field(default_factory=ClientSettings)
 
     _installed: ClassVar[ClientContainer | None] = None

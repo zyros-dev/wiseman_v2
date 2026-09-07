@@ -285,6 +285,7 @@ async def _account_provider(context: _Context, response: httpx.Response, payload
     cost: object = None
     served_model: object = None
     complete = False
+    parsed: httpx.Response | None = None
     try:
         parsed = httpx.Response(response.status_code, headers=response.headers, stream=_ByteTee(queue))
         async for event in EventSource(parsed).aiter_sse():
@@ -296,7 +297,8 @@ async def _account_provider(context: _Context, response: httpx.Response, payload
                 pass
         complete = True
     finally:
-        await asyncio.shield(parsed.aclose())
+        if parsed is not None:
+            await asyncio.shield(parsed.aclose())
         await _external_record(
             context,
             trace,

@@ -19,9 +19,9 @@ through `/v1/replay/discord`. The retained GraphWalker model is the only
 lifecycle traversal harness.
 
 Step 2 evidence: the pinned GraphWalker 4.3.3 CLI generated one edge-coverage
-path and two independent 100-transition seeded walks on Thor. Each path was
+path and sixteen parallel 100-transition seeded walks on lappy2. Each path was
 replayed through `/v1/replay/discord`; the three retained tests passed for all
-three traversals. Duplicate questions now receive `duplicate`, background
+seventeen traversals. Duplicate questions now receive `duplicate`, background
 messages and idle stops receive `ignored`, and admitted questions receive
 `queued`.
 
@@ -30,20 +30,21 @@ passed the original CRLF SSE bytes, including comment, `id`, and `retry`
 fields, through `/v1/responses` while Phoenix recorded the served model and
 `transport_complete=true`.
 
-Ruff check and format, strict Pyrefly, Vulture, compileall, `uv lock --check`,
-and `git diff --check` pass. The counted source budget is `2,999/3,000`; no
-production file exceeds 500 counted lines and application code contains no
-`Any` annotations.
+Ruff check and format, Pyrefly, Pyright, Vulture, compileall, `uv lock --check`,
+and `git diff --check` pass. The combined counted source budget is `5,607/6,000`;
+the separate 1,000-counted-line per-file gate remains enabled, and application
+code contains no `Any` annotations.
 
 The initialization stop race and the mock runner's persistent stop flag were
 fixed in commit `0f066f3`; the sandbox instruction literal was replaced by
 the Jinja contract in `ca17c69`. CI run `3354` for `ca17c69` passed on
-`k8s-thor` in 3 minutes, including the edge-coverage path and both seeded
+`k8s-thor` in 3 minutes, including the edge-coverage path and the seeded
 100-transition GraphWalker walks.
 
-GraphWalker CLI 4.3.3 is checksum-pinned in CI. Two seeded native traversals
-run on Thor and are replayed through the authenticated HTTP admission boundary;
-both paths passed and covered every modeled edge. The model includes queued
+GraphWalker CLI 4.3.3 is checksum-pinned in CI. Sixteen seeded native
+traversals run in parallel on lappy2 and are replayed through the authenticated
+HTTP admission boundary; all paths passed. The separate edge-coverage path
+covered every modeled edge. The model includes queued
 questions, background context, steering, `/stop`, retries, restart recovery,
 delivery failure, unknown cancellation, and three-day retirement states.
 

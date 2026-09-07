@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from prometheus_client import Counter
 
 from app.admission import ContextConfig, context, image_tool_instruction, render_grammar
-from app.models import Event, MessageRef, State, TurnWork, Upload
+from app.models import DeliveryPhase, Event, MessageRef, State, TurnWork, Upload
 from app.phoenix import json_text, route_info
 from app.presentation import (
     DEFAULT_REACTION_EMOJIS,
@@ -22,7 +22,7 @@ from app.runner import MESSAGE_ID, TURN_NUMBER
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from app.clients.client_interfaces import DiscordClient, PhoenixClient, PromptClient, RunnerClient
+    from app.clients.client_interfaces import DiscordClient, HarnessRunner, PhoenixClient, PromptClient
     from app.types import JsonObject, StateData
 
 TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
@@ -31,7 +31,7 @@ TURN_FAILURES = Counter("wiseman_turn_failures_total", "Failed Discord turns")
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
     phoenix: PhoenixClient
-    runner: RunnerClient
+    runner: HarnessRunner
     prompts: PromptClient
     context: ContextConfig = field(default_factory=ContextConfig.from_env)
     discord: DiscordClient | None = None
@@ -127,14 +127,19 @@ class Engine:
 
     async def render(self, work: TurnWork) -> TurnWork:
         channel = work.event.trigger.thread_id or work.event.trigger.channel_id
+        await self.discord.start_typing(channel)
+        work.state.delivery.typing = True
         if not work.state.banner_sent:
             await self.discord.send(channel, embed=cast("JsonObject", startup_embed().to_dict()), nonce=f"b:{work.event.trigger.id}")
             work.state.banner_sent = True
         content = render_progress(work.state.progress, work.state.turn + 1)
         if work.state.delivery_id:
             await self.discord.edit(MessageRef(channel, work.state.delivery_id), content)
+            work.state.delivery.progress_edit_count += 1
         else:
             work.state.delivery_id = await self.discord.send(channel, content, nonce=work.event.trigger.id)
+            work.state.delivery.progress_message_id = work.state.delivery_id
+        work.state.delivery.phase = DeliveryPhase.PROGRESS
         return work
 
     async def deliver(self, work: TurnWork) -> TurnWork:
@@ -143,7 +148,13 @@ class Engine:
             raise RuntimeError("Recorded Discord answer is unavailable")
         ref = MessageRef(work.event.trigger.thread_id or work.event.trigger.channel_id, work.state.delivery_id)
         upload = Upload("response.md", content.encode()) if len(content) > MAX_DISCORD_CONTENT_LENGTH else None
+        await self.discord.stop_typing(ref.channel_id)
+        work.state.delivery.typing = False
         await self.discord.edit(ref, content[:1800] + "\n\nFull response attached." if upload else content, upload=upload)
+        work.state.delivery.phase = DeliveryPhase.ANSWER
+        work.state.delivery.answer_message_id = ref.message_id
+        work.state.delivery.answer_edit_count += 1
+        work.state.delivery.progress_message_id = None
         return work
 
     async def reconcile(self, work: TurnWork) -> TurnWork:
@@ -151,6 +162,7 @@ class Engine:
         await self.discord.add_reaction(ref, work.terminal_emoji or work.processing_emoji)
         if work.terminal_emoji:
             await self.discord.remove_reaction(ref, work.processing_emoji)
+        work.state.delivery.reaction_phase = "success" if work.terminal_emoji and not work.error else "failure" if work.terminal_emoji else "processing"
         return work
 
     async def finish(self, work: TurnWork) -> dict[str, object]:

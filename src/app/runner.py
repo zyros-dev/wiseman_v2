@@ -9,6 +9,8 @@ from uuid import uuid4
 import httpx
 from temporalio import activity
 
+from app.runner_status import STOPPED_STATUS, UNKNOWN_STATUS
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -17,8 +19,6 @@ if TYPE_CHECKING:
 
 TURN_NUMBER: ContextVar[int] = ContextVar("wiseman_turn_number", default=0)
 MESSAGE_ID: ContextVar[str] = ContextVar("wiseman_message_id", default="")
-STOPPED_STATUS = 499
-UNKNOWN_STATUS = 520
 
 
 class RunnerError(RuntimeError):
@@ -36,7 +36,7 @@ def _payload(thread: str, user: str, workspace: str, prompt: str = "") -> dict[s
     }
 
 
-class HttpRunner:
+class HttpHarnessRunner:
     def __init__(self, url: str, token: str = "") -> None:
         self.url, self.token = url.rstrip("/"), token
 
@@ -96,7 +96,7 @@ class HttpRunner:
         result = value.get("result", value)
         if not isinstance(result, dict):
             raise RunnerError(502, "runner returned a non-object result")
-        billing = {key: result[key] for key in ("model", "cost", "usage") if key in result}
+        billing: dict[str, object] = {key: cast("object", result[key]) for key in ("model", "cost", "usage") if key in result}
         return str(result.get("thread_id", thread)), str(result.get("output", "")), billing
 
     async def steer(self, thread: str, prompt: str, user: str, workspace: str = "") -> bool:

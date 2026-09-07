@@ -1,5 +1,7 @@
 # Copyright (c) 2026 Nick van der Merwe
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +38,22 @@ class Upload:
 class DeliveryReceipt:
     message_id: str
     url: str
+
+
+class DeliveryPhase(StrEnum):
+    IDLE = "idle"
+    PROGRESS = "progress"
+    ANSWER = "answer"
+
+
+class DeliveryState(BaseModel):
+    phase: DeliveryPhase = DeliveryPhase.IDLE
+    typing: bool = False
+    progress_message_id: str | None = None
+    progress_edit_count: int = 0
+    answer_message_id: str | None = None
+    answer_edit_count: int = 0
+    reaction_phase: Literal["none", "processing", "success", "failure"] = "none"
 
 
 def is_image_attachment(value: object) -> bool:
@@ -80,6 +98,13 @@ class State(BaseModel):
     delivery_id: str | None = None
     banner_sent: bool = False
     progress: list[str] = Field(default_factory=list)
+    delivery: DeliveryState = Field(default_factory=DeliveryState)
+    message_ids: list[str] = Field(default_factory=list)
+    message_timestamps: dict[str, str] = Field(default_factory=dict)
+    background_context_ids: list[str] = Field(default_factory=list)
+    consumed_context_ids: list[str] = Field(default_factory=list)
+    steering_ids: list[str] = Field(default_factory=list)
+    stop_command_ids: list[str] = Field(default_factory=list)
 
 
 class TurnWork(BaseModel):

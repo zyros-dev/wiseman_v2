@@ -1,0 +1,9 @@
+{
+  "include": ["src", "sandbox/src", "tests", "tools"],
+  "exclude": [".venv", "**/__pycache__"],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingTypeStubs": "none"
+}

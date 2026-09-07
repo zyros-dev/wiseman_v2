@@ -41,15 +41,18 @@ jobs:
             writeFileSync("/tmp/graphwalker-cli-4.3.3.jar", Buffer.from(await response.arrayBuffer()));
           '
           echo '8300b4ad7faf2ad2c0acde9ec0a6ffbbafe59ce51d05b5e00e971272c9364317  /tmp/graphwalker-cli-4.3.3.jar' | sha256sum -c -
-          uv run python -c 'import json; from pathlib import Path; from tests.graph_model import model; Path("/tmp/wiseman.json").write_text(json.dumps(model()))'
+          uv run python -c 'import json; from pathlib import Path; from tests.graphwalker.model import model; Path("/tmp/wiseman.json").write_text(json.dumps(model()))'
           java -jar /tmp/graphwalker-cli-4.3.3.jar offline -g /tmp/wiseman.json -d 42 > /tmp/wiseman-path-coverage.jsonl
           test -s /tmp/wiseman-path-coverage.jsonl
           GRAPHWALKER_PATH=/tmp/wiseman-path-coverage.jsonl GRAPHWALKER_COVERAGE=1 uv run pytest -q tests/test_graph_http.py
-          for seed in 2026 2027; do
-            java -jar /tmp/graphwalker-cli-4.3.3.jar offline -d "$seed" -m /tmp/wiseman.json "random(length(100))" > "/tmp/wiseman-path-$seed.jsonl"
-            test -s "/tmp/wiseman-path-$seed.jsonl"
-            GRAPHWALKER_PATH="/tmp/wiseman-path-$seed.jsonl" uv run pytest -q tests/test_graph_http.py
-          done
+          uv run python tools/run_graph_walks.py \
+            --jar /tmp/graphwalker-cli-4.3.3.jar \
+            --model /tmp/wiseman.json \
+            --artifacts /tmp/wiseman-graph-walks \
+            --start-seed 2026 \
+            --count 16 \
+            --parallelism 8 \
+            --steps 100
       - name: Ruff
         run: |
           uv run ruff check .
@@ -58,6 +61,8 @@ jobs:
         run: uv run python tools/check_source_budget.py
       - name: Pyrefly
         run: uv run pyrefly check src sandbox/src tests tools
+      - name: Pyright
+        run: uv run pyright
       - name: Tests and coverage
         run: uv run pytest --cov --cov-report=term-missing
       - name: Dead code

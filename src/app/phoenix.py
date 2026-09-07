@@ -14,10 +14,12 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Context, Span, set_span_in_context
+from opentelemetry.trace import Span, set_span_in_context
 from phoenix.client import Client
 
 if TYPE_CHECKING:
+    from opentelemetry.context import Context
+
     from app.types import JsonObject
 
 LOGGER = logging.getLogger("wiseman")
@@ -63,8 +65,9 @@ class Phoenix:
     async def record(self, trace: str, node: str, **data: object) -> None:
         item = {"trace": trace, "node": node, **{k: v for k, v in data.items() if v is not None}}
         self.records.append(item)
-        if node == "admission" and isinstance(data.get("audit_id"), str):
-            audit_id = data["audit_id"]
+        audit_id_value = data.get("audit_id")
+        if node == "admission" and isinstance(audit_id_value, str):
+            audit_id = audit_id_value
             artifact = {
                 "schema": "wiseman.admission.audit.v1",
                 "audit_id": audit_id,

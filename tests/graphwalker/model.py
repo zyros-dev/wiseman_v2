@@ -1,0 +1,577 @@
+# Copyright (c) 2026 Nick van der Merwe
+"""Graph data definitions and native GraphWalker document serialization."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import TYPE_CHECKING, NoReturn, NotRequired, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from app.types import JsonValue
+
+GraphValue = str | int | bool
+
+
+class GraphVertex(TypedDict):
+    id: str
+    name: str
+    properties: dict[str, GraphValue]
+
+
+class GraphEdge(TypedDict):
+    id: str
+    name: str
+    sourceVertexId: str
+    targetVertexId: str
+    properties: dict[str, GraphValue]
+    actions: NotRequired[list[str]]
+    guard: NotRequired[str]
+
+
+class GraphDocumentModel(TypedDict):
+    id: str
+    name: str
+    generator: str
+    startElementId: str
+    properties: dict[str, GraphValue]
+    vertices: list[GraphVertex]
+    edges: list[GraphEdge]
+    actions: NotRequired[list[str]]
+
+
+class GraphDocument(TypedDict):
+    name: str
+    models: list[GraphDocumentModel]
+
+
+class Vertex(StrEnum):
+    IDLE = "idle"
+    PREPARING = "preparing"
+    RUNNING = "running"
+    RECOVERING = "recovering"
+    CANCELLING = "cancelling"
+    DELIVERING = "delivering"
+    OUTCOME_UNKNOWN = "outcome-unknown"
+    ERROR = "error"
+    RETIRED = "retired"
+
+
+class EdgeName(StrEnum):
+    ADMIT_QUESTION = "admit-question"
+    DISPATCH_QUEUED = "dispatch-queued"
+    BACKGROUND_CHATTER = "background-chatter"
+    DUPLICATE_QUESTION = "duplicate-question"
+    IDLE_STOP = "idle-stop"
+    CONTEXT_READY = "context-ready"
+    PREPARATION_FAILED = "preparation-failed"
+    STOP_PREPARING = "stop-preparing"
+    RUNNING_BACKGROUND_CHATTER = "running-background-chatter"
+    STEER_ACTIVE_TURN = "steer-active-turn"
+    REPEAT_STEER = "repeat-steer"
+    QUEUE_QUESTION = "queue-question"
+    PROGRESS_PREVIEW = "progress-preview"
+    WORKER_RESTART_RUNNING = "worker-restart-running"
+    INFERENCE_COMPLETE = "inference-complete"
+    TRANSIENT_FAILURE = "transient-failure"
+    PERMANENT_FAILURE = "permanent-failure"
+    EXECUTION_UNCERTAIN = "execution-uncertain"
+    RESUME_SESSION = "resume-session"
+    RETRY_EXHAUSTED = "retry-exhausted"
+    STOP_RUNNING = "stop-running"
+    STOP_RECOVERING = "stop-recovering"
+    STOP_DELIVERING = "stop-delivering"
+    DUPLICATE_STOP = "duplicate-stop"
+    WORKER_RESTART_CANCELLING = "worker-restart-cancelling"
+    COMPLETION_RACE = "completion-race"
+    STOP_CONFIRMED = "stop-confirmed"
+    CANCELLATION_UNKNOWN = "cancellation-unknown"
+    DELIVERY_RETRY = "delivery-retry"
+    WORKER_RESTART_DELIVERING = "worker-restart-delivering"
+    ANSWER_FINALIZED = "answer-finalized"
+    WORKER_RESTART_ERROR = "worker-restart-error"
+    ERROR_FINALIZED = "error-finalized"
+    OUTCOME_ESTABLISHED = "outcome-established"
+    IDLE_RETIREMENT = "idle-retirement"
+    FIXTURE_RESET = "fixture-reset"
+
+
+class FailureKind(StrEnum):
+    OBSERVATION = "observation"
+    INVARIANT = "invariant"
+
+
+@dataclass(frozen=True, slots=True)
+class FailureDetails:
+    kind: FailureKind
+    location: str
+    expected: str
+    observed: str
+    message: str
+    message_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationFailure:
+    step: int
+    kind: FailureKind
+    location: str
+    expected: str
+    observed: str
+    message: str
+    message_id: str = ""
+
+
+class GraphVerificationError(AssertionError):
+    def __init__(self, failure: VerificationFailure) -> None:
+        super().__init__(failure.message)
+        self.failure = failure
+
+
+class ChatMessageKind(StrEnum):
+    QUESTION = "question"
+    BACKGROUND = "background"
+    STEERING = "steering"
+    STOP = "stop"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    id: str
+    kind: ChatMessageKind
+    content: str
+    mentions_bot: bool
+    reply_to: str | None = None
+
+
+@dataclass(slots=True)
+class ChatState:
+    thread_id: str = "thread"
+    messages: list[ChatMessage] = field(default_factory=list)
+    message_ids: set[str] = field(default_factory=set)
+    background_context: list[str] = field(default_factory=list)
+    consumed_context: list[str] = field(default_factory=list)
+    steering_messages: list[str] = field(default_factory=list)
+    stop_commands: set[str] = field(default_factory=set)
+    archived: bool = False
+
+    def record(self, message_id: str, kind: ChatMessageKind) -> None:
+        if not message_id or message_id in self.message_ids:
+            return
+        content = {
+            ChatMessageKind.QUESTION: "question",
+            ChatMessageKind.BACKGROUND: "background",
+            ChatMessageKind.STEERING: "steer",
+            ChatMessageKind.STOP: "/stop",
+        }[kind]
+        mentions_bot = kind in {ChatMessageKind.QUESTION, ChatMessageKind.STEERING}
+        reply_to = "answer" if kind is ChatMessageKind.STEERING else None
+        self.messages.append(ChatMessage(message_id, kind, content, mentions_bot, reply_to))
+        self.message_ids.add(message_id)
+
+
+@dataclass(slots=True)
+class WisemanState:
+    pending_questions: list[str] = field(default_factory=list)
+    active_question: str | None = None
+    seen_questions: set[str] = field(default_factory=set)
+    settled_questions: set[str] = field(default_factory=set)
+    session_id: str | None = None
+    turns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedChatState:
+    message_ids: tuple[str, ...] = ()
+    background_context_ids: tuple[str, ...] = ()
+    consumed_context_ids: tuple[str, ...] = ()
+    steering_ids: tuple[str, ...] = ()
+    stop_command_ids: tuple[str, ...] = ()
+    answer_message_ids: tuple[str, ...] = ()
+    progress_message_ids: tuple[str, ...] = ()
+    progress_edit_count: int = 0
+    answer_edit_count: int = 0
+    typing: bool = False
+    archived: bool = False
+    edited_message_ids: tuple[str, ...] = ()
+    typing_operations: tuple[str, ...] = ()
+    reaction_operations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PhoenixEvidence:
+    trace: str = ""
+    audit_id: str | None = None
+    audit_present: bool = False
+    audit_matches_admission: bool = False
+    raw_request: JsonValue = None
+    normalized_request: JsonValue = None
+    context_message_ids: tuple[str, ...] = ()
+    context_author_ids: tuple[str, ...] = ()
+    context_reply_ids: tuple[str, ...] = ()
+    context_attachment_urls: tuple[str, ...] = ()
+    grammar_rendered: str = ""
+    prompt_final_input: str = ""
+    codex_thread_id: str | None = None
+    requested_model: str | None = None
+    served_model: str | None = None
+    usage: JsonValue = None
+    cost: JsonValue = None
+    transport_complete: bool | None = None
+    reaction_operations: tuple[str, ...] = ()
+    nodes: tuple[str, ...] = ()
+    sequence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedWisemanState:
+    phase: Vertex
+    active_question: str | None = None
+    pending_question_ids: tuple[str, ...] = ()
+    session_id: str | None = None
+    turn: int = 0
+    active_turn: int | None = None
+    result_known: bool = False
+    error: bool = False
+    stop_target_question_id: str | None = None
+    processed_question_ids: tuple[str, ...] = ()
+    inferencing: bool = False
+    stop_requested: bool = False
+    resume_requested: bool = False
+    resumed: bool = False
+    recovering: bool = False
+    outcome_unknown: bool = False
+    cancellation_unknown: bool = False
+    delivery_phase: str = "idle"
+    reaction_phase: str = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeObservation:
+    chat: ObservedChatState
+    wiseman: ObservedWisemanState
+    phoenix_nodes: tuple[str, ...] = ()
+    phoenix_sequence: tuple[str, ...] = ()
+    phoenix: PhoenixEvidence = field(default_factory=PhoenixEvidence)
+
+
+@dataclass(slots=True)
+class GraphState:
+    vertex: Vertex = Vertex.IDLE
+    chat: ChatState = field(default_factory=ChatState)
+    wiseman: WisemanState = field(default_factory=WisemanState)
+    failures: list[VerificationFailure] = field(default_factory=list)
+    step: int = 0
+    handoff_pending: bool = False
+
+    @property
+    def pending(self) -> int:
+        return len(self.wiseman.pending_questions)
+
+    def advance(self, edge: str, source: Vertex, target: Vertex, message_id: str = "") -> None:
+        if edge == "fixture-reset":
+            self._reset_fixture()
+        self.vertex = target
+        self._record_chat_message(edge, message_id)
+        if edge in {"admit-question", "queue-question"}:
+            self._advance_question(edge, source, message_id)
+        elif edge == "dispatch-queued":
+            self._advance_dispatch()
+        elif edge in {"background-chatter", "running-background-chatter"}:
+            self._remember_background(message_id)
+        elif edge == "context-ready":
+            self._consume_background()
+        elif edge in {"steer-active-turn", "repeat-steer"}:
+            self._remember_steering(message_id)
+        elif edge in {"stop-preparing", "stop-running", "stop-recovering", "stop-delivering"}:
+            self._remember_stop(message_id)
+        elif edge in {"stop-confirmed", "answer-finalized", "error-finalized"}:
+            self._advance_terminal()
+        self.step += 1
+
+    def reject(self, details: FailureDetails) -> NoReturn:
+        failure = VerificationFailure(self.step, details.kind, details.location, details.expected, details.observed, details.message, details.message_id)
+        self.failures.append(failure)
+        raise GraphVerificationError(failure)
+
+    def reconcile_processed(self, processed_ids: tuple[str, ...], observed_active: str | None = None) -> None:
+        was_handoff_pending = self.handoff_pending
+        if was_handoff_pending and observed_active not in self.wiseman.pending_questions[1:]:
+            return
+        processed = set(processed_ids)
+        while self.wiseman.pending_questions:
+            question = self.wiseman.pending_questions[0]
+            if question == observed_active:
+                if question in processed and question not in self.wiseman.settled_questions:
+                    self.wiseman.settled_questions.add(question)
+                    self.wiseman.turns += 1
+                break
+            if question not in processed:
+                break
+            self.wiseman.pending_questions.pop(0)
+            if question not in self.wiseman.settled_questions:
+                self.wiseman.settled_questions.add(question)
+                self.wiseman.turns += 1
+            if self.wiseman.active_question == question:
+                self.wiseman.active_question = None
+                self.handoff_pending = False
+        if (
+            self.vertex
+            in {
+                Vertex.PREPARING,
+                Vertex.RUNNING,
+                Vertex.RECOVERING,
+                Vertex.CANCELLING,
+                Vertex.DELIVERING,
+                Vertex.OUTCOME_UNKNOWN,
+                Vertex.ERROR,
+            }
+            and self.wiseman.active_question is None
+            and self.wiseman.pending_questions
+        ):
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
+        if was_handoff_pending and not self.handoff_pending:
+            self._consume_background()
+
+    def reconcile_session(self, session_id: str | None) -> None:
+        if self.wiseman.session_id is None and session_id is not None:
+            self.wiseman.session_id = session_id
+
+    def _remember_question(self, message_id: str) -> None:
+        if message_id and message_id not in self.wiseman.seen_questions:
+            self.wiseman.pending_questions.append(message_id)
+            if self.wiseman.active_question is None:
+                self.wiseman.active_question = message_id
+            self.wiseman.seen_questions.add(message_id)
+
+    def _reset_fixture(self) -> None:
+        self.chat = ChatState(thread_id=self.chat.thread_id)
+        self.wiseman = WisemanState()
+        self.handoff_pending = False
+
+    def _advance_question(self, edge: str, source: Vertex, message_id: str) -> None:
+        if edge == "admit-question" and source is Vertex.IDLE:
+            self._consume_background()
+        self._remember_question(message_id)
+
+    def _advance_dispatch(self) -> None:
+        if self.handoff_pending:
+            self._settle_active()
+            self.handoff_pending = False
+        if self.wiseman.active_question is None and self.wiseman.pending_questions:
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
+        self._consume_background()
+
+    def _advance_terminal(self) -> None:
+        if self._has_queued_handoff():
+            self.handoff_pending = True
+        else:
+            self._settle_active()
+
+    def _remember_background(self, message_id: str) -> None:
+        if message_id:
+            self.chat.background_context.append(message_id)
+
+    def _consume_background(self) -> None:
+        if self.wiseman.active_question is None and self.wiseman.pending_questions:
+            self.wiseman.active_question = self.wiseman.pending_questions[0]
+        self.chat.consumed_context.extend(self.chat.background_context)
+        self.chat.background_context.clear()
+
+    def _remember_steering(self, message_id: str) -> None:
+        if message_id:
+            self.chat.steering_messages.append(message_id)
+
+    def _remember_stop(self, message_id: str) -> None:
+        if message_id:
+            self.chat.stop_commands.add(message_id)
+
+    def _settle_active(self) -> None:
+        active_question = self.wiseman.active_question
+        if active_question is None:
+            return
+        self.wiseman.settled_questions.add(active_question)
+        if self.wiseman.pending_questions and self.wiseman.pending_questions[0] == active_question:
+            self.wiseman.pending_questions.pop(0)
+        self.wiseman.active_question = None
+        self.wiseman.turns += 1
+
+    def _has_queued_handoff(self) -> bool:
+        active = self.wiseman.active_question
+        return bool(active and self.wiseman.pending_questions[:1] == [active] and len(self.wiseman.pending_questions) > 1)
+
+    def _record_chat_message(self, edge: str, message_id: str) -> None:
+        if edge == "duplicate-question" and message_id not in self.wiseman.seen_questions:
+            return
+        if edge == "duplicate-stop" and message_id not in self.chat.stop_commands:
+            return
+        kind = {
+            "admit-question": ChatMessageKind.QUESTION,
+            "queue-question": ChatMessageKind.QUESTION,
+            "duplicate-question": ChatMessageKind.QUESTION,
+            "background-chatter": ChatMessageKind.BACKGROUND,
+            "running-background-chatter": ChatMessageKind.BACKGROUND,
+            "steer-active-turn": ChatMessageKind.STEERING,
+            "repeat-steer": ChatMessageKind.STEERING,
+            "stop-preparing": ChatMessageKind.STOP,
+            "stop-running": ChatMessageKind.STOP,
+            "stop-recovering": ChatMessageKind.STOP,
+            "stop-delivering": ChatMessageKind.STOP,
+            "duplicate-stop": ChatMessageKind.STOP,
+        }.get(edge)
+        if kind is not None:
+            self.chat.record(message_id, kind)
+
+
+@dataclass(frozen=True, slots=True)
+class Edge:
+    name: EdgeName
+    source: Vertex
+    target: Vertex
+
+    @property
+    def id(self) -> str:
+        return f"e-{self.name}"
+
+
+EDGES: tuple[tuple[EdgeName, Vertex, Vertex], ...] = (
+    (EdgeName.ADMIT_QUESTION, Vertex.IDLE, Vertex.PREPARING),
+    (EdgeName.DISPATCH_QUEUED, Vertex.IDLE, Vertex.RUNNING),
+    (EdgeName.BACKGROUND_CHATTER, Vertex.IDLE, Vertex.IDLE),
+    (EdgeName.DUPLICATE_QUESTION, Vertex.IDLE, Vertex.IDLE),
+    (EdgeName.IDLE_STOP, Vertex.IDLE, Vertex.IDLE),
+    (EdgeName.CONTEXT_READY, Vertex.PREPARING, Vertex.RUNNING),
+    (EdgeName.PREPARATION_FAILED, Vertex.PREPARING, Vertex.ERROR),
+    (EdgeName.STOP_PREPARING, Vertex.PREPARING, Vertex.CANCELLING),
+    (EdgeName.RUNNING_BACKGROUND_CHATTER, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.STEER_ACTIVE_TURN, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.REPEAT_STEER, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.QUEUE_QUESTION, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.PROGRESS_PREVIEW, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.WORKER_RESTART_RUNNING, Vertex.RUNNING, Vertex.RUNNING),
+    (EdgeName.INFERENCE_COMPLETE, Vertex.RUNNING, Vertex.DELIVERING),
+    (EdgeName.TRANSIENT_FAILURE, Vertex.RUNNING, Vertex.RECOVERING),
+    (EdgeName.PERMANENT_FAILURE, Vertex.RUNNING, Vertex.ERROR),
+    (EdgeName.EXECUTION_UNCERTAIN, Vertex.RUNNING, Vertex.OUTCOME_UNKNOWN),
+    (EdgeName.RESUME_SESSION, Vertex.RECOVERING, Vertex.RUNNING),
+    (EdgeName.RETRY_EXHAUSTED, Vertex.RECOVERING, Vertex.ERROR),
+    (EdgeName.STOP_RUNNING, Vertex.RUNNING, Vertex.CANCELLING),
+    (EdgeName.STOP_RECOVERING, Vertex.RECOVERING, Vertex.CANCELLING),
+    (EdgeName.STOP_DELIVERING, Vertex.DELIVERING, Vertex.CANCELLING),
+    (EdgeName.DUPLICATE_STOP, Vertex.CANCELLING, Vertex.CANCELLING),
+    (EdgeName.WORKER_RESTART_CANCELLING, Vertex.CANCELLING, Vertex.CANCELLING),
+    (EdgeName.COMPLETION_RACE, Vertex.CANCELLING, Vertex.DELIVERING),
+    (EdgeName.STOP_CONFIRMED, Vertex.CANCELLING, Vertex.IDLE),
+    (EdgeName.CANCELLATION_UNKNOWN, Vertex.CANCELLING, Vertex.OUTCOME_UNKNOWN),
+    (EdgeName.DELIVERY_RETRY, Vertex.DELIVERING, Vertex.DELIVERING),
+    (EdgeName.WORKER_RESTART_DELIVERING, Vertex.DELIVERING, Vertex.DELIVERING),
+    (EdgeName.ANSWER_FINALIZED, Vertex.DELIVERING, Vertex.IDLE),
+    (EdgeName.WORKER_RESTART_ERROR, Vertex.ERROR, Vertex.ERROR),
+    (EdgeName.ERROR_FINALIZED, Vertex.ERROR, Vertex.IDLE),
+    (EdgeName.OUTCOME_ESTABLISHED, Vertex.OUTCOME_UNKNOWN, Vertex.ERROR),
+    (EdgeName.IDLE_RETIREMENT, Vertex.IDLE, Vertex.RETIRED),
+    (EdgeName.FIXTURE_RESET, Vertex.RETIRED, Vertex.IDLE),
+)
+
+GRAPH_EDGES: tuple[Edge, ...] = tuple(Edge(EdgeName(name), source, target) for name, source, target in EDGES)
+EDGES_BY_NAME: Mapping[str, Edge] = {edge.name: edge for edge in GRAPH_EDGES}
+STATE_TIMEOUTS: Mapping[Vertex, int] = {
+    Vertex.IDLE: 10,
+    Vertex.PREPARING: 60,
+    Vertex.RUNNING: 60,
+    Vertex.RECOVERING: 60,
+    Vertex.CANCELLING: 30,
+    Vertex.DELIVERING: 60,
+    Vertex.OUTCOME_UNKNOWN: 60,
+    Vertex.ERROR: 30,
+    Vertex.RETIRED: 10,
+}
+EDGE_TIMEOUTS: Mapping[EdgeName, int] = {edge.name: 60 for edge in GRAPH_EDGES}
+
+
+TERMINAL_EDGES = frozenset({EdgeName.STOP_CONFIRMED, EdgeName.ANSWER_FINALIZED, EdgeName.ERROR_FINALIZED})
+IDLE_EMPTY_EDGES = frozenset(
+    {
+        EdgeName.ADMIT_QUESTION,
+        EdgeName.BACKGROUND_CHATTER,
+        EdgeName.DUPLICATE_QUESTION,
+        EdgeName.IDLE_STOP,
+        EdgeName.IDLE_RETIREMENT,
+    }
+)
+
+
+def _edge_actions(edge: Edge) -> list[str]:
+    if edge.name in {EdgeName.ADMIT_QUESTION, EdgeName.QUEUE_QUESTION}:
+        return ["global.pendingQuestions = (global.pendingQuestions || 0) + 1;"]
+    if edge.name in TERMINAL_EDGES:
+        return ["global.pendingQuestions = Math.max(0, (global.pendingQuestions || 0) - 1);"]
+    if edge.name is EdgeName.FIXTURE_RESET:
+        return ["global.pendingQuestions = 0;"]
+    return []
+
+
+def _graph_edge(edge: Edge, action_name: str) -> GraphEdge:
+    graph_edge: GraphEdge = {
+        "id": edge.id,
+        "name": edge.name.value,
+        "sourceVertexId": f"v-{edge.source.value}",
+        "targetVertexId": f"v-{edge.target.value}",
+        "properties": {
+            "action": action_name,
+            "source_state": edge.source.value,
+            "target_state": edge.target.value,
+            "deadline_seconds": EDGE_TIMEOUTS[edge.name],
+        },
+    }
+    if actions := _edge_actions(edge):
+        graph_edge["actions"] = actions
+    if edge.name in IDLE_EMPTY_EDGES:
+        graph_edge["guard"] = "global.pendingQuestions == 0"
+    elif edge.name is EdgeName.DISPATCH_QUEUED:
+        graph_edge["guard"] = "global.pendingQuestions > 0"
+    return graph_edge
+
+
+def model() -> GraphDocument:
+    """Build the complete GraphWalker JSON-shaped document."""
+
+    from tests.graphwalker.edges import EDGE_FUNCTIONS  # noqa: PLC0415
+    from tests.graphwalker.vertices import STATE_FUNCTIONS  # noqa: PLC0415
+
+    vertices: list[GraphVertex] = [
+        {
+            "id": f"v-{vertex.value}",
+            "name": vertex.value,
+            "properties": {
+                "state": vertex.value,
+                "condition": STATE_FUNCTIONS[vertex].__name__,
+                "deadline_seconds": STATE_TIMEOUTS[vertex],
+            },
+        }
+        for vertex in Vertex
+    ]
+    edges = [_graph_edge(edge, EDGE_FUNCTIONS[edge.name].__name__) for edge in GRAPH_EDGES]
+    return {
+        "name": "wiseman-v2",
+        "models": [
+            {
+                "id": "wiseman-v2-lifecycle",
+                "name": "Wiseman V2 lifecycle",
+                "generator": "random(edge_coverage(100))",
+                "startElementId": "v-idle",
+                "properties": {
+                    "model_version": 1,
+                    "initial_state": Vertex.IDLE.value,
+                    "owner": "temporal-thread-workflow",
+                    "harness": "authenticated-discord-http-replay",
+                    "state_data": "ids,owners,pending,histories,cursors,cancellation_targets,failure_log",
+                },
+                "actions": ["global.pendingQuestions = 0;"],
+                "vertices": vertices,
+                "edges": edges,
+            }
+        ],
+    }
