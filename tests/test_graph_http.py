@@ -17,7 +17,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.clients.client_interfaces import ClientMode, ClientSettings
-from app.clients.mock_clients import MockHarnessRunner, mock_container
+from app.clients.mock_clients import MockDiscord, MockHarnessRunner, mock_container
 from app.clients.real_clients import build_clients
 from app.engine import Engine, EngineConfig
 from app.http_api import create_app
@@ -558,12 +558,16 @@ async def test_boundary_tools_and_provider(monkeypatch) -> None:
     for name in ("WISEMAN_PROVIDER_TOKEN", "WISEMAN_MCP_TOKEN"):
         monkeypatch.setenv(name, "secret")
     monkeypatch.setenv("WISEMAN_ALLOW_PROFILE_EDITS", "1")
-    app = create_app(clients=build_clients(ClientMode.MOCK, ClientSettings()))
+    clients = build_clients(ClientMode.MOCK, ClientSettings())
+    app = create_app(clients=clients)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://wiseman") as client:
         headers = {"authorization": "Bearer secret"}
-        requests = (("/v1/tools/describe-image", {"url": "https://cdn.test/a.png"}), ("/v1/tools/send-file", {"thread_id": "thread", "filename": "a.txt", "data_base64": "b2s="}), ("/v1/tools/set-profile", {"username": "Wiseman"}), ("/v1/responses", {"model": "mock", "input": "hi"}))  # noqa: E501 # fmt: skip
+        requests = (("/v1/tools/describe-image", {"url": "https://cdn.test/a.png"}), ("/v1/tools/send-file", {"thread_id": "thread", "filename": "a.txt", "data_base64": "b2s="}), ("/v1/tools/set-profile", {"nickname": "Wiseman"}), ("/v1/responses", {"model": "mock", "input": "hi"}))  # noqa: E501 # fmt: skip
         responses = [await client.post(path, headers=headers, json=payload) for path, payload in requests]
         assert all(response.status_code == 200 for response in responses)
+        assert responses[2].json() == {"status": "updated", "nickname": "Wiseman"}
+        assert isinstance(clients.discord, MockDiscord)
+        assert clients.discord.state.profile["nickname"] == "Wiseman"
         assert responses[-1].content == b':keep\r\nid: provider-1\r\nretry: 1000\r\ndata: {"type":"response.completed","response":{"model":"mock"}}\r\n\r\n'
 
 

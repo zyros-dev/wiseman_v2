@@ -56,7 +56,7 @@ def main() -> int:
     for phase in ("processing", "success", "failure"):
         reactions.add_argument(f"--{phase}")
     profile = commands.add_parser("set-profile")
-    profile.add_argument("--username")
+    profile.add_argument("--nickname", "--username", dest="nickname")
     profile.add_argument("--avatar")
     args = parser.parse_args()
     try:
@@ -69,7 +69,7 @@ def main() -> int:
             result = _post("/tools/set-reactions", {phase: getattr(args, phase) for phase in ("processing", "success", "failure") if getattr(args, phase) is not None})  # noqa: E501
         else:
             avatar = base64.b64encode(_file(args.avatar)[1]).decode() if args.avatar else None
-            result = _post("/tools/set-profile", {key: value for key, value in (("username", args.username), ("avatar_base64", avatar)) if value is not None})
+            result = _post("/tools/set-profile", {key: value for key, value in (("nickname", args.nickname), ("avatar_base64", avatar)) if value is not None})
     except (OSError, RuntimeError, TypeError) as exc:
         print(f"wiseman-discord failed: {exc}", file=sys.stderr)  # noqa: T201
         return 1

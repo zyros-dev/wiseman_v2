@@ -20,7 +20,7 @@ from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from httpx_sse import EventSource
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -83,7 +83,7 @@ class ImageToolRequest(BaseModel):
 
 
 class ProfileRequest(BaseModel):
-    username: str | None = Field(default=None, min_length=2, max_length=32)
+    nickname: str | None = Field(default=None, min_length=2, max_length=32, validation_alias=AliasChoices("nickname", "username"))
     avatar_base64: str | None = None
 
 
@@ -347,13 +347,13 @@ def _register_tools(app: FastAPI, context: _Context) -> None:
         if os.getenv("WISEMAN_ALLOW_PROFILE_EDITS", "0") != "1":
             raise HTTPException(403, "profile edits are disabled")
         avatar = _decode_upload(payload.avatar_base64, "avatar_base64")
-        if payload.username is None and avatar is None:
-            raise HTTPException(422, "provide username or avatar")
+        if payload.nickname is None and avatar is None:
+            raise HTTPException(422, "provide nickname or avatar")
         try:
-            username = await context.clients.discord.set_profile(payload.username, avatar)
+            nickname = await context.clients.discord.set_profile(payload.nickname, avatar)
         except RuntimeError as exc:
             raise HTTPException(503, "Discord profile is unavailable") from exc
-        return {"status": "updated", "username": username}
+        return {"status": "updated", "nickname": nickname}
 
     async def send_file(payload: FileRequest) -> dict[str, object]:
         filename = Path(payload.filename).name

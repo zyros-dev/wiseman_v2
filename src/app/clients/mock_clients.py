@@ -96,13 +96,13 @@ class MockDiscord(DiscordClient):
         self.state.uploads[message_id] = upload
         return DeliveryReceipt(message_id, f"https://discord.test/{channel_id}/{message_id}")
 
-    async def set_profile(self, username: str | None, avatar: bytes | None) -> str:
-        self.state.call("discord", "set_profile", username or "", str(len(avatar or b"")))
-        if username is not None:
-            self.state.profile["username"] = username
+    async def set_profile(self, nickname: str | None, avatar: bytes | None) -> str:
+        self.state.call("discord", "set_profile", nickname or "", str(len(avatar or b"")))
+        if nickname is not None:
+            self.state.profile["nickname"] = nickname
         if avatar is not None:
             self.state.profile["avatar"] = avatar
-        return str(self.state.profile.get("username", "Wiseman"))
+        return str(self.state.profile.get("nickname", "Wiseman"))
 
 
 class MockPrompts(PromptClient):
