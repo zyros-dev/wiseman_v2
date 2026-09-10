@@ -40,6 +40,7 @@ class RealDiscord:
             content or None,
             embeds=[discord.Embed.from_dict(embed)] if embed else [],
             nonce=nonce or secrets.token_hex(8),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         return str(message.id)
 
@@ -67,9 +68,13 @@ class RealDiscord:
     async def edit(self, ref: MessageRef, content: str, *, upload: Upload | None = None) -> None:
         message = (await self.channel(ref.channel_id)).get_partial_message(int(ref.message_id))
         if upload is None:
-            await message.edit(content=content)
+            await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
         else:
-            await message.edit(content=content, attachments=[discord.File(io.BytesIO(upload.data), filename=upload.name)])
+            await message.edit(
+                content=content,
+                attachments=[discord.File(io.BytesIO(upload.data), filename=upload.name)],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def add_reaction(self, ref: MessageRef, emoji: str) -> None:
         await (await self.channel(ref.channel_id)).get_partial_message(int(ref.message_id)).add_reaction(emoji)
@@ -83,7 +88,11 @@ class RealDiscord:
         channel = await self.channel(channel_id)
         if not isinstance(channel, discord.Thread):
             raise TypeError("file delivery requires a Discord thread")
-        message = await channel.send(caption or None, file=discord.File(io.BytesIO(upload.data), filename=upload.name))
+        message = await channel.send(
+            caption or None,
+            file=discord.File(io.BytesIO(upload.data), filename=upload.name),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return DeliveryReceipt(str(message.id), message.jump_url)
 
     async def set_profile(self, nickname: str | None, avatar: bytes | None) -> str:
