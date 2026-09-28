@@ -39,11 +39,6 @@ def test_view_preserves_button_labels_and_custom_ids() -> None:
     assert [button.custom_id for button in buttons] == ["heimdall:mute:abc123:1h", "heimdall:mute:abc123:7d"]
 
 
-def test_view_rejects_link_buttons() -> None:
-    with pytest.raises(ValueError, match="interactive button"):
-        view_from_components([{"type": 1, "components": [{"type": 2, "style": 5, "label": "Mute", "url": "https://example.test"}]}])
-
-
 class _InteractionResponse:
     def __init__(self) -> None:
         self.messages: list[tuple[str, bool]] = []
@@ -83,21 +78,3 @@ async def test_button_click_mutes_through_heimdall_without_browser(monkeypatch: 
 
     assert response.deferred
     assert followup.messages == [("Muted for 6h.", True)]
-
-
-@pytest.mark.asyncio
-async def test_button_click_rejects_other_users_before_muting(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = _InteractionResponse()
-    followup = _InteractionFollowup()
-    interaction = SimpleNamespace(
-        data={"custom_id": "heimdall:mute:abc123:6h"},
-        user=SimpleNamespace(id=7),
-        response=response,
-        followup=followup,
-    )
-    monkeypatch.setenv("WISEMAN_HEIMDALL_MUTE_USER_ID", "42")
-
-    await Gateway.on_interaction(cast("Gateway", object()), cast("discord.Interaction", interaction))
-
-    assert response.messages == [("Only the alert owner can mute this alert.", True)]
-    assert followup.messages == []

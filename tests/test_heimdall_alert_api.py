@@ -10,16 +10,7 @@ from app.http_api import create_app
 
 
 def _payload() -> dict[str, object]:
-    return {
-        "content": "<@42>",
-        "embeds": [{"title": "CRITICAL", "description": "Odin is down", "color": 15_158_332}],
-        "components": [
-            {
-                "type": 1,
-                "components": [{"type": 2, "style": 2, "label": "Mute 1 hour", "custom_id": "heimdall:mute:abc123:1h"}],
-            }
-        ],
-    }
+    return {"content": "<@42>", "embeds": [{"title": "CRITICAL", "description": "Odin is down", "color": 15_158_332}], "components": [{"type": 1, "components": [{"type": 2, "style": 2, "label": "Mute 1 hour", "custom_id": "heimdall:mute:abc123:1h"}]}]}  # noqa: E501 # fmt: skip
 
 
 @pytest.mark.asyncio
