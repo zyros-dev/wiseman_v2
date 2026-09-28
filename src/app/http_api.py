@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from app.models import Event
 
 from app.admission import admitted, normalize_event
+from app.alert_buttons import AlertMessage
 from app.clients.client_interfaces import ClientContainer, ClientMode, ClientSettings
 from app.clients.discord_client import RealDiscord
 from app.clients.real_clients import build_clients
@@ -44,6 +45,7 @@ from app.temporal_runtime import configure_engine
 from app.types import JsonObject
 
 BEARER = HTTPBearer(auto_error=False)
+LOGGER = logging.getLogger("wiseman")
 
 
 @dataclass(slots=True)
@@ -100,6 +102,7 @@ def create_app(clients: ClientContainer | None = None) -> FastAPI:
     app.state.clients = context.clients
     _register_health(app, context)
     _register_replay(app, context)
+    _register_heimdall(app, context)
     _register_provider(app, context)
     _register_tools(app, context)
     return app
@@ -222,6 +225,25 @@ def _register_replay(app: FastAPI, context: _Context) -> None:
     app.add_api_route("/v1/replay/discord", replay, methods=["POST"])
     app.add_api_route("/v1/replay/phoenix/{audit_id}", replay_audit, methods=["POST"])
     app.add_api_route("/v1/discord/events", replay, methods=["POST"])
+
+
+def _register_heimdall(app: FastAPI, context: _Context) -> None:
+    async def alert(
+        payload: AlertMessage,
+        x_heimdall_token: Annotated[str | None, Header()] = None,
+    ) -> dict[str, str]:
+        _auth(context, x_heimdall_token, "WISEMAN_REPLAY_TOKEN", "invalid Heimdall token")
+        channel_id = os.getenv("WISEMAN_HEIMDALL_CHANNEL_ID", "")
+        if not channel_id.isascii() or not channel_id.isdigit():
+            raise HTTPException(503, "Heimdall alert channel is unavailable")
+        try:
+            message_id = await context.bot.send_alert(int(channel_id), payload)
+        except (discord.DiscordException, TypeError, ValueError) as exc:
+            LOGGER.exception("Could not deliver Heimdall alert")
+            raise HTTPException(502, "Discord alert delivery failed") from exc
+        return {"status": "delivered", "message_id": message_id}
+
+    app.add_api_route("/v1/alerts/heimdall", alert, methods=["POST"])
 
 
 def _audit(context: _Context, audit_id: str) -> dict[str, object]:

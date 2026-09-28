@@ -4,14 +4,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import discord
+import httpx
 from prometheus_client import Counter, Gauge
 
 from app.admission import admitted
+from app.alert_buttons import AlertMessage, parse_custom_id, view_from_components
 from app.clients.discord_client import normalize_message
 
 if TYPE_CHECKING:
@@ -54,6 +57,52 @@ class Gateway(discord.Client):
 
     async def on_disconnect(self) -> None:
         DISCORD_CONNECTED.set(0)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        custom_id = interaction.data.get("custom_id") if isinstance(interaction.data, dict) else None
+        button = parse_custom_id(custom_id) if isinstance(custom_id, str) else None
+        if button is None:
+            return
+        permitted_user = os.getenv("WISEMAN_HEIMDALL_MUTE_USER_ID", "")
+        if not permitted_user or str(interaction.user.id) != permitted_user:
+            await interaction.response.send_message("Only the alert owner can mute this alert.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        base_url = os.getenv("WISEMAN_HEIMDALL_URL", "http://heimdall.midgard-apps.svc.cluster.local:9300").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(f"{base_url}/mute/{button.fingerprint}/{button.duration.value}")
+        except httpx.HTTPError:
+            LOGGER.exception("Could not reach Heimdall for alert mute")
+            await interaction.followup.send("Mute failed because Heimdall is unavailable.", ephemeral=True)
+            return
+        if response.status_code == httpx.codes.OK:
+            await interaction.followup.send(f"Muted for {button.duration.value}.", ephemeral=True)
+        elif response.status_code == httpx.codes.CONFLICT:
+            await interaction.followup.send("This alert is no longer active.", ephemeral=True)
+        else:
+            LOGGER.error("Heimdall rejected alert mute with HTTP %s", response.status_code)
+            await interaction.followup.send("Mute failed. The alert was not silenced.", ephemeral=True)
+
+    async def send_alert(self, channel_id: int, message: AlertMessage) -> str:
+        channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            raise TypeError("alert channel is not a text channel or thread")
+        permitted_user = os.getenv("WISEMAN_HEIMDALL_MUTE_USER_ID", "")
+        users = [discord.Object(id=int(permitted_user))] if permitted_user else False
+        content = message.content or None
+        embeds = [discord.Embed.from_dict(embed.model_dump()) for embed in message.embeds]
+        allowed_mentions = discord.AllowedMentions(everyone=False, roles=False, users=users, replied_user=False)
+        if message.components:
+            sent = await channel.send(
+                content,
+                embeds=embeds,
+                view=view_from_components(message.components),
+                allowed_mentions=allowed_mentions,
+            )
+        else:
+            sent = await channel.send(content, embeds=embeds, allowed_mentions=allowed_mentions)
+        return str(sent.id)
 
     async def on_socket_raw_receive(self, payload: str) -> None:
         value: object = json.loads(payload)
