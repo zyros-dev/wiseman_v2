@@ -80,6 +80,13 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app: heimdall
+      ports:
+        - protocol: TCP
+          port: 8080
   egress:
     - to:
         - namespaceSelector: {}
@@ -129,7 +136,18 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: midgard-apps
           podSelector:
-            app: phoenix
+            matchLabels:
+              app: phoenix
       ports:
         - protocol: TCP
           port: 6006
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: midgard-apps
+          podSelector:
+            matchLabels:
+              app: heimdall
+      ports:
+        - protocol: TCP
+          port: 9300

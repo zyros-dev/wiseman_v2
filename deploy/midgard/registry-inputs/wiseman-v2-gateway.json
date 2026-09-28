@@ -29,6 +29,9 @@
     "WISEMAN_ROUTE_INFO": "{\"requested_model\":\"deepseek/deepseek-v4-flash\",\"provider\":\"openrouter\",\"modalities\":\"text -> text\",\"context_window\":\"1048576\",\"input_price\":\"$0.088606/M\",\"output_price\":\"$0.177212/M\",\"cached_price\":\"$0.0177212/M read\",\"vision_assist_model\":\"z-ai/glm-5.3-flash\"}",
     "WISEMAN_DISCORD_ALLOWLIST": "1360157904996536391",
     "WISEMAN_DISCORD_BOT_ID": "1500986927522910238",
+    "WISEMAN_HEIMDALL_CHANNEL_ID": "1479893275044479177",
+    "WISEMAN_HEIMDALL_MUTE_USER_ID": "158797447663976449",
+    "WISEMAN_HEIMDALL_URL": "http://heimdall.midgard-apps.svc.cluster.local:9300",
     "WISEMAN_ALLOW_PROFILE_EDITS": "1",
     "WISEMAN_PROFILE_FILE": "/var/lib/wiseman/profile.json",
     "WISEMAN_AUDIT_DIR": "/var/lib/wiseman/audits"
