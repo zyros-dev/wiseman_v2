@@ -78,6 +78,7 @@ max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
 "sandbox/src/runner/api.py" = ["S603"]
+"deploy/midgard/scheduled-posts/scheduled_post.py" = ["INP001"]  # standalone CronJob script, not a package
 "sandbox/src/runner/jobs.py" = ["BLE001"]
 "src/app/temporal_runtime.py" = ["BLE001", "PLC0415"]
 "src/app/http_api.py" = ["TC001"]

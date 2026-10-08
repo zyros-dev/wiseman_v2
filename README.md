@@ -11,6 +11,7 @@ container with per-user workspaces.
 src/app/http_api.py         canonical Discord/raw-event turn path and Phoenix evidence
 sandbox/src/runner/api.py   authenticated warm runner and workspace materialization
 contracts/                  context schema plus startup/follow-up grammar sources
+deploy/midgard/scheduled-posts/  CronJobs for daily posts (weather, HN, LeetCode, alerts), ported from v1 cron
 docs/                       design and observability contracts
 .gitea/workflows/           strict CI
 ```

@@ -1,0 +1,347 @@
+# Wiseman V2 scheduled posts (ported from v1 Hermes cron, 2026-10-08).
+# Published by .gitea/workflows/release.yml together with the generated
+# wiseman-v2-scheduled-posts ConfigMap holding scheduled_post.py.
+---
+# LeetCode daily problem thread
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiseman-v2-post-leetcode
+  namespace: midgard-apps
+  labels:
+    app: wiseman-v2-scheduled-posts
+spec:
+  schedule: "0 0 * * *"
+  timeZone: Australia/Sydney
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: wiseman-v2-scheduled-posts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: post
+              image: python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+              command: ["python3", "/app/scheduled_post.py", "leetcode"]
+              env:
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: DISCORD_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wiseman-v2-gateway
+                      key: DISCORD_BOT_TOKEN
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: wiseman-v2-scheduled-posts
+---
+# Sydney weather in #wiseman-home
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiseman-v2-post-weather
+  namespace: midgard-apps
+  labels:
+    app: wiseman-v2-scheduled-posts
+spec:
+  schedule: "0 6 * * *"
+  timeZone: Australia/Sydney
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: wiseman-v2-scheduled-posts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: post
+              image: python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+              command: ["python3", "/app/scheduled_post.py", "weather"]
+              env:
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: DISCORD_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wiseman-v2-gateway
+                      key: DISCORD_BOT_TOKEN
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: wiseman-v2-scheduled-posts
+---
+# Hacker News top 15 in #wiseman-home
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiseman-v2-post-hn
+  namespace: midgard-apps
+  labels:
+    app: wiseman-v2-scheduled-posts
+spec:
+  schedule: "0 22 * * *"
+  timeZone: Australia/Sydney
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: wiseman-v2-scheduled-posts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: post
+              image: python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+              command: ["python3", "/app/scheduled_post.py", "hn"]
+              env:
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: DISCORD_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wiseman-v2-gateway
+                      key: DISCORD_BOT_TOKEN
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: wiseman-v2-scheduled-posts
+---
+# ANET 1% drop alert for poggers_fish
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiseman-v2-post-artista
+  namespace: midgard-apps
+  labels:
+    app: wiseman-v2-scheduled-posts
+spec:
+  schedule: "*/10 * * * *"
+  timeZone: Australia/Sydney
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: wiseman-v2-scheduled-posts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: post
+              image: python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+              command: ["python3", "/app/scheduled_post.py", "artista"]
+              env:
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: DISCORD_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wiseman-v2-gateway
+                      key: DISCORD_BOT_TOKEN
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: wiseman-v2-scheduled-posts
+---
+# yearly birthday reminder
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiseman-v2-post-birthday
+  namespace: midgard-apps
+  labels:
+    app: wiseman-v2-scheduled-posts
+spec:
+  schedule: "0 9 7 8 *"
+  timeZone: Australia/Sydney
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: wiseman-v2-scheduled-posts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: post
+              image: python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+              command: ["python3", "/app/scheduled_post.py", "birthday"]
+              env:
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: DISCORD_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wiseman-v2-gateway
+                      key: DISCORD_BOT_TOKEN
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: wiseman-v2-scheduled-posts
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wiseman-v2-scheduled-posts
+  namespace: midgard-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: wiseman-v2-scheduled-posts
+  policyTypes: [Ingress, Egress]
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: TCP
+          port: 443

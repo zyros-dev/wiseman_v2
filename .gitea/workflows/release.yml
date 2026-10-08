@@ -62,6 +62,12 @@ jobs:
             k8s/base/integrations/wiseman-v2/wiseman-v2-secrets.yaml
           cp "$GITHUB_WORKSPACE"/deploy/midgard/network-policies/wiseman-v2.yaml \
             k8s/base/integrations/wiseman-v2/wiseman-v2-network-policy.yaml
+          cp "$GITHUB_WORKSPACE"/deploy/midgard/scheduled-posts/cronjobs.yaml \
+            k8s/base/integrations/wiseman-v2/wiseman-v2-scheduled-posts.yaml
+          {
+            printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: wiseman-v2-scheduled-posts\n  namespace: midgard-apps\ndata:\n  scheduled_post.py: |\n'
+            sed 's/^/    /' "$GITHUB_WORKSPACE"/deploy/midgard/scheduled-posts/scheduled_post.py
+          } > k8s/base/integrations/wiseman-v2/wiseman-v2-scheduled-posts-script.yaml
           registry_container="$(docker create --user root \
             -w /home/opam/workspace registry.odin.home:5000/midgard-dev:latest \
             sh -lc 'dune exec src/app_registry/main.exe')"
